@@ -1,0 +1,33 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# iOS
+phone-app/ios/Pods/
+phone-app/ios/build/
+*.xcworkspace
+!phone-app/ios/ClaudeWearable.xcworkspace
+
+# macOS
+.DS_Store
+
+# Adafruit bundle and firmware (large, can be re-downloaded)
+adafruit-circuitpython-bundle-*/
+*.uf2
+
+# Environment
+.env
+.env.local
+
+# Build
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision

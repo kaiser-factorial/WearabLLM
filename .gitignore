@@ -1,20 +1,41 @@
 # Node
 node_modules/
+**/node_modules/
 npm-debug.log*
 
 # Expo
 .expo/
+**/.expo/
 dist/
+**/dist/
 web-build/
+**/web-build/
 
 # iOS
 phone-app/ios/Pods/
 phone-app/ios/build/
+**/ios/Pods/
+**/ios/build/
 *.xcworkspace
 !phone-app/ios/ClaudeWearable.xcworkspace
 
 # macOS
 .DS_Store
+**/.DS_Store
+Screenshot *.png
+
+# Local Codex/Claude settings
+.claude/
+**/.claude/
+.git.broken-dataless-*/
+*.broken-dataless-*/
+**/.git/
+
+# Local servo-era archive. Several files are macOS/iCloud placeholders in this
+# workspace; keep the folder documented without trying to commit unreadable
+# local artifacts.
+v2_servo_bluefruit/*
+!v2_servo_bluefruit/README.md
 
 # Adafruit bundle and firmware (large, can be re-downloaded)
 adafruit-circuitpython-bundle-*/
