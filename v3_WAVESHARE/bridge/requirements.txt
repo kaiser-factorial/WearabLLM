@@ -1,0 +1,5 @@
+openai>=1.0.0
+
+# Optional local STT fallback:
+# openai-whisper
+# torch

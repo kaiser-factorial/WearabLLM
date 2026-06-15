@@ -1,0 +1,224 @@
+menu "WearabLLM v3"
+
+config WEARABLLM_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Wi-Fi network used by the ESP32-S3 to reach the bridge.
+
+config WEARABLLM_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+
+config WEARABLLM_WIFI_BSSID
+    string "Wi-Fi BSSID/AP MAC (optional)"
+    default ""
+    help
+        Optional access point MAC address, formatted like ca:50:35:23:2b:1f.
+        Leave blank for normal SSID roaming. Set this only when you need the
+        ESP32-S3 to connect to one specific AP that shares the configured SSID.
+
+config WEARABLLM_BRIDGE_URL
+    string "Bridge query URL"
+    default "http://192.168.1.10:8765/v1/query"
+    help
+        Local bridge endpoint that receives audio/wav and returns JSON.
+
+config WEARABLLM_WIFI_CONNECT_TIMEOUT_MS
+    int "Wi-Fi connect wait timeout ms"
+    range 1000 120000
+    default 15000
+    help
+        Maximum time to wait for Wi-Fi before showing an error for one
+        push-to-talk interaction. The station will keep reconnecting in the
+        background.
+
+config WEARABLLM_PTT_GPIO
+    int "Push-to-talk GPIO"
+    default 0
+    help
+        Phase-1 default uses the BOOT button GPIO. Move this to a better free
+        GPIO or an expander-backed user button once the board button map is
+        finalized.
+
+config WEARABLLM_PTT_ACTIVE_LEVEL
+    int "Push-to-talk active level"
+    range 0 1
+    default 0
+    help
+        GPIO level that means the push-to-talk button is held. Use 0 for the
+        BOOT button or a button wired from GPIO to GND with a pull-up. Use 1
+        for a button wired from GPIO to 3V3 with a pull-down.
+
+config WEARABLLM_PTT_DEBOUNCE_MS
+    int "Push-to-talk debounce ms"
+    range 0 250
+    default 35
+    help
+        GPIO level must remain stable for this long before a press/release is
+        accepted. Increase this for noisy external pushbuttons or long
+        perfboard leads; set to 0 to use raw GPIO polling.
+
+choice WEARABLLM_PTT_PULL_MODE
+    prompt "Push-to-talk GPIO pull mode"
+    default WEARABLLM_PTT_PULL_UP
+    help
+        Internal bias for the push-to-talk input. For a simple external button,
+        use pull-up when the button shorts GPIO to GND, or pull-down when it
+        shorts GPIO to 3V3. Use no pull only when the circuit already has an
+        external resistor.
+
+config WEARABLLM_PTT_PULL_NONE
+    bool "No internal pull"
+
+config WEARABLLM_PTT_PULL_UP
+    bool "Internal pull-up"
+
+config WEARABLLM_PTT_PULL_DOWN
+    bool "Internal pull-down"
+
+endchoice
+
+config WEARABLLM_AUDIO_MAX_SECONDS
+    int "Maximum push-to-talk capture seconds"
+    range 1 20
+    default 6
+    help
+        Maximum WAV duration captured while the push-to-talk button is held.
+        Keeps accidental long holds from creating very large bridge uploads.
+
+config WEARABLLM_AUDIO_MIN_CAPTURE_MS
+    int "Minimum push-to-talk capture ms"
+    range 0 2000
+    default 250
+    help
+        Minimum WAV duration captured after the button is pressed, even if the
+        button is released immediately. This debounces taps and avoids empty
+        or too-short WAV uploads during first hardware bring-up.
+
+config WEARABLLM_LED_GPIO
+    int "RGB ring data GPIO"
+    default 38
+    help
+        Waveshare demo defines the 7-LED WS2812 ring on GPIO38.
+
+config WEARABLLM_LED_COUNT
+    int "RGB ring LED count"
+    default 7
+
+config WEARABLLM_LED_SELF_TEST_ON_BOOT
+    bool "Run RGB ring command self-test on boot"
+    default n
+    help
+        Runs the 9 WearabLLM command animations once during boot, before Wi-Fi
+        and audio bring-up. Useful for checking the ring without bridge/API
+        dependencies. Leave disabled for normal interaction tests.
+
+config WEARABLLM_AUDIO_OUT_ENABLED
+    bool "Enable ES8311 speaker output"
+    default n
+    help
+        Enables the Waveshare board speaker codec for short earcon bring-up.
+        Leave disabled until microphone capture and the bridge loop are stable.
+
+config WEARABLLM_AUDIO_OUT_VOLUME
+    int "Speaker output volume"
+    range 0 100
+    default 45
+    depends on WEARABLLM_AUDIO_OUT_ENABLED
+    help
+        Initial ES8311 output volume used for earcon/TTS bring-up.
+
+config WEARABLLM_TTS_ENABLED
+    bool "Fetch and play bridge TTS WAV"
+    default n
+    depends on WEARABLLM_AUDIO_OUT_ENABLED
+    help
+        Experimental phase-2 path. After a bridge response, POST the reply text
+        to the TTS URL, download a small audio/wav response, and play it through
+        the ES8311 speaker path. Keep disabled until speaker output is verified.
+
+config WEARABLLM_TTS_URL
+    string "Bridge TTS URL"
+    default "http://192.168.1.10:8765/v1/tts"
+    depends on WEARABLLM_TTS_ENABLED
+    help
+        Local bridge endpoint that receives JSON {"text": "..."} and returns
+        audio/wav. Usually this is the same host/port as WEARABLLM_BRIDGE_URL.
+
+config WEARABLLM_TTS_MAX_BYTES
+    int "Maximum TTS WAV bytes"
+    default 131072
+    depends on WEARABLLM_TTS_ENABLED
+    help
+        Maximum audio/wav response to buffer in RAM for phase-2 playback.
+
+config WEARABLLM_DISPLAY_ENABLED
+    bool "Enable SPI TFT display"
+    default n
+    help
+        Keep disabled until the LED/mic/bridge loop is verified and the
+        perfboard TFT wiring has passed continuity checks.
+
+config WEARABLLM_DISPLAY_SELF_TEST_ON_BOOT
+    bool "Run TFT display wiring self-test on boot"
+    default n
+    depends on WEARABLLM_DISPLAY_ENABLED
+    help
+        Draws color bands and the configured TFT pin map for a short boot-time
+        wiring check, then returns to the normal READY screen.
+
+config WEARABLLM_TFT_SCLK_GPIO
+    int "TFT SCLK GPIO"
+    default 4
+
+config WEARABLLM_TFT_MOSI_GPIO
+    int "TFT MOSI GPIO"
+    default 9
+
+config WEARABLLM_TFT_CS_GPIO
+    int "TFT CS GPIO"
+    default 3
+
+config WEARABLLM_TFT_DC_GPIO
+    int "TFT DC GPIO"
+    default 7
+
+config WEARABLLM_TFT_RST_GPIO
+    int "TFT RST GPIO"
+    default 6
+
+config WEARABLLM_TFT_BL_GPIO
+    int "TFT backlight GPIO"
+    default 5
+    help
+        If the backlight is tied directly to 3V3, leave display disabled or
+        ignore this value in the eventual driver.
+
+config WEARABLLM_TFT_WIDTH
+    int "TFT width"
+    default 128
+
+config WEARABLLM_TFT_HEIGHT
+    int "TFT height"
+    default 160
+
+config WEARABLLM_TFT_X_OFFSET
+    int "TFT X offset"
+    default 0
+    help
+        Some ST7735 breakout variants need a 1 or 2 pixel column offset.
+
+config WEARABLLM_TFT_Y_OFFSET
+    int "TFT Y offset"
+    default 0
+    help
+        Some ST7735 breakout variants need a row offset, often 0, 1, or 24.
+
+config WEARABLLM_TFT_INVERT_COLORS
+    bool "Invert TFT colors"
+    default y
+    help
+        Many ST7735 modules look correct with display inversion enabled.
+
+endmenu

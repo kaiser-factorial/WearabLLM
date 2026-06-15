@@ -1,0 +1,20 @@
+{
+  "command": "GC",
+  "reply": "Yes, that wiring direction makes sense.",
+  "transcript": "Does this wiring direction make sense?",
+  "audio_bytes": 123456,
+  "saved_wav": null,
+  "wav_info": {
+    "valid": true,
+    "sample_rate": 16000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "frames": 32000,
+    "duration_ms": 2000,
+    "peak_abs": 1200,
+    "peak_dbfs": -28.7,
+    "rms": 480.4,
+    "rms_dbfs": -36.7,
+    "appears_silent": false
+  }
+}

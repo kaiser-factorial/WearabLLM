@@ -52,3 +52,16 @@ adafruit-circuitpython-bundle-*/
 *.p12
 *.key
 *.mobileprovision
+
+# v3 ESP-IDF / Python generated artifacts
+v3_WAVESHARE/firmware/build/
+v3_WAVESHARE/firmware/build_*/
+v3_WAVESHARE/firmware/managed_components/
+v3_WAVESHARE/firmware/sdkconfig
+v3_WAVESHARE/firmware/sdkconfig.old
+v3_WAVESHARE/firmware/sdkconfig.bak
+v3_WAVESHARE/bridge/captures/
+v3_WAVESHARE/logs/
+v3_WAVESHARE/bridge/__pycache__/
+v3_WAVESHARE/bridge/*.pyc
+v3_WAVESHARE/scripts/__pycache__/

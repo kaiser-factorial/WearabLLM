@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+  <defs>
+    <style>
+      .title { font: 700 32px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172026; }
+      .subtitle { font: 18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #45525d; }
+      .label { font: 700 15px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2933; }
+      .small { font: 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #394854; }
+      .tiny { font: 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #394854; }
+      .pinText { font: 700 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; fill: #13212a; }
+      .tftPin { font: 700 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; fill: #13212a; }
+      .board { fill: #e8f4f8; stroke: #6f8794; stroke-width: 2; }
+      .perf { fill: #f6f1df; stroke: #9b8a5e; stroke-width: 2; }
+      .hole { fill: #fbf8ec; stroke: #c9b981; stroke-width: 1.2; }
+      .socket { fill: #2d343b; stroke: #111820; stroke-width: 2; }
+      .socketHole { fill: #111820; stroke: #7b8790; stroke-width: 1; }
+      .tft { fill: #263238; stroke: #111820; stroke-width: 2; }
+      .screen { fill: #101820; stroke: #4fd1c5; stroke-width: 3; }
+      .noteBox { fill: #fff8e5; stroke: #d49b31; stroke-width: 2; }
+      .warnBox { fill: #fff0f0; stroke: #d55c5c; stroke-width: 2; }
+      .wirePower { fill: none; stroke: #d62828; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+      .wireGround { fill: none; stroke: #1f2937; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+      .wireClock { fill: none; stroke: #2563eb; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+      .wireData { fill: none; stroke: #059669; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+      .wireCtrl { fill: none; stroke: #7c3aed; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+      .wireBacklight { fill: none; stroke: #f59e0b; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+      .unused { fill: #d5dde3; stroke: #9aa8b2; stroke-width: 1; }
+      .used { fill: #ffffff; stroke: #263238; stroke-width: 2; }
+      .powerPin { fill: #ffd6d6; stroke: #d62828; stroke-width: 2; }
+      .gndPin { fill: #d7dce2; stroke: #1f2937; stroke-width: 2; }
+      .spiPin { fill: #dff7ec; stroke: #059669; stroke-width: 2; }
+      .clockPin { fill: #dbeafe; stroke: #2563eb; stroke-width: 2; }
+      .ctrlPin { fill: #eee7ff; stroke: #7c3aed; stroke-width: 2; }
+      .blPin { fill: #fff0c2; stroke: #f59e0b; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="900" fill="#f8fafc"/>
+
+  <text x="70" y="62" class="title">Perfboard adapter for SPI TFT to Waveshare ESP32-S3-AUDIO-Board</text>
+  <text x="70" y="92" class="subtitle">Top view, USB-C at top and 2x10 Waveshare header at bottom like your photo. Follow the printed pin labels on your TFT.</text>
+
+  <rect x="50" y="125" width="270" height="500" rx="18" class="board"/>
+  <text x="75" y="160" class="label">Waveshare board header</text>
+  <text x="75" y="184" class="small">2x10 socket on adapter underside</text>
+  <text x="75" y="210" class="tiny">Use this orientation only if the board is facing you like the photo.</text>
+
+  <rect x="92" y="300" width="190" height="86" rx="8" class="socket"/>
+
+  <!-- Header pins, left to right as visible in the user's photo -->
+  <g id="waveshare-header">
+    <!-- Top row -->
+    <circle id="W_IO7" cx="112" cy="322" r="13" class="ctrlPin"/><text x="101" y="326" class="pinText">IO7</text>
+    <circle id="W_IO6" cx="132" cy="322" r="13" class="ctrlPin"/><text x="121" y="326" class="pinText">IO6</text>
+    <circle id="W_IO5" cx="152" cy="322" r="13" class="blPin"/><text x="141" y="326" class="pinText">IO5</text>
+    <circle id="W_IO4" cx="172" cy="322" r="13" class="clockPin"/><text x="161" y="326" class="pinText">IO4</text>
+    <circle id="W_IO3" cx="192" cy="322" r="13" class="ctrlPin"/><text x="181" y="326" class="pinText">IO3</text>
+    <circle cx="212" cy="322" r="13" class="unused"/><text x="201" y="326" class="pinText">IO2</text>
+    <circle cx="232" cy="322" r="13" class="unused"/><text x="221" y="326" class="pinText">IO1</text>
+    <circle cx="252" cy="322" r="13" class="gndPin"/><text x="241" y="326" class="pinText">GND</text>
+    <circle cx="272" cy="322" r="13" class="gndPin"/><text x="261" y="326" class="pinText">GND</text>
+    <circle cx="292" cy="322" r="13" class="unused"/><text x="285" y="326" class="pinText">5V</text>
+    <!-- Bottom row -->
+    <circle cx="112" cy="364" r="13" class="unused"/><text x="101" y="368" class="pinText">EX3</text>
+    <circle cx="132" cy="364" r="13" class="unused"/><text x="121" y="368" class="pinText">EX2</text>
+    <circle cx="152" cy="364" r="13" class="unused"/><text x="141" y="368" class="pinText">EX1</text>
+    <circle id="W_IO9" cx="172" cy="364" r="13" class="spiPin"/><text x="161" y="368" class="pinText">IO9</text>
+    <circle cx="192" cy="364" r="13" class="unused"/><text x="181" y="368" class="pinText">IO0</text>
+    <circle cx="212" cy="364" r="13" class="unused"/><text x="204" y="368" class="pinText">SDA</text>
+    <circle cx="232" cy="364" r="13" class="unused"/><text x="224" y="368" class="pinText">SCL</text>
+    <circle id="W_GND" cx="252" cy="364" r="13" class="gndPin"/><text x="241" y="368" class="pinText">GND</text>
+    <circle cx="272" cy="364" r="13" class="unused"/><text x="265" y="368" class="pinText">5V</text>
+    <circle id="W_3V3" cx="292" cy="364" r="13" class="powerPin"/><text x="281" y="368" class="pinText">3V3</text>
+  </g>
+
+  <text x="82" y="430" class="small">Used pins:</text>
+  <text x="82" y="454" class="tiny">GPIO3 CS, GPIO4 SCK, GPIO5 BL, GPIO6 RST, GPIO7 DC, GPIO9 MOSI</text>
+  <text x="82" y="476" class="tiny">3V3 and GND from the right side of the bottom row</text>
+
+  <rect x="405" y="135" width="560" height="620" rx="18" class="perf"/>
+  <text x="440" y="170" class="label">Small perfboard adapter</text>
+  <text x="440" y="194" class="small">Solder sockets on top, route short insulated jumpers or solder bridges underneath.</text>
+
+  <!-- Perfboard hole grid -->
+  <g opacity="0.85">
+    <circle cx="445" cy="235" r="5" class="hole"/><circle cx="475" cy="235" r="5" class="hole"/><circle cx="505" cy="235" r="5" class="hole"/><circle cx="535" cy="235" r="5" class="hole"/><circle cx="565" cy="235" r="5" class="hole"/><circle cx="595" cy="235" r="5" class="hole"/><circle cx="625" cy="235" r="5" class="hole"/><circle cx="655" cy="235" r="5" class="hole"/><circle cx="685" cy="235" r="5" class="hole"/><circle cx="715" cy="235" r="5" class="hole"/><circle cx="745" cy="235" r="5" class="hole"/><circle cx="775" cy="235" r="5" class="hole"/><circle cx="805" cy="235" r="5" class="hole"/><circle cx="835" cy="235" r="5" class="hole"/><circle cx="865" cy="235" r="5" class="hole"/><circle cx="895" cy="235" r="5" class="hole"/><circle cx="925" cy="235" r="5" class="hole"/>
+    <circle cx="445" cy="265" r="5" class="hole"/><circle cx="475" cy="265" r="5" class="hole"/><circle cx="505" cy="265" r="5" class="hole"/><circle cx="535" cy="265" r="5" class="hole"/><circle cx="565" cy="265" r="5" class="hole"/><circle cx="595" cy="265" r="5" class="hole"/><circle cx="625" cy="265" r="5" class="hole"/><circle cx="655" cy="265" r="5" class="hole"/><circle cx="685" cy="265" r="5" class="hole"/><circle cx="715" cy="265" r="5" class="hole"/><circle cx="745" cy="265" r="5" class="hole"/><circle cx="775" cy="265" r="5" class="hole"/><circle cx="805" cy="265" r="5" class="hole"/><circle cx="835" cy="265" r="5" class="hole"/><circle cx="865" cy="265" r="5" class="hole"/><circle cx="895" cy="265" r="5" class="hole"/><circle cx="925" cy="265" r="5" class="hole"/>
+    <circle cx="445" cy="295" r="5" class="hole"/><circle cx="475" cy="295" r="5" class="hole"/><circle cx="505" cy="295" r="5" class="hole"/><circle cx="535" cy="295" r="5" class="hole"/><circle cx="565" cy="295" r="5" class="hole"/><circle cx="595" cy="295" r="5" class="hole"/><circle cx="625" cy="295" r="5" class="hole"/><circle cx="655" cy="295" r="5" class="hole"/><circle cx="685" cy="295" r="5" class="hole"/><circle cx="715" cy="295" r="5" class="hole"/><circle cx="745" cy="295" r="5" class="hole"/><circle cx="775" cy="295" r="5" class="hole"/><circle cx="805" cy="295" r="5" class="hole"/><circle cx="835" cy="295" r="5" class="hole"/><circle cx="865" cy="295" r="5" class="hole"/><circle cx="895" cy="295" r="5" class="hole"/><circle cx="925" cy="295" r="5" class="hole"/>
+    <circle cx="445" cy="325" r="5" class="hole"/><circle cx="475" cy="325" r="5" class="hole"/><circle cx="505" cy="325" r="5" class="hole"/><circle cx="535" cy="325" r="5" class="hole"/><circle cx="565" cy="325" r="5" class="hole"/><circle cx="595" cy="325" r="5" class="hole"/><circle cx="625" cy="325" r="5" class="hole"/><circle cx="655" cy="325" r="5" class="hole"/><circle cx="685" cy="325" r="5" class="hole"/><circle cx="715" cy="325" r="5" class="hole"/><circle cx="745" cy="325" r="5" class="hole"/><circle cx="775" cy="325" r="5" class="hole"/><circle cx="805" cy="325" r="5" class="hole"/><circle cx="835" cy="325" r="5" class="hole"/><circle cx="865" cy="325" r="5" class="hole"/><circle cx="895" cy="325" r="5" class="hole"/><circle cx="925" cy="325" r="5" class="hole"/>
+    <circle cx="445" cy="355" r="5" class="hole"/><circle cx="475" cy="355" r="5" class="hole"/><circle cx="505" cy="355" r="5" class="hole"/><circle cx="535" cy="355" r="5" class="hole"/><circle cx="565" cy="355" r="5" class="hole"/><circle cx="595" cy="355" r="5" class="hole"/><circle cx="625" cy="355" r="5" class="hole"/><circle cx="655" cy="355" r="5" class="hole"/><circle cx="685" cy="355" r="5" class="hole"/><circle cx="715" cy="355" r="5" class="hole"/><circle cx="745" cy="355" r="5" class="hole"/><circle cx="775" cy="355" r="5" class="hole"/><circle cx="805" cy="355" r="5" class="hole"/><circle cx="835" cy="355" r="5" class="hole"/><circle cx="865" cy="355" r="5" class="hole"/><circle cx="895" cy="355" r="5" class="hole"/><circle cx="925" cy="355" r="5" class="hole"/>
+    <circle cx="445" cy="385" r="5" class="hole"/><circle cx="475" cy="385" r="5" class="hole"/><circle cx="505" cy="385" r="5" class="hole"/><circle cx="535" cy="385" r="5" class="hole"/><circle cx="565" cy="385" r="5" class="hole"/><circle cx="595" cy="385" r="5" class="hole"/><circle cx="625" cy="385" r="5" class="hole"/><circle cx="655" cy="385" r="5" class="hole"/><circle cx="685" cy="385" r="5" class="hole"/><circle cx="715" cy="385" r="5" class="hole"/><circle cx="745" cy="385" r="5" class="hole"/><circle cx="775" cy="385" r="5" class="hole"/><circle cx="805" cy="385" r="5" class="hole"/><circle cx="835" cy="385" r="5" class="hole"/><circle cx="865" cy="385" r="5" class="hole"/><circle cx="895" cy="385" r="5" class="hole"/><circle cx="925" cy="385" r="5" class="hole"/>
+    <circle cx="445" cy="415" r="5" class="hole"/><circle cx="475" cy="415" r="5" class="hole"/><circle cx="505" cy="415" r="5" class="hole"/><circle cx="535" cy="415" r="5" class="hole"/><circle cx="565" cy="415" r="5" class="hole"/><circle cx="595" cy="415" r="5" class="hole"/><circle cx="625" cy="415" r="5" class="hole"/><circle cx="655" cy="415" r="5" class="hole"/><circle cx="685" cy="415" r="5" class="hole"/><circle cx="715" cy="415" r="5" class="hole"/><circle cx="745" cy="415" r="5" class="hole"/><circle cx="775" cy="415" r="5" class="hole"/><circle cx="805" cy="415" r="5" class="hole"/><circle cx="835" cy="415" r="5" class="hole"/><circle cx="865" cy="415" r="5" class="hole"/><circle cx="895" cy="415" r="5" class="hole"/><circle cx="925" cy="415" r="5" class="hole"/>
+    <circle cx="445" cy="445" r="5" class="hole"/><circle cx="475" cy="445" r="5" class="hole"/><circle cx="505" cy="445" r="5" class="hole"/><circle cx="535" cy="445" r="5" class="hole"/><circle cx="565" cy="445" r="5" class="hole"/><circle cx="595" cy="445" r="5" class="hole"/><circle cx="625" cy="445" r="5" class="hole"/><circle cx="655" cy="445" r="5" class="hole"/><circle cx="685" cy="445" r="5" class="hole"/><circle cx="715" cy="445" r="5" class="hole"/><circle cx="745" cy="445" r="5" class="hole"/><circle cx="775" cy="445" r="5" class="hole"/><circle cx="805" cy="445" r="5" class="hole"/><circle cx="835" cy="445" r="5" class="hole"/><circle cx="865" cy="445" r="5" class="hole"/><circle cx="895" cy="445" r="5" class="hole"/><circle cx="925" cy="445" r="5" class="hole"/>
+    <circle cx="445" cy="475" r="5" class="hole"/><circle cx="475" cy="475" r="5" class="hole"/><circle cx="505" cy="475" r="5" class="hole"/><circle cx="535" cy="475" r="5" class="hole"/><circle cx="565" cy="475" r="5" class="hole"/><circle cx="595" cy="475" r="5" class="hole"/><circle cx="625" cy="475" r="5" class="hole"/><circle cx="655" cy="475" r="5" class="hole"/><circle cx="685" cy="475" r="5" class="hole"/><circle cx="715" cy="475" r="5" class="hole"/><circle cx="745" cy="475" r="5" class="hole"/><circle cx="775" cy="475" r="5" class="hole"/><circle cx="805" cy="475" r="5" class="hole"/><circle cx="835" cy="475" r="5" class="hole"/><circle cx="865" cy="475" r="5" class="hole"/><circle cx="895" cy="475" r="5" class="hole"/><circle cx="925" cy="475" r="5" class="hole"/>
+    <circle cx="445" cy="505" r="5" class="hole"/><circle cx="475" cy="505" r="5" class="hole"/><circle cx="505" cy="505" r="5" class="hole"/><circle cx="535" cy="505" r="5" class="hole"/><circle cx="565" cy="505" r="5" class="hole"/><circle cx="595" cy="505" r="5" class="hole"/><circle cx="625" cy="505" r="5" class="hole"/><circle cx="655" cy="505" r="5" class="hole"/><circle cx="685" cy="505" r="5" class="hole"/><circle cx="715" cy="505" r="5" class="hole"/><circle cx="745" cy="505" r="5" class="hole"/><circle cx="775" cy="505" r="5" class="hole"/><circle cx="805" cy="505" r="5" class="hole"/><circle cx="835" cy="505" r="5" class="hole"/><circle cx="865" cy="505" r="5" class="hole"/><circle cx="895" cy="505" r="5" class="hole"/><circle cx="925" cy="505" r="5" class="hole"/>
+  </g>
+
+  <!-- Suggested socket outlines on the perfboard -->
+  <rect x="460" y="545" width="240" height="88" rx="9" class="socket"/>
+  <text x="480" y="530" class="small">2x10 female socket to Waveshare</text>
+  <text x="480" y="654" class="tiny">Mount on bottom side if this board plugs down onto the Waveshare header.</text>
+  <rect x="790" y="260" width="82" height="260" rx="9" class="socket"/>
+  <text x="762" y="242" class="small">1x8 female socket for TFT</text>
+  <text x="748" y="540" class="tiny">Place the TFT socket where the display clears the Waveshare board.</text>
+
+  <rect x="1040" y="175" width="250" height="410" rx="18" class="tft"/>
+  <text x="1064" y="210" class="label" fill="#ffffff">SPI TFT breakout</text>
+  <rect x="1078" y="236" width="172" height="260" rx="8" class="screen"/>
+  <text x="1110" y="372" class="small" fill="#b2f5ea">80 x 160</text>
+  <text x="1112" y="396" class="small" fill="#b2f5ea">ST7735S</text>
+
+  <!-- TFT pins -->
+  <g id="tft-header">
+    <circle id="T_GND" cx="1025" cy="250" r="13" class="gndPin"/><text x="970" y="255" class="tftPin">GND</text>
+    <circle id="T_VCC" cx="1025" cy="290" r="13" class="powerPin"/><text x="970" y="295" class="tftPin">VCC</text>
+    <circle id="T_SCL" cx="1025" cy="330" r="13" class="clockPin"/><text x="970" y="335" class="tftPin">SCL</text>
+    <circle id="T_SDA" cx="1025" cy="370" r="13" class="spiPin"/><text x="970" y="375" class="tftPin">SDA</text>
+    <circle id="T_RES" cx="1025" cy="410" r="13" class="ctrlPin"/><text x="970" y="415" class="tftPin">RES</text>
+    <circle id="T_DC" cx="1025" cy="450" r="13" class="ctrlPin"/><text x="978" y="455" class="tftPin">DC</text>
+    <circle id="T_CS" cx="1025" cy="490" r="13" class="ctrlPin"/><text x="978" y="495" class="tftPin">CS</text>
+    <circle id="T_BLK" cx="1025" cy="530" r="13" class="blPin"/><text x="970" y="535" class="tftPin">BLK</text>
+  </g>
+
+  <!-- Wires from Waveshare header to perfboard socket area -->
+  <path class="wireCtrl" d="M112 322 C260 240, 430 245, 790 450 C835 470, 930 480, 1025 450"/>
+  <path class="wireCtrl" d="M132 322 C300 255, 450 285, 790 410 C855 435, 940 420, 1025 410"/>
+  <path class="wireBacklight" d="M152 322 C320 275, 510 300, 790 530 C875 590, 950 560, 1025 530"/>
+  <path class="wireClock" d="M172 322 C330 300, 540 330, 790 330 C875 330, 940 330, 1025 330"/>
+  <path class="wireCtrl" d="M192 322 C320 345, 515 385, 790 490 C870 520, 945 510, 1025 490"/>
+  <path class="wireData" d="M172 364 C340 380, 540 360, 790 370 C880 375, 950 372, 1025 370"/>
+  <path class="wireGround" d="M252 364 C340 470, 520 520, 790 250 C865 175, 945 225, 1025 250"/>
+  <path class="wirePower" d="M292 364 C385 485, 580 555, 790 290 C865 190, 945 260, 1025 290"/>
+
+  <!-- Endpoint labels -->
+  <g>
+    <rect x="350" y="690" width="690" height="48" rx="8" class="noteBox"/>
+    <text x="370" y="720" class="small">Suggested build: solder a 2x10 female socket for the Waveshare side and a 1x8 female socket for the TFT side, then route these 8 connections under the perfboard.</text>
+  </g>
+
+  <g transform="translate(70 670)">
+    <rect width="270" height="155" rx="10" class="warnBox"/>
+    <text x="18" y="32" class="label">Do not direct-insert</text>
+    <text x="18" y="60" class="small">Your TFT power pins do not line up</text>
+    <text x="18" y="82" class="small">with the Waveshare header.</text>
+    <text x="18" y="112" class="small">Check continuity with power off</text>
+    <text x="18" y="134" class="small">before plugging into USB.</text>
+  </g>
+
+  <g transform="translate(1080 625)">
+    <rect width="250" height="200" rx="10" fill="#eef7ff" stroke="#6aa1c9" stroke-width="2"/>
+    <text x="18" y="32" class="label">Pin map</text>
+    <text x="18" y="62" class="tiny">TFT VCC  -> 3V3</text>
+    <text x="18" y="84" class="tiny">TFT GND  -> GND</text>
+    <text x="18" y="106" class="tiny">TFT SCL  -> GPIO4</text>
+    <text x="18" y="128" class="tiny">TFT SDA  -> GPIO9</text>
+    <text x="18" y="150" class="tiny">TFT RES  -> GPIO6</text>
+    <text x="18" y="172" class="tiny">TFT DC/CS/BLK -> GPIO7/3/5</text>
+  </g>
+
+  <g transform="translate(415 790)">
+    <line x1="0" y1="0" x2="45" y2="0" class="wirePower"/><text x="58" y="5" class="tiny">3V3</text>
+    <line x1="120" y1="0" x2="165" y2="0" class="wireGround"/><text x="178" y="5" class="tiny">GND</text>
+    <line x1="235" y1="0" x2="280" y2="0" class="wireClock"/><text x="293" y="5" class="tiny">SCK</text>
+    <line x1="350" y1="0" x2="395" y2="0" class="wireData"/><text x="408" y="5" class="tiny">MOSI</text>
+    <line x1="465" y1="0" x2="510" y2="0" class="wireCtrl"/><text x="523" y="5" class="tiny">CS/DC/RST</text>
+    <line x1="610" y1="0" x2="655" y2="0" class="wireBacklight"/><text x="668" y="5" class="tiny">BL</text>
+  </g>
+</svg>
