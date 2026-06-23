@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import re
 from pathlib import Path
@@ -32,12 +31,11 @@ def read(path: Path) -> str:
 
 
 def load_bridge_commands() -> list[str]:
-    spec = importlib.util.spec_from_file_location("wearabllm_bridge_protocol_check", BRIDGE_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot import bridge module from {BRIDGE_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return list(module.LED_COMMANDS.keys())
+    text = read(BRIDGE_PATH)
+    match = re.search(r"LED_COMMANDS\s*=\s*\{(.*?)\n\}", text, flags=re.DOTALL)
+    if not match:
+        raise RuntimeError(f"Cannot find LED_COMMANDS in {BRIDGE_PATH}")
+    return re.findall(r'^\s*"([A-Z]{2})"\s*:', match.group(1), flags=re.MULTILINE)
 
 
 def parse_app_commands() -> list[str]:

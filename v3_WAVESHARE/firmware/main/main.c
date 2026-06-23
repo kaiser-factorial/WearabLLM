@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,9 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
+#include "esp_wn_iface.h"
+#include "esp_wn_models.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -19,7 +23,10 @@
 #include "led_strip.h"
 #include "nvs_flash.h"
 #include "wearabllm_audio.h"
+#include "model_path.h"
 #include "wearabllm_display.h"
+#include "wearabllm_openai.h"
+#include "wearabllm_transcript_log.h"
 
 static const char *TAG = "wearabllm";
 
@@ -79,13 +86,47 @@ typedef struct {
 
 static EventGroupHandle_t s_wifi_events;
 static led_strip_handle_t s_led_strip;
+static srmodel_list_t *s_sr_models;
+static const esp_wn_iface_t *s_wakenet;
+static model_iface_data_t *s_wakenet_data;
+static int16_t *s_wakenet_samples;
+static int s_wakenet_chunk_frames;
 
 static const rgb_t COLOR_IDLE = {0, 0, 36};
-static const rgb_t COLOR_LISTENING = {70, 70, 70};
-static const rgb_t COLOR_THINKING = {70, 45, 0};
+static const rgb_t COLOR_LISTENING = {24, 24, 24};
+static const rgb_t COLOR_THINKING = {80, 80, 80};
 static const rgb_t COLOR_ERROR = {90, 0, 0};
 static const rgb_t COLOR_GREEN = {0, 80, 0};
 static const rgb_t COLOR_RED = {90, 0, 0};
+
+static esp_err_t wake_word_init(void)
+{
+    s_sr_models = esp_srmodel_init("model");
+    ESP_RETURN_ON_FALSE(s_sr_models, ESP_FAIL, TAG, "wake model partition unavailable");
+    char *model_name = esp_srmodel_filter(s_sr_models, ESP_WN_PREFIX, "hiesp");
+    ESP_RETURN_ON_FALSE(model_name, ESP_ERR_NOT_FOUND, TAG, "Hi ESP model unavailable");
+    s_wakenet = esp_wn_handle_from_name(model_name);
+    ESP_RETURN_ON_FALSE(s_wakenet, ESP_FAIL, TAG, "WakeNet interface unavailable");
+    s_wakenet_data = s_wakenet->create(model_name, DET_MODE_90);
+    ESP_RETURN_ON_FALSE(s_wakenet_data, ESP_FAIL, TAG, "WakeNet model creation failed");
+    s_wakenet_chunk_frames = s_wakenet->get_samp_chunksize(s_wakenet_data);
+    ESP_RETURN_ON_FALSE(s_wakenet_chunk_frames > 0, ESP_FAIL, TAG, "invalid WakeNet chunk size");
+    s_wakenet_samples = calloc((size_t)s_wakenet_chunk_frames, sizeof(int16_t));
+    ESP_RETURN_ON_FALSE(s_wakenet_samples, ESP_ERR_NO_MEM, TAG, "WakeNet audio allocation failed");
+    ESP_LOGI(TAG, "wake word ready: Hi ESP, chunk_frames=%d", s_wakenet_chunk_frames);
+    return ESP_OK;
+}
+
+static bool wake_word_poll(void)
+{
+    if (!s_wakenet_data || !s_wakenet_samples) return false;
+    esp_err_t err = wearabllm_audio_read_mono(s_wakenet_samples, (size_t)s_wakenet_chunk_frames);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wake audio read failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return s_wakenet->detect(s_wakenet_data, s_wakenet_samples) == WAKENET_DETECTED;
+}
 static const rgb_t COLOR_YELLOW = {90, 55, 0};
 static const rgb_t COLOR_BLUE = {0, 25, 90};
 static const rgb_t COLOR_PURPLE = {55, 0, 80};
@@ -109,7 +150,8 @@ static void led_set_all(rgb_t color)
     }
 
     for (int i = 0; i < CONFIG_WEARABLLM_LED_COUNT; i++) {
-        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, color.r, color.g, color.b));
+        // led_strip 2.5.x packs GRB internally; this board's LEDs expect RGB bytes.
+        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, color.g, color.r, color.b));
     }
     ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
 }
@@ -127,7 +169,7 @@ static void led_set_pixel(int index, rgb_t color)
     if (!s_led_strip || index < 0 || index >= CONFIG_WEARABLLM_LED_COUNT) {
         return;
     }
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, index, color.r, color.g, color.b));
+    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, index, color.g, color.r, color.b));
 }
 
 static void led_refresh(void)
@@ -401,8 +443,10 @@ static esp_err_t wait_for_wifi_ready(void)
     return ESP_OK;
 }
 
-static esp_err_t capture_audio_wav(uint8_t **out_data, size_t *out_len)
+static esp_err_t capture_audio_wav(uint8_t **out_data, size_t *out_len, bool *used_silent_fallback)
 {
+    ESP_RETURN_ON_FALSE(used_silent_fallback, ESP_ERR_INVALID_ARG, TAG, "capture fallback flag is required");
+    *used_silent_fallback = false;
     esp_err_t err = wearabllm_audio_capture_wav(
         keep_recording_while_ptt_held,
         NULL,
@@ -412,6 +456,7 @@ static esp_err_t capture_audio_wav(uint8_t **out_data, size_t *out_len)
         out_len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "real audio capture failed (%s); using silent WAV fallback", esp_err_to_name(err));
+        *used_silent_fallback = true;
         return wearabllm_audio_make_silent_wav(500, out_data, out_len);
     }
     return ESP_OK;
@@ -719,8 +764,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGW(TAG, "Wi-Fi disconnected; reconnecting");
-        esp_wifi_connect();
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
+        esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Wi-Fi connected: " IPSTR, IP2STR(&event->ip_info.ip));
@@ -732,6 +777,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 static void wifi_init(void)
 {
     s_wifi_events = xEventGroupCreate();
+    ESP_ERROR_CHECK(s_wifi_events ? ESP_OK : ESP_ERR_NO_MEM);
     if (CONFIG_WEARABLLM_WIFI_SSID[0] == '\0') {
         ESP_LOGW(TAG, "Wi-Fi disabled: WearabLLM v3 -> Wi-Fi SSID is empty");
         ESP_LOGW(TAG, "Set local credentials with scripts/configure_firmware.py before bridge tests");
@@ -771,16 +817,56 @@ static void wifi_init(void)
 static void interaction_task(void *arg)
 {
     bool was_held = false;
+    uint32_t interaction_id = 0;
+    uint8_t previous_volume_buttons = 0;
+    int64_t next_volume_button_poll_us = 0;
 
     while (true) {
+        int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_volume_button_poll_us) {
+            uint8_t volume_buttons = 0;
+            esp_err_t button_err = wearabllm_audio_read_volume_buttons(&volume_buttons);
+            if (button_err == ESP_OK) {
+                uint8_t released = previous_volume_buttons & (uint8_t)~volume_buttons;
+                int volume = wearabllm_audio_get_output_volume();
+                if (released & WEARABLLM_AUDIO_BUTTON_VOLUME_UP) {
+                    volume = volume < 90 ? volume + 10 : 100;
+                    button_err = wearabllm_audio_set_output_volume((uint8_t)volume);
+                } else if (released & WEARABLLM_AUDIO_BUTTON_VOLUME_DOWN) {
+                    volume = volume > 10 ? volume - 10 : 0;
+                    button_err = wearabllm_audio_set_output_volume((uint8_t)volume);
+                }
+                previous_volume_buttons = volume_buttons;
+            }
+            if (button_err != ESP_OK && button_err != ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGW(TAG, "volume button poll failed: %s", esp_err_to_name(button_err));
+            }
+            next_volume_button_poll_us = now_us + 100000;
+        }
+
         bool held = ptt_is_held_debounced();
-        if (held && !was_held) {
-            ESP_LOGI(TAG, "push-to-talk held: listening");
+        bool wake_detected = !held && !was_held && wake_word_poll();
+        if ((held && !was_held) || wake_detected) {
+            interaction_id++;
+            int64_t interaction_start_us = esp_timer_get_time();
+            ESP_LOGI(TAG, "interaction #%" PRIu32 " started", interaction_id);
+            ESP_LOGI(TAG, "%s: listening", wake_detected ? "wake word detected" : "push-to-talk held");
             led_set_all(COLOR_LISTENING);
             wearabllm_display_show_state(WEARABLLM_DISPLAY_LISTENING);
             uint8_t *wav = NULL;
             size_t wav_len = 0;
-            esp_err_t err = capture_audio_wav(&wav, &wav_len);
+            bool used_silent_fallback = false;
+            esp_err_t err = wake_detected
+                ? wearabllm_audio_capture_wav_until_silence(
+                    CONFIG_WEARABLLM_AUDIO_MAX_SECONDS, 1400, &wav, &wav_len)
+                : capture_audio_wav(&wav, &wav_len, &used_silent_fallback);
+            uint32_t capture_elapsed_ms = (uint32_t)((esp_timer_get_time() - interaction_start_us) / 1000);
+            ESP_LOGI(TAG,
+                     "interaction #%" PRIu32 " capture source=%s elapsed_ms=%" PRIu32 " wav_bytes=%u",
+                     interaction_id,
+                     used_silent_fallback ? "silent-fallback" : "onboard-mic",
+                     capture_elapsed_ms,
+                     (unsigned)wav_len);
 
             led_set_all(COLOR_THINKING);
             wearabllm_display_show_state(WEARABLLM_DISPLAY_THINKING);
@@ -790,7 +876,11 @@ static void interaction_task(void *arg)
                 char reply[256] = {0};
                 err = wait_for_wifi_ready();
                 if (err == ESP_OK) {
+#if CONFIG_WEARABLLM_DIRECT_OPENAI
+                    err = wearabllm_openai_query(
+#else
                     err = send_audio_to_bridge(
+#endif
                         wav,
                         wav_len,
                         command,
@@ -804,13 +894,25 @@ static void interaction_task(void *arg)
                     ESP_LOGI(TAG, "LED command: %s", command);
                     led_apply_command(command);
                     wearabllm_display_show_response(command, transcript, reply);
+#if CONFIG_WEARABLLM_TRANSCRIPT_LOG_ENABLED
+                    wearabllm_transcript_log_enqueue(
+                        interaction_id,
+                        command,
+                        transcript,
+                        reply,
+                        used_silent_fallback ? "silent-fallback" : "onboard-mic");
+#endif
                     esp_err_t tone_err = wearabllm_audio_play_tone(880, 80);
                     if (tone_err != ESP_OK && tone_err != ESP_ERR_NOT_SUPPORTED) {
                         ESP_LOGW(TAG, "speaker tone failed: %s", esp_err_to_name(tone_err));
                     }
                     uint8_t *tts_wav = NULL;
                     size_t tts_wav_len = 0;
+#if CONFIG_WEARABLLM_DIRECT_OPENAI
+                    esp_err_t tts_err = wearabllm_openai_tts(reply, &tts_wav, &tts_wav_len);
+#else
                     esp_err_t tts_err = fetch_tts_wav(reply, &tts_wav, &tts_wav_len);
+#endif
                     if (tts_err == ESP_OK) {
                         ESP_LOGI(TAG, "playing TTS WAV: %u bytes", (unsigned)tts_wav_len);
                         tts_err = wearabllm_audio_play_wav(tts_wav, tts_wav_len);
@@ -819,15 +921,39 @@ static void interaction_task(void *arg)
                         ESP_LOGW(TAG, "tts playback failed: %s", esp_err_to_name(tts_err));
                     }
                     free(tts_wav);
+                    ESP_LOGI(TAG,
+                             "interaction #%" PRIu32 " complete result=ok total_ms=%" PRIu32 " command=%s capture_source=%s",
+                             interaction_id,
+                             (uint32_t)((esp_timer_get_time() - interaction_start_us) / 1000),
+                             command,
+                             used_silent_fallback ? "silent-fallback" : "onboard-mic");
                 } else {
                     led_set_all(COLOR_ERROR);
-                    wearabllm_display_show_error("bridge request failed");
+                    wearabllm_display_show_error(
+#if CONFIG_WEARABLLM_DIRECT_OPENAI
+                        "OpenAI request failed"
+#else
+                        "bridge request failed"
+#endif
+                    );
+                    ESP_LOGE(TAG,
+                             "interaction #%" PRIu32 " complete result=error total_ms=%" PRIu32 " err=%s capture_source=%s",
+                             interaction_id,
+                             (uint32_t)((esp_timer_get_time() - interaction_start_us) / 1000),
+                             esp_err_to_name(err),
+                             used_silent_fallback ? "silent-fallback" : "onboard-mic");
                 }
                 free(wav);
             } else {
                 ESP_LOGE(TAG, "audio capture failed: %s", esp_err_to_name(err));
                 led_set_all(COLOR_ERROR);
                 wearabllm_display_show_error("audio capture failed");
+                ESP_LOGE(TAG,
+                         "interaction #%" PRIu32 " complete result=error total_ms=%" PRIu32 " err=%s capture_source=%s",
+                         interaction_id,
+                         (uint32_t)((esp_timer_get_time() - interaction_start_us) / 1000),
+                         esp_err_to_name(err),
+                         used_silent_fallback ? "silent-fallback" : "onboard-mic");
             }
         }
         was_held = held && !ptt_is_released_debounced();
@@ -850,7 +976,14 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio init failed at boot (%s); capture will retry on demand", esp_err_to_name(err));
     }
+    esp_err_t wake_err = wake_word_init();
+    if (wake_err != ESP_OK) {
+        ESP_LOGE(TAG, "wake word disabled (%s); BOOT push-to-talk remains available", esp_err_to_name(wake_err));
+    }
     wifi_init();
+#if CONFIG_WEARABLLM_TRANSCRIPT_LOG_ENABLED
+    ESP_ERROR_CHECK(wearabllm_transcript_log_init());
+#endif
 
     ESP_LOGI(TAG, "WearabLLM v3 Waveshare phase-1 scaffold");
     ESP_LOGI(TAG, "PTT GPIO=%d active_level=%d pull=%s debounce=%d ms LED GPIO=%d bridge=%s",
@@ -865,5 +998,6 @@ void app_main(void)
              CONFIG_WEARABLLM_AUDIO_MAX_SECONDS);
     ESP_LOGI(TAG, "Wi-Fi SSID configured=%s", CONFIG_WEARABLLM_WIFI_SSID[0] ? "yes" : "no");
 
-    xTaskCreate(interaction_task, "interaction", 8192, NULL, 5, NULL);
+    BaseType_t task_result = xTaskCreate(interaction_task, "interaction", 8192, NULL, 5, NULL);
+    ESP_ERROR_CHECK(task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }

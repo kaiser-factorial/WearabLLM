@@ -13,3 +13,18 @@ The current project direction is documented in:
 - `v2_servo_bluefruit/` - local servo-era archive. The full folder is intentionally ignored for now because this workspace contains macOS/iCloud placeholder files; see its README.
 - `v3_WAVESHARE/` - target workspace for the ESP32-S3 audio-board iteration.
 - `hardware_tests/` - small standalone sketches and probes for validating individual components.
+
+## Local secrets and generated files
+
+Wi-Fi credentials, API keys, Supabase function secrets, compiled firmware,
+serial logs, captures, local handoff notes, and tool-generated dependency trees
+are intentionally excluded by the root `.gitignore`. Firmware secrets belong
+only in the ignored `v3_WAVESHARE/firmware/sdkconfig`; never place real values
+in `sdkconfig.defaults`, source files, documentation, or committed `.env` files.
+
+Before publishing changes, verify the ignored configuration remains untracked:
+
+```bash
+git status --short
+git check-ignore -v v3_WAVESHARE/firmware/sdkconfig
+```

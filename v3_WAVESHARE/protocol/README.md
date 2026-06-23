@@ -43,11 +43,16 @@ next flash:
       "ready": true,
       "wifi_ssid_set": true,
       "wifi_password_set": true,
-      "wifi_bssid": "ca:50:35:23:2b:1f",
+      "wifi_bssid": "02:00:00:00:00:01",
       "ptt_gpio": 0,
       "ptt_active_level": 0,
       "ptt_debounce_ms": 35,
       "ptt_pull": "up",
+      "audio_out_enabled": false,
+      "audio_out_volume": 45,
+      "tts_enabled": false,
+      "tts_url": "http://192.168.86.31:8765/v1/tts",
+      "tts_max_bytes": 131072,
       "led_self_test": true,
       "display_enabled": true,
       "display_self_test": false
@@ -114,18 +119,22 @@ Content-Type: application/json
 {"ssid":"hyperplex","password":"..."}
 ```
 
-Optional BSSID/AP MAC pinning, PTT wiring settings, and TFT bring-up settings
-are supported:
+Optional BSSID/AP MAC pinning, PTT wiring settings, speaker/TTS settings, and
+TFT bring-up settings are supported:
 
 ```json
 {
   "ssid": "hyperplex",
   "password": "...",
-  "bssid": "ca:50:35:23:2b:1f",
+  "bssid": "02:00:00:00:00:01",
   "ptt_gpio": 0,
   "ptt_active_level": 0,
   "ptt_debounce_ms": 35,
   "ptt_pull": "up",
+  "audio_out_enabled": false,
+  "audio_out_volume": 45,
+  "tts_enabled": false,
+  "tts_max_bytes": 131072,
   "led_self_test": true,
   "display_enabled": true,
   "display_self_test": true
@@ -133,6 +142,7 @@ are supported:
 ```
 
 `ptt_pull` may be `up`, `down`, or `none`.
+`tts_enabled` enables `audio_out_enabled` in the firmware config helper.
 `display_self_test` enables `display_enabled` in the firmware config helper.
 
 This endpoint is disabled unless the bridge is started with

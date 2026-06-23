@@ -27,6 +27,12 @@ Screenshot *.png
 # Local Codex/Claude settings
 .claude/
 **/.claude/
+.codex/
+**/.codex/
+.idea/
+**/.idea/
+.vscode/
+**/.vscode/
 .git.broken-dataless-*/
 *.broken-dataless-*/
 **/.git/
@@ -41,9 +47,19 @@ v2_servo_bluefruit/*
 adafruit-circuitpython-bundle-*/
 *.uf2
 
-# Environment
+# Environment and local secrets
 .env
-.env.local
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+*.secret
+*.secrets
+*credentials*.json
+*service-account*.json
+secrets/
+**/secrets/
 
 # Build
 *.orig.*
@@ -51,17 +67,36 @@ adafruit-circuitpython-bundle-*/
 *.p8
 *.p12
 *.key
+*.pem
+*.pfx
 *.mobileprovision
+*.bin
+*.elf
+*.map
+*.log
+
+# Local handoff and machine-specific notes
+HANDOFF.md
+HANDOFF.local.md
+local/
+.local/
 
 # v3 ESP-IDF / Python generated artifacts
 v3_WAVESHARE/firmware/build/
 v3_WAVESHARE/firmware/build_*/
 v3_WAVESHARE/firmware/managed_components/
-v3_WAVESHARE/firmware/sdkconfig
-v3_WAVESHARE/firmware/sdkconfig.old
-v3_WAVESHARE/firmware/sdkconfig.bak
+**/sdkconfig
+**/sdkconfig.old
+**/sdkconfig.bak
 v3_WAVESHARE/bridge/captures/
+v3_WAVESHARE/bridge/.venv/
 v3_WAVESHARE/logs/
 v3_WAVESHARE/bridge/__pycache__/
 v3_WAVESHARE/bridge/*.pyc
 v3_WAVESHARE/scripts/__pycache__/
+
+# Local Supabase CLI state and function secrets
+supabase/.temp/
+supabase/.branches/
+supabase/functions/.env
+supabase/.env*

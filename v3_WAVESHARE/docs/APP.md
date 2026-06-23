@@ -28,9 +28,11 @@ The current firmware uses build-time Wi-Fi values from ignored
 - optionally saves an AP MAC/BSSID for networks with multiple radios
 - saves PTT GPIO, active level, debounce, and pull mode for BOOT-button or external-button wiring
 - saves an RGB ring boot self-test toggle for LED bring-up
+- saves speaker output, speaker volume, TTS playback, and TTS max-byte settings for later audio bring-up
 - saves TFT display and boot self-test toggles for display bring-up
-- can send Wi-Fi, PTT, and TFT settings to the local bridge
+- can send Wi-Fi, PTT, speaker, TTS, and TFT settings to the local bridge
 - lets the bridge update ignored `firmware/sdkconfig` for the next build/flash
+- refreshes `/health` after a successful config send so staged firmware readback updates immediately
 
 The bridge-side write endpoint is disabled by default. It is enabled by the
 dry-run bench helper:
@@ -73,6 +75,15 @@ npm install
 npm run android
 ```
 
+Production bundle validation:
+
+```bash
+npm run bundle:android
+```
+
+This runs Metro's Android export and writes the ignored output under
+`app/dist/android`.
+
 The first screen supports:
 
 - bridge base URL storage
@@ -82,8 +93,11 @@ The first screen supports:
 - bridge audio cap display from `/health`
 - latest board audio upload count and WAV summary from `/health`
 - firmware config readback from `/health` when bridge device config is enabled
+- staged firmware bridge-target match check against the app bridge URL
+- one-tap app bridge URL switch to the staged firmware bridge target when they differ
+- stale bridge health is cleared whenever the selected target changes
 - clean alerts for bridge JSON error responses
-- device Wi-Fi/PTT/TFT storage and opt-in bridge-assisted firmware config
+- device Wi-Fi/PTT/speaker/TTS/TFT storage and opt-in bridge-assisted firmware config
 - dry-run command sequence display from `/health`
 - hold-to-speak transcript capture
 - typed transcript fallback

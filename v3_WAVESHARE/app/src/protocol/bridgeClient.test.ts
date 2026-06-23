@@ -1,11 +1,15 @@
 import {
   bridgeErrorMessage,
+  bridgeTargetKey,
+  firmwareBridgeTargetMatchesApp,
   normalizeBridgeBaseUrl,
+  normalizeAudioOutVolume,
   normalizeDeviceWifiBssid,
   normalizePttActiveLevel,
   normalizePttDebounceMs,
   normalizePttGpio,
   normalizePttPull,
+  normalizeTtsMaxBytes,
   parseBridgeHealth,
   parseDeviceWifiConfigResponse,
   summarizeBridgeBenchStatus,
@@ -23,17 +27,29 @@ assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765/v1/query'), 'http:
 assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765/v1/query_text'), 'http://192.168.86.31:8765');
 assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765/v1/tts'), 'http://192.168.86.31:8765');
 assertEqual(normalizeBridgeBaseUrl('  http://192.168.86.31:8765/v1/query?x=1#frag  '), 'http://192.168.86.31:8765');
+assertEqual(bridgeTargetKey('http://192.168.86.31:8765/v1/query'), '192.168.86.31:8765');
+assertEqual(bridgeTargetKey('http://192.168.86.31/v1/query'), '192.168.86.31:80');
 assertEqual(normalizeDeviceWifiBssid(''), '');
-assertEqual(normalizeDeviceWifiBssid('  CA:50:35:23:2B:1F  '), 'ca:50:35:23:2b:1f');
+assertEqual(normalizeDeviceWifiBssid('  02:00:00:00:00:01  '), '02:00:00:00:00:01');
 assertEqual(String(normalizePttGpio(' 8 ')), '8');
 assertEqual(String(normalizePttActiveLevel('1')), '1');
 assertEqual(String(normalizePttDebounceMs(' 45 ')), '45');
 assertEqual(normalizePttPull(' DOWN '), 'down');
 assertEqual(normalizePttPull(''), '');
+assertEqual(String(normalizeAudioOutVolume('55')), '55');
+assertEqual(String(normalizeTtsMaxBytes('65536')), '65536');
 assertEqual(bridgeErrorMessage({ error: 'Missing transcript' }, 'fallback'), 'Missing transcript');
 assertEqual(bridgeErrorMessage({ reply: 'Bridge error: bad audio' }, 'fallback'), 'Bridge error: bad audio');
 assertEqual(bridgeErrorMessage({ message: 'Updated' }, 'fallback'), 'Updated');
 assertEqual(bridgeErrorMessage({}, 'plain text failure'), 'plain text failure');
+
+if (firmwareBridgeTargetMatchesApp('http://192.168.86.31:8765', 'http://192.168.86.31:8765/v1/query') !== true) {
+  throw new Error('Expected matching bridge targets');
+}
+
+if (firmwareBridgeTargetMatchesApp('http://192.168.86.31:8765', 'http://192.168.86.44:8765/v1/query') !== false) {
+  throw new Error('Expected mismatched bridge targets');
+}
 
 try {
   normalizeDeviceWifiBssid('ca:50:35');
@@ -80,6 +96,24 @@ try {
   }
 }
 
+try {
+  normalizeAudioOutVolume('101');
+  throw new Error('Expected invalid speaker volume to throw');
+} catch (error) {
+  if (!(error instanceof Error) || !error.message.includes('Speaker volume')) {
+    throw error;
+  }
+}
+
+try {
+  normalizeTtsMaxBytes('4095');
+  throw new Error('Expected invalid TTS max bytes to throw');
+} catch (error) {
+  if (!(error instanceof Error) || !error.message.includes('TTS max bytes')) {
+    throw error;
+  }
+}
+
 const health = parseBridgeHealth({
   ok: true,
   service: 'wearabllm-bridge',
@@ -106,12 +140,17 @@ const health = parseBridgeHealth({
       available: true,
       wifi_ssid_set: true,
       wifi_password_set: true,
-      wifi_bssid: 'ca:50:35:23:2b:1f',
+      wifi_bssid: '02:00:00:00:00:01',
       bridge_url: 'http://192.168.86.31:8765/v1/query',
       ptt_gpio: 0,
       ptt_active_level: 0,
       ptt_debounce_ms: 35,
       ptt_pull: 'up',
+      audio_out_enabled: true,
+      audio_out_volume: 55,
+      tts_enabled: false,
+      tts_url: 'http://192.168.86.31:8765/v1/tts',
+      tts_max_bytes: 65536,
       led_self_test: true,
       display_enabled: true,
       display_self_test: false,
@@ -146,6 +185,10 @@ if (
   health.config.firmware_config?.available !== true ||
   health.config.firmware_config.ptt_pull !== 'up' ||
   health.config.firmware_config.ptt_debounce_ms !== 35 ||
+  health.config.firmware_config.audio_out_enabled !== true ||
+  health.config.firmware_config.audio_out_volume !== 55 ||
+  health.config.firmware_config.tts_enabled !== false ||
+  health.config.firmware_config.tts_max_bytes !== 65536 ||
   health.config.firmware_config.led_self_test !== true ||
   health.config.firmware_config.display_enabled !== true ||
   health.config.firmware_config.display_self_test !== false ||
@@ -166,7 +209,7 @@ const readySummary = summarizeBridgeBenchStatus(parseBridgeHealth({
       ready: true,
     },
   },
-}));
+}), 'http://192.168.86.31:8765');
 
 if (!readySummary.readyForDryRun || readySummary.hasAudioUpload || !readySummary.message.includes('Ready')) {
   throw new Error(`Expected ready/no-audio summary, got ${JSON.stringify(readySummary)}`);
@@ -213,15 +256,24 @@ if (!audibleSummary.readyForDryRun || !audibleSummary.latestAudioAudible || !aud
   throw new Error(`Expected audible latest-audio summary, got ${JSON.stringify(audibleSummary)}`);
 }
 
+const bridgeMismatchSummary = summarizeBridgeBenchStatus(health, 'http://192.168.86.44:8765');
+if (bridgeMismatchSummary.readyForDryRun || bridgeMismatchSummary.bridgeTargetMatches !== false || !bridgeMismatchSummary.message.includes('differs')) {
+  throw new Error(`Expected bridge-target mismatch summary, got ${JSON.stringify(bridgeMismatchSummary)}`);
+}
+
 const wifiConfig = parseDeviceWifiConfigResponse({
   ok: true,
   ssid: 'hyperplex',
-  bssid: 'ca:50:35:23:2b:1f',
+  bssid: '02:00:00:00:00:01',
   password_set: true,
   ptt_gpio: 8,
   ptt_active_level: 1,
   ptt_debounce_ms: 45,
   ptt_pull: 'down',
+  audio_out_enabled: true,
+  audio_out_volume: 55,
+  tts_enabled: true,
+  tts_max_bytes: 65536,
   led_self_test: true,
   display_enabled: true,
   display_self_test: true,
@@ -231,12 +283,16 @@ const wifiConfig = parseDeviceWifiConfigResponse({
 if (
   !wifiConfig.ok ||
   wifiConfig.ssid !== 'hyperplex' ||
-  wifiConfig.bssid !== 'ca:50:35:23:2b:1f' ||
+  wifiConfig.bssid !== '02:00:00:00:00:01' ||
   wifiConfig.password_set !== true ||
   wifiConfig.ptt_gpio !== 8 ||
   wifiConfig.ptt_active_level !== 1 ||
   wifiConfig.ptt_debounce_ms !== 45 ||
   wifiConfig.ptt_pull !== 'down' ||
+  wifiConfig.audio_out_enabled !== true ||
+  wifiConfig.audio_out_volume !== 55 ||
+  wifiConfig.tts_enabled !== true ||
+  wifiConfig.tts_max_bytes !== 65536 ||
   wifiConfig.led_self_test !== true ||
   wifiConfig.display_enabled !== true ||
   wifiConfig.display_self_test !== true
