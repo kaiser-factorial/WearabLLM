@@ -38,7 +38,7 @@ This installs:
 export ANTHROPIC_API_KEY="sk-ant-..."
 
 # Run
-python3 "/Users/corinakaiser/Desktop/Claude Wearable/bridge.py"
+python3 "$HOME/Desktop/Claude Wearable/bridge.py"
 ```
 
 The Whisper `base` model (~140 MB) downloads automatically on the first run.

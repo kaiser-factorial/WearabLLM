@@ -193,7 +193,7 @@ Two workarounds are needed for iOS 26 compatibility:
 
 ## Created by
 
-**Corina Kaiser** — Design, hardware, & vision
+**[@kaiser-factorial](https://github.com/kaiser-factorial)** — Design, hardware, and vision
 **Claude** — Code, architecture, & debugging
 
 Built with Expo, React Native, CircuitPython, and a lot of patience with iOS 26.

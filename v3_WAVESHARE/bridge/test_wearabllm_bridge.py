@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import struct
 import tempfile
@@ -9,7 +11,8 @@ from argparse import Namespace
 from http.client import HTTPConnection
 from pathlib import Path
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import wearabllm_bridge
 from wearabllm_bridge import (
@@ -19,9 +22,11 @@ from wearabllm_bridge import (
     json_bytes,
     make_silence_wav,
     make_handler,
+    normalize_tts_wav,
     parse_command_sequence,
     parse_llm_response,
     pcm16_level_stats,
+    TTS_INSTRUCTIONS,
 )
 
 
@@ -102,6 +107,26 @@ class BridgeStateTest(unittest.TestCase):
         )
         self.assertIn("dry-run audio upload", state.transcribe(make_silence_wav(125)))
 
+    def test_openai_transcription_uses_supported_upload_tuple(self):
+        create = Mock(return_value="hello from microphone")
+        state = BridgeState.__new__(BridgeState)
+        state.args = Namespace(
+            typed="",
+            dry_run=False,
+            stt="openai",
+            stt_model="gpt-4o-transcribe",
+        )
+        state.openai_client = SimpleNamespace(
+            audio=SimpleNamespace(
+                transcriptions=SimpleNamespace(create=create),
+            )
+        )
+
+        wav_bytes = make_silence_wav(125)
+        self.assertEqual(state.transcribe(wav_bytes), "hello from microphone")
+        upload = create.call_args.kwargs["file"]
+        self.assertEqual(upload, ("wearabllm-capture.wav", wav_bytes, "audio/wav"))
+
     def test_save_debug_wav_writes_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = BridgeState(
@@ -180,6 +205,43 @@ class BridgeStateTest(unittest.TestCase):
             self.assertEqual(wav_file.getnchannels(), 1)
             self.assertEqual(wav_file.getsampwidth(), 2)
             self.assertGreater(wav_file.getnframes(), 0)
+
+    def test_live_tts_uses_verse_and_theatrical_instructions(self):
+        wav_bytes = make_silence_wav(125)
+        create = Mock(return_value=SimpleNamespace(read=lambda: wav_bytes))
+        state = BridgeState.__new__(BridgeState)
+        state.args = Namespace(
+            provider="openai",
+            dry_run=False,
+            tts_model="gpt-4o-mini-tts",
+            tts_voice="verse",
+            tts_instructions=TTS_INSTRUCTIONS,
+        )
+        state.openai_client = SimpleNamespace(
+            audio=SimpleNamespace(speech=SimpleNamespace(create=create))
+        )
+
+        result = state.synthesize_tts_wav("The experiment is alive!")
+
+        self.assertTrue(result.startswith(b"RIFF"))
+        self.assertEqual(create.call_args.kwargs["voice"], "verse")
+        self.assertEqual(create.call_args.kwargs["instructions"], TTS_INSTRUCTIONS)
+        self.assertEqual(create.call_args.kwargs["response_format"], "wav")
+
+    def test_normalize_tts_wav_resamples_and_rewrites_header(self):
+        with BytesIO() as source:
+            with wave.open(source, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(24000)
+                wav_file.writeframes(struct.pack("<h", 1000) * 2400)
+            normalized = normalize_tts_wav(source.getvalue())
+
+        with wave.open(BytesIO(normalized), "rb") as wav_file:
+            self.assertEqual(wav_file.getframerate(), 16000)
+            self.assertEqual(wav_file.getnchannels(), 1)
+            self.assertEqual(wav_file.getsampwidth(), 2)
+            self.assertEqual(wav_file.getnframes(), 1600)
 
     def test_runtime_config_reports_live_bridge_settings(self):
         state = BridgeState(
@@ -321,7 +383,7 @@ class BridgeStateTest(unittest.TestCase):
             )
         )
         with self.assertRaises(ValueError):
-            state.configure_device_wifi("", "password", "ca:50:35:23:2b:1f")
+            state.configure_device_wifi("", "password", "02:00:00:00:00:01")
 
     def test_device_config_validates_ptt_options(self):
         state = BridgeState(
@@ -343,6 +405,10 @@ class BridgeStateTest(unittest.TestCase):
             state.configure_device_wifi("ssid", "password", ptt_debounce_ms=251)
         with self.assertRaises(ValueError):
             state.configure_device_wifi("ssid", "password", ptt_pull="sideways")
+        with self.assertRaises(ValueError):
+            state.configure_device_wifi("ssid", "password", audio_out_volume=101)
+        with self.assertRaises(ValueError):
+            state.configure_device_wifi("ssid", "password", tts_max_bytes=4095)
 
     def test_optional_bool_parses_display_flags(self):
         self.assertIsNone(wearabllm_bridge.optional_bool(None))
@@ -380,11 +446,15 @@ class BridgeStateTest(unittest.TestCase):
                 payload = state.configure_device_wifi(
                     "ssid",
                     "password",
-                    "ca:50:35:23:2b:1f",
+                    "02:00:00:00:00:01",
                     ptt_gpio=8,
                     ptt_active_level=1,
                     ptt_debounce_ms=45,
                     ptt_pull="down",
+                    audio_out_enabled=True,
+                    audio_out_volume=55,
+                    tts_enabled=True,
+                    tts_max_bytes=65536,
                     led_self_test=True,
                     display_enabled=True,
                     display_self_test=True,
@@ -396,6 +466,10 @@ class BridgeStateTest(unittest.TestCase):
         self.assertIn("--ptt-active-level", args)
         self.assertIn("--ptt-debounce-ms", args)
         self.assertIn("--ptt-pull", args)
+        self.assertIn("--enable-audio-out", args)
+        self.assertIn("--audio-out-volume", args)
+        self.assertIn("--enable-tts", args)
+        self.assertIn("--tts-max-bytes", args)
         self.assertIn("--enable-led-self-test", args)
         self.assertIn("--enable-display", args)
         self.assertIn("--enable-display-self-test", args)
@@ -403,6 +477,10 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(payload["ptt_active_level"], 1)
         self.assertEqual(payload["ptt_debounce_ms"], 45)
         self.assertEqual(payload["ptt_pull"], "down")
+        self.assertIs(payload["audio_out_enabled"], True)
+        self.assertEqual(payload["audio_out_volume"], 55)
+        self.assertIs(payload["tts_enabled"], True)
+        self.assertEqual(payload["tts_max_bytes"], 65536)
         self.assertIs(payload["led_self_test"], True)
         self.assertIs(payload["display_enabled"], True)
         self.assertIs(payload["display_self_test"], True)
@@ -433,15 +511,21 @@ class BridgeStateTest(unittest.TestCase):
                 payload = state.configure_device_wifi(
                     "ssid",
                     "password",
+                    audio_out_enabled=False,
+                    tts_enabled=False,
                     led_self_test=False,
                     display_enabled=False,
                     display_self_test=False,
                 )
 
         args = run.call_args.args[0]
+        self.assertIn("--disable-audio-out", args)
+        self.assertIn("--disable-tts", args)
         self.assertIn("--disable-led-self-test", args)
         self.assertIn("--disable-display", args)
         self.assertIn("--disable-display-self-test", args)
+        self.assertIs(payload["audio_out_enabled"], False)
+        self.assertIs(payload["tts_enabled"], False)
         self.assertIs(payload["led_self_test"], False)
         self.assertIs(payload["display_enabled"], False)
         self.assertIs(payload["display_self_test"], False)
@@ -494,6 +578,68 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(state.ask_llm("first")[0], "GS")
         self.assertEqual(state.ask_llm("second")[0], "RF")
         self.assertEqual(state.ask_llm("third")[0], "GS")
+
+    def test_live_llm_retains_bounded_session_history(self):
+        create = Mock(
+            side_effect=[
+                SimpleNamespace(output_text="BS\nMy name is WearabLLM."),
+                SimpleNamespace(output_text="GP\nYes, I remember."),
+            ]
+        )
+        with patch("wearabllm_bridge.OpenAI") as openai:
+            openai.return_value = SimpleNamespace(
+                responses=SimpleNamespace(create=create)
+            )
+            state = BridgeState(
+                Namespace(
+                    provider="openai", typed="", stt="openai", save_wav_dir="",
+                    dry_run=False, dry_run_command="BS", dry_run_sequence="",
+                    history_turns=1, llm_model="test-model",
+                    max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+                )
+            )
+
+        state.ask_llm("What is your name?")
+        state.ask_llm("Do you remember?")
+        second_input = create.call_args_list[1].kwargs["input"]
+        self.assertEqual([message["role"] for message in second_input], ["user", "assistant", "user"])
+        self.assertEqual(len(state.history), 2)
+        state.clear_history()
+        self.assertEqual(state.history, [])
+
+    def test_live_llm_extracts_and_retrieves_durable_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_file = Path(temp_dir) / "memory.json"
+            create = Mock(
+                side_effect=[
+                    SimpleNamespace(output_text="GP\nTea sounds right."),
+                    SimpleNamespace(output_text='["The user prefers green tea in the morning."]'),
+                    SimpleNamespace(output_text="BS\nYou prefer green tea."),
+                    SimpleNamespace(output_text="[]"),
+                ]
+            )
+            with patch("wearabllm_bridge.OpenAI") as openai:
+                openai.return_value = SimpleNamespace(
+                    responses=SimpleNamespace(create=create)
+                )
+                state = BridgeState(
+                    Namespace(
+                        provider="openai", typed="", stt="openai", save_wav_dir="",
+                        dry_run=False, dry_run_command="BS", dry_run_sequence="",
+                        history_turns=0, llm_model="test-model", memory_model="test-model",
+                        durable_memory=True, memory_file=str(memory_file),
+                        memory_retrieval_limit=3,
+                        max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+                    )
+                )
+
+            state.ask_llm("I prefer green tea in the morning.")
+            self.assertEqual(len(state.memory_store.list()), 1)
+            state.ask_llm("What tea do I prefer?")
+            self.assertIn(
+                "The user prefers green tea in the morning.",
+                create.call_args_list[2].kwargs["instructions"],
+            )
 
     def test_parse_command_sequence_rejects_unknown_code(self):
         with self.assertRaises(ValueError):

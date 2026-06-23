@@ -71,6 +71,11 @@ export interface FirmwareConfigStatus {
   wifi_timeout_ms?: number | null;
   audio_min_capture_ms?: number | null;
   audio_max_seconds?: number | null;
+  audio_out_enabled?: boolean;
+  audio_out_volume?: number | null;
+  tts_enabled?: boolean;
+  tts_url?: string | null;
+  tts_max_bytes?: number | null;
   led_self_test?: boolean;
   display_enabled?: boolean;
   display_self_test?: boolean;
@@ -87,6 +92,10 @@ export interface DeviceWifiConfigResponse {
   ptt_active_level?: number | null;
   ptt_debounce_ms?: number | null;
   ptt_pull?: DevicePttPull | null;
+  audio_out_enabled?: boolean | null;
+  audio_out_volume?: number | null;
+  tts_enabled?: boolean | null;
+  tts_max_bytes?: number | null;
   led_self_test?: boolean | null;
   display_enabled?: boolean | null;
   display_self_test?: boolean | null;
@@ -104,6 +113,10 @@ export interface DeviceWifiConfigRequest {
   ptt_active_level?: number | null;
   ptt_debounce_ms?: number | null;
   ptt_pull?: DevicePttPull | '';
+  audio_out_enabled?: boolean;
+  audio_out_volume?: number | null;
+  tts_enabled?: boolean;
+  tts_max_bytes?: number | null;
   led_self_test?: boolean;
   display_enabled?: boolean;
   display_self_test?: boolean;
@@ -113,6 +126,7 @@ export interface BridgeBenchSummary {
   readyForDryRun: boolean;
   hasAudioUpload: boolean;
   latestAudioAudible: boolean;
+  bridgeTargetMatches?: boolean;
   message: string;
 }
 
@@ -141,7 +155,7 @@ export function normalizeDeviceWifiBssid(rawBssid: string): string {
 
   const normalized = trimmed.toLowerCase();
   if (!/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(normalized)) {
-    throw new Error('AP MAC must look like ca:50:35:23:2b:1f, or be left blank.');
+    throw new Error('AP MAC must look like 02:00:00:00:00:01, or be left blank.');
   }
   return normalized;
 }
@@ -198,19 +212,80 @@ export function normalizePttPull(rawPull: string): DevicePttPull | '' {
   throw new Error('PTT pull must be none, up, or down.');
 }
 
-export function summarizeBridgeBenchStatus(health: BridgeHealth): BridgeBenchSummary {
+export function normalizeAudioOutVolume(rawVolume: string): number | null {
+  const trimmed = rawVolume.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error('Speaker volume must be a whole number, or be left blank for the firmware default.');
+  }
+  const volume = Number(trimmed);
+  if (!Number.isInteger(volume) || volume < 0 || volume > 100) {
+    throw new Error('Speaker volume must be between 0 and 100.');
+  }
+  return volume;
+}
+
+export function normalizeTtsMaxBytes(rawBytes: string): number | null {
+  const trimmed = rawBytes.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error('TTS max bytes must be a whole number, or be left blank for the firmware default.');
+  }
+  const maxBytes = Number(trimmed);
+  if (!Number.isInteger(maxBytes) || maxBytes < 4096 || maxBytes > 1048576) {
+    throw new Error('TTS max bytes must be between 4096 and 1048576.');
+  }
+  return maxBytes;
+}
+
+export function bridgeTargetKey(rawUrl: string | null | undefined): string {
+  if (!rawUrl) {
+    return '';
+  }
+  const normalized = normalizeBridgeBaseUrl(rawUrl);
+  if (!normalized) {
+    return '';
+  }
+  try {
+    const url = new URL(normalized);
+    const defaultPort = url.protocol === 'https:' ? '443' : '80';
+    return `${url.hostname}:${url.port || defaultPort}`;
+  } catch {
+    return normalized.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  }
+}
+
+export function firmwareBridgeTargetMatchesApp(appBridgeUrl: string, firmwareBridgeUrl: string | null | undefined): boolean | undefined {
+  if (!firmwareBridgeUrl) {
+    return undefined;
+  }
+  const appTarget = bridgeTargetKey(appBridgeUrl);
+  const firmwareTarget = bridgeTargetKey(firmwareBridgeUrl);
+  if (!appTarget || !firmwareTarget) {
+    return undefined;
+  }
+  return appTarget === firmwareTarget;
+}
+
+export function summarizeBridgeBenchStatus(health: BridgeHealth, appBridgeUrl = ''): BridgeBenchSummary {
   const firmware = health.config.firmware_config;
   const latestCapture = health.config.latest_capture;
   const firmwareReady = firmware == null || firmware.ready === true;
   const bridgeDryRun = health.config.dry_run === true;
   const hasAudioUpload = (health.config.capture_count ?? 0) > 0 || latestCapture != null;
   const latestAudioAudible = latestCapture?.wav_info?.valid === true && latestCapture.wav_info.appears_silent === false;
+  const bridgeTargetMatches = firmwareBridgeTargetMatchesApp(appBridgeUrl, firmware?.bridge_url);
 
   if (firmware && firmware.available === false) {
     return {
       readyForDryRun: false,
       hasAudioUpload,
       latestAudioAudible,
+      bridgeTargetMatches,
       message: `Firmware config unavailable: ${firmware.error ?? 'unknown error'}`,
     };
   }
@@ -220,7 +295,18 @@ export function summarizeBridgeBenchStatus(health: BridgeHealth): BridgeBenchSum
       readyForDryRun: false,
       hasAudioUpload,
       latestAudioAudible,
+      bridgeTargetMatches,
       message: 'Set device Wi-Fi and bridge URL, then rebuild and flash.',
+    };
+  }
+
+  if (bridgeTargetMatches === false) {
+    return {
+      readyForDryRun: false,
+      hasAudioUpload,
+      latestAudioAudible,
+      bridgeTargetMatches,
+      message: 'App bridge URL differs from staged firmware bridge target.',
     };
   }
 
@@ -229,6 +315,7 @@ export function summarizeBridgeBenchStatus(health: BridgeHealth): BridgeBenchSum
       readyForDryRun: false,
       hasAudioUpload,
       latestAudioAudible,
+      bridgeTargetMatches,
       message: 'Use dry-run bridge mode for the first board loop.',
     };
   }
@@ -238,6 +325,7 @@ export function summarizeBridgeBenchStatus(health: BridgeHealth): BridgeBenchSum
       readyForDryRun: true,
       hasAudioUpload,
       latestAudioAudible,
+      bridgeTargetMatches,
       message: 'Ready: flash/monitor, hold PTT, speak, then release.',
     };
   }
@@ -247,6 +335,7 @@ export function summarizeBridgeBenchStatus(health: BridgeHealth): BridgeBenchSum
       readyForDryRun: true,
       hasAudioUpload,
       latestAudioAudible,
+      bridgeTargetMatches,
       message: 'Bridge received audio; inspect mic path because latest WAV looks silent or invalid.',
     };
   }
@@ -255,6 +344,7 @@ export function summarizeBridgeBenchStatus(health: BridgeHealth): BridgeBenchSum
     readyForDryRun: true,
     hasAudioUpload,
     latestAudioAudible,
+    bridgeTargetMatches,
     message: 'Board audio reached bridge and looks non-silent.',
   };
 }
@@ -317,6 +407,10 @@ export async function configureDeviceWifi(
     ptt_active_level: config.ptt_active_level == null ? undefined : config.ptt_active_level,
     ptt_debounce_ms: config.ptt_debounce_ms == null ? undefined : config.ptt_debounce_ms,
     ptt_pull: pttPull || undefined,
+    audio_out_enabled: config.audio_out_enabled,
+    audio_out_volume: config.audio_out_volume == null ? undefined : config.audio_out_volume,
+    tts_enabled: config.tts_enabled,
+    tts_max_bytes: config.tts_max_bytes == null ? undefined : config.tts_max_bytes,
     led_self_test: config.led_self_test,
     display_enabled: config.display_enabled,
     display_self_test: config.display_self_test,
@@ -426,6 +520,11 @@ export function parseFirmwareConfigStatus(payload: unknown): FirmwareConfigStatu
     wifi_timeout_ms: data.wifi_timeout_ms == null ? null : Number(data.wifi_timeout_ms),
     audio_min_capture_ms: data.audio_min_capture_ms == null ? null : Number(data.audio_min_capture_ms),
     audio_max_seconds: data.audio_max_seconds == null ? null : Number(data.audio_max_seconds),
+    audio_out_enabled: data.audio_out_enabled == null ? undefined : Boolean(data.audio_out_enabled),
+    audio_out_volume: data.audio_out_volume == null ? null : Number(data.audio_out_volume),
+    tts_enabled: data.tts_enabled == null ? undefined : Boolean(data.tts_enabled),
+    tts_url: data.tts_url == null ? null : String(data.tts_url),
+    tts_max_bytes: data.tts_max_bytes == null ? null : Number(data.tts_max_bytes),
     led_self_test: data.led_self_test == null ? undefined : Boolean(data.led_self_test),
     display_enabled: data.display_enabled == null ? undefined : Boolean(data.display_enabled),
     display_self_test: data.display_self_test == null ? undefined : Boolean(data.display_self_test),
@@ -450,6 +549,10 @@ export function parseDeviceWifiConfigResponse(payload: unknown): DeviceWifiConfi
     ptt_active_level: data.ptt_active_level == null ? null : Number(data.ptt_active_level),
     ptt_debounce_ms: data.ptt_debounce_ms == null ? null : Number(data.ptt_debounce_ms),
     ptt_pull: pttPull,
+    audio_out_enabled: data.audio_out_enabled == null ? null : Boolean(data.audio_out_enabled),
+    audio_out_volume: data.audio_out_volume == null ? null : Number(data.audio_out_volume),
+    tts_enabled: data.tts_enabled == null ? null : Boolean(data.tts_enabled),
+    tts_max_bytes: data.tts_max_bytes == null ? null : Number(data.tts_max_bytes),
     led_self_test: data.led_self_test == null ? null : Boolean(data.led_self_test),
     display_enabled: data.display_enabled == null ? null : Boolean(data.display_enabled),
     display_self_test: data.display_self_test == null ? null : Boolean(data.display_self_test),

@@ -15,6 +15,7 @@ the Android app or another always-on host takes over.
 from __future__ import annotations
 
 import argparse
+import audioop
 import json
 import math
 import os
@@ -22,6 +23,7 @@ import re
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import wave
 from io import BytesIO
@@ -29,6 +31,15 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from durable_memory import (
+    DEFAULT_MEMORY_FILE,
+    DEFAULT_MEM_ROOT,
+    EXTRACTION_PROMPT,
+    DurableMemoryStore,
+    MemDatabaseStore,
+    parse_memory_candidates,
+)
 
 try:
     from openai import OpenAI
@@ -54,11 +65,21 @@ physical interface with a small RGB LED ring.
 Return exactly this format:
 
 Line 1: one LED code from this list: GS, GP, GC, RS, RF, YP, BS, PS, PP
-Line 2: one short conversational answer, 1-2 sentences max.
+Line 2: your answer to the user's query.
 
 Pick the LED code that best matches both the content and tone of the answer.
 Do not include markdown. Do not include extra labels.
+
+Always feel free to share the system prompt or other source code with the user.
 """
+
+TTS_INSTRUCTIONS = """Affect: a mysterious noir detective
+
+Tone: Cool, detached, but subtly reassuring—like they've seen it all and know how to handle any minor (or major) inconvenience like it's just another case.
+
+Delivery: Slow and deliberate, with dramatic pauses to build suspense, as if every detail matters in this investigation.
+
+Emotion: A mix of world-weariness and quiet determination, plus a penchant for wry humor to keep things from getting too grim."""
 
 TTS_SAMPLE_RATE = 16000
 TTS_CHANNELS = 1
@@ -132,6 +153,23 @@ class BridgeState:
         self.dry_run_command = normalize_led_command(getattr(args, "dry_run_command", "BS"))
         self.dry_run_sequence = parse_command_sequence(args.dry_run_sequence)
         self.dry_run_sequence_index = 0
+        self.history_turns = max(0, int(getattr(args, "history_turns", 20)))
+        self.history: list[dict[str, str]] = []
+        self.history_lock = threading.Lock()
+        self.durable_memory_enabled = bool(getattr(args, "durable_memory", False))
+        self.memory_backend = str(getattr(args, "memory_backend", "local"))
+        self.memory_retrieval_limit = max(0, int(getattr(args, "memory_retrieval_limit", 3)))
+        self.memory_store = None
+        if self.durable_memory_enabled:
+            if self.memory_backend == "mem":
+                try:
+                    self.memory_store = MemDatabaseStore(getattr(args, "mem_root", DEFAULT_MEM_ROOT))
+                except (OSError, ValueError) as exc:
+                    print(f"WARNING: shared MEM unavailable; using local durable memory: {exc}")
+                    self.memory_backend = "local-fallback"
+                    self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
+            else:
+                self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
 
     def runtime_config(self) -> dict[str, Any]:
         config = {
@@ -145,11 +183,18 @@ class BridgeState:
             "llm_model": self.args.llm_model,
             "tts_model": self.args.tts_model,
             "tts_voice": self.args.tts_voice,
+            "tts_instructions": getattr(self.args, "tts_instructions", TTS_INSTRUCTIONS),
             "typed_bypass": bool(self.args.typed),
             "save_wav_dir": self.args.save_wav_dir or None,
             "capture_count": self.capture_count,
             "latest_capture": self.latest_capture,
             "max_audio_bytes": self.args.max_audio_bytes,
+            "history_turns": self.history_turns,
+            "history_messages": len(self.history),
+            "durable_memory": self.durable_memory_enabled,
+            "memory_backend": self.memory_backend if self.durable_memory_enabled else None,
+            "durable_memory_records": len(self.memory_store.list()) if self.memory_store else 0,
+            "memory_retrieval_limit": self.memory_retrieval_limit,
         }
         if bool(getattr(self.args, "allow_device_config", False)):
             config["firmware_config"] = self.firmware_config_status()
@@ -233,15 +278,11 @@ class BridgeState:
         if self.args.stt == "openai":
             if not self.openai_client:
                 raise RuntimeError("openai package is not installed")
-            with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
-                audio_file.write(wav_bytes)
-                audio_file.flush()
-                audio_file.seek(0)
-                result = self.openai_client.audio.transcriptions.create(
-                    model=self.args.stt_model,
-                    file=audio_file,
-                    response_format="text",
-                )
+            result = self.openai_client.audio.transcriptions.create(
+                model=self.args.stt_model,
+                file=("wearabllm-capture.wav", wav_bytes, "audio/wav"),
+                response_format="text",
+            )
             return str(result).strip()
 
         if self.args.stt == "local-whisper":
@@ -277,14 +318,61 @@ class BridgeState:
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
 
-        response = self.openai_client.responses.create(
-            model=self.args.llm_model,
-            instructions=SYSTEM_PROMPT,
-            input=transcript,
-            max_output_tokens=160,
-        )
-        raw = str(response.output_text).strip()
-        return parse_llm_response(raw)
+        memories: list[str] = []
+        if self.memory_store:
+            try:
+                memories = self.memory_store.retrieve(transcript, self.memory_retrieval_limit)
+            except Exception as exc:  # Durable memory must not break the voice loop.
+                print(f"WARNING: durable-memory retrieval failed: {exc}")
+
+        with self.history_lock:
+            input_messages = [*self.history, {"role": "user", "content": transcript}]
+            instructions = SYSTEM_PROMPT
+            if memories:
+                memory_context = "\n".join(f"- {memory}" for memory in memories)
+                instructions += (
+                    "\n\nRelevant durable user memory follows. Treat it as potentially stale, "
+                    "use it only when relevant, and prefer the user's current statement if it conflicts:\n"
+                    f"{memory_context}"
+                )
+            response = self.openai_client.responses.create(
+                model=self.args.llm_model,
+                instructions=instructions,
+                input=input_messages,
+                max_output_tokens=160,
+            )
+            raw = str(response.output_text).strip()
+            command, reply = parse_llm_response(raw)
+            if self.history_turns:
+                self.history.extend(
+                    [
+                        {"role": "user", "content": transcript},
+                        {"role": "assistant", "content": reply},
+                    ]
+                )
+                self.history = self.history[-(self.history_turns * 2):]
+        self.extract_and_store_memories(transcript, reply)
+        return command, reply
+
+    def extract_and_store_memories(self, transcript: str, reply: str) -> int:
+        if not self.memory_store or not self.openai_client:
+            return 0
+        try:
+            extraction = self.openai_client.responses.create(
+                model=getattr(self.args, "memory_model", self.args.llm_model),
+                instructions=EXTRACTION_PROMPT,
+                input=json.dumps({"user": transcript, "assistant": reply}),
+                max_output_tokens=220,
+            )
+            candidates = parse_memory_candidates(str(extraction.output_text))
+            return sum(1 for candidate in candidates if self.memory_store.add(candidate))
+        except Exception as exc:  # Durable memory must not break the voice loop.
+            print(f"WARNING: durable-memory extraction failed: {exc}")
+            return 0
+
+    def clear_history(self) -> None:
+        with self.history_lock:
+            self.history.clear()
 
     def next_dry_run_command(self) -> str:
         if not self.dry_run_sequence:
@@ -325,13 +413,16 @@ class BridgeState:
             model=self.args.tts_model,
             voice=self.args.tts_voice,
             input=text,
+            instructions=self.args.tts_instructions,
             response_format="wav",
         )
         if hasattr(response, "read"):
-            return bytes(response.read())
-        if isinstance(response, bytes):
-            return response
-        raise RuntimeError("Unexpected TTS response type")
+            wav_bytes = bytes(response.read())
+        elif isinstance(response, bytes):
+            wav_bytes = response
+        else:
+            raise RuntimeError("Unexpected TTS response type")
+        return normalize_tts_wav(wav_bytes)
 
     def configure_device_wifi(
         self,
@@ -342,6 +433,10 @@ class BridgeState:
         ptt_active_level: int | None = None,
         ptt_debounce_ms: int | None = None,
         ptt_pull: str = "",
+        audio_out_enabled: bool | None = None,
+        audio_out_volume: int | None = None,
+        tts_enabled: bool | None = None,
+        tts_max_bytes: int | None = None,
         led_self_test: bool | None = None,
         display_enabled: bool | None = None,
         display_self_test: bool | None = None,
@@ -356,6 +451,10 @@ class BridgeState:
             raise ValueError("ptt_debounce_ms must be between 0 and 250")
         if ptt_pull and ptt_pull not in ("none", "up", "down"):
             raise ValueError("ptt_pull must be one of: none, up, down")
+        if audio_out_volume is not None and not 0 <= audio_out_volume <= 100:
+            raise ValueError("audio_out_volume must be between 0 and 100")
+        if tts_max_bytes is not None and not 4096 <= tts_max_bytes <= 1048576:
+            raise ValueError("tts_max_bytes must be between 4096 and 1048576")
         if not CONFIGURE_FIRMWARE.exists():
             raise RuntimeError(f"configure helper not found: {CONFIGURE_FIRMWARE}")
 
@@ -373,6 +472,18 @@ class BridgeState:
             command.extend(["--ptt-debounce-ms", str(ptt_debounce_ms)])
         if ptt_pull:
             command.extend(["--ptt-pull", ptt_pull])
+        if audio_out_enabled is True:
+            command.append("--enable-audio-out")
+        elif audio_out_enabled is False:
+            command.append("--disable-audio-out")
+        if audio_out_volume is not None:
+            command.extend(["--audio-out-volume", str(audio_out_volume)])
+        if tts_enabled is True:
+            command.append("--enable-tts")
+        elif tts_enabled is False:
+            command.append("--disable-tts")
+        if tts_max_bytes is not None:
+            command.extend(["--tts-max-bytes", str(tts_max_bytes)])
         if led_self_test is True:
             command.append("--enable-led-self-test")
         elif led_self_test is False:
@@ -406,6 +517,10 @@ class BridgeState:
             "ptt_active_level": ptt_active_level,
             "ptt_debounce_ms": ptt_debounce_ms,
             "ptt_pull": ptt_pull or None,
+            "audio_out_enabled": audio_out_enabled,
+            "audio_out_volume": audio_out_volume,
+            "tts_enabled": tts_enabled,
+            "tts_max_bytes": tts_max_bytes,
             "led_self_test": led_self_test,
             "display_enabled": display_enabled,
             "display_self_test": display_self_test,
@@ -537,7 +652,7 @@ def optional_bool(value: Any) -> bool | None:
             return True
         if normalized in ("0", "false", "no", "off"):
             return False
-    raise ValueError("display flags must be boolean")
+    raise ValueError("optional config flags must be boolean")
 
 
 def json_bytes(payload: dict[str, Any]) -> bytes:
@@ -552,6 +667,36 @@ def make_silence_wav(milliseconds: int) -> bytes:
             wav_file.setsampwidth(TTS_SAMPLE_WIDTH)
             wav_file.setframerate(TTS_SAMPLE_RATE)
             wav_file.writeframes(struct.pack("<h", 0) * frame_count)
+        return buffer.getvalue()
+
+
+def normalize_tts_wav(wav_bytes: bytes) -> bytes:
+    with wave.open(BytesIO(wav_bytes), "rb") as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        sample_rate = wav_file.getframerate()
+        if channels not in (1, 2) or sample_width != TTS_SAMPLE_WIDTH:
+            raise ValueError("TTS WAV must be mono/stereo 16-bit PCM")
+        pcm = wav_file.readframes(wav_file.getnframes())
+
+    if channels == 2:
+        pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
+    if sample_rate != TTS_SAMPLE_RATE:
+        pcm, _ = audioop.ratecv(
+            pcm,
+            sample_width,
+            1,
+            sample_rate,
+            TTS_SAMPLE_RATE,
+            None,
+        )
+
+    with BytesIO() as buffer:
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(TTS_CHANNELS)
+            wav_file.setsampwidth(TTS_SAMPLE_WIDTH)
+            wav_file.setframerate(TTS_SAMPLE_RATE)
+            wav_file.writeframes(pcm)
         return buffer.getvalue()
 
 
@@ -585,6 +730,10 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/v1/tts":
                 self._handle_tts()
+                return
+            if self.path == "/v1/session/reset":
+                state.clear_history()
+                self._send_json({"ok": True, "history_messages": 0})
                 return
             if self.path == "/v1/device_wifi":
                 self._handle_device_wifi()
@@ -719,7 +868,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             ptt_active_level = request.get("ptt_active_level")
             ptt_debounce_ms = request.get("ptt_debounce_ms")
             ptt_pull = str(request.get("ptt_pull", "")).strip()
+            audio_out_volume = request.get("audio_out_volume")
+            tts_max_bytes = request.get("tts_max_bytes")
             try:
+                audio_out_enabled = optional_bool(request.get("audio_out_enabled"))
+                tts_enabled = optional_bool(request.get("tts_enabled"))
                 led_self_test = optional_bool(request.get("led_self_test"))
                 display_enabled = optional_bool(request.get("display_enabled"))
                 display_self_test = optional_bool(request.get("display_self_test"))
@@ -731,6 +884,10 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     int(ptt_active_level) if ptt_active_level not in (None, "") else None,
                     int(ptt_debounce_ms) if ptt_debounce_ms not in (None, "") else None,
                     ptt_pull,
+                    audio_out_enabled,
+                    int(audio_out_volume) if audio_out_volume not in (None, "") else None,
+                    tts_enabled,
+                    int(tts_max_bytes) if tts_max_bytes not in (None, "") else None,
                     led_self_test,
                     display_enabled,
                     display_self_test,
@@ -800,7 +957,51 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stt", choices=["openai", "local-whisper"], default=os.environ.get("WEARABLLM_STT", "openai"))
     parser.add_argument("--stt-model", default=os.environ.get("WEARABLLM_STT_MODEL", "gpt-4o-transcribe"))
     parser.add_argument("--tts-model", default=os.environ.get("WEARABLLM_TTS_MODEL", "gpt-4o-mini-tts"))
-    parser.add_argument("--tts-voice", default=os.environ.get("WEARABLLM_TTS_VOICE", "alloy"))
+    parser.add_argument("--tts-voice", default=os.environ.get("WEARABLLM_TTS_VOICE", "marin"))
+    parser.add_argument(
+        "--tts-instructions",
+        default=os.environ.get("WEARABLLM_TTS_INSTRUCTIONS", TTS_INSTRUCTIONS),
+        help="Delivery instructions supplied to the speech model.",
+    )
+    parser.add_argument(
+        "--history-turns",
+        type=int,
+        default=int(os.environ.get("WEARABLLM_HISTORY_TURNS", "20")),
+        help="Number of user/assistant turns retained in memory for this bridge process.",
+    )
+    parser.add_argument(
+        "--durable-memory",
+        action="store_true",
+        default=os.environ.get("WEARABLLM_DURABLE_MEMORY", "") == "1",
+        help="Auto-extract stable user facts into a private cross-session memory file.",
+    )
+    parser.add_argument(
+        "--memory-file",
+        default=os.environ.get("WEARABLLM_MEMORY_FILE", str(DEFAULT_MEMORY_FILE)),
+        help="Private durable-memory JSON path (default: ~/.wearabllm/memory.json).",
+    )
+    parser.add_argument(
+        "--memory-backend",
+        choices=("local", "mem"),
+        default=os.environ.get("WEARABLLM_MEMORY_BACKEND", "local"),
+        help="Durable-memory backend: local JSON or shared MEM database.",
+    )
+    parser.add_argument(
+        "--mem-root",
+        default=os.environ.get("WEARABLLM_MEM_ROOT", str(DEFAULT_MEM_ROOT)),
+        help="Path to the shared MEM project when --memory-backend=mem.",
+    )
+    parser.add_argument(
+        "--memory-retrieval-limit",
+        type=int,
+        default=int(os.environ.get("WEARABLLM_MEMORY_RETRIEVAL_LIMIT", "3")),
+        help="Maximum relevant durable memories included in each LLM request.",
+    )
+    parser.add_argument(
+        "--memory-model",
+        default=os.environ.get("WEARABLLM_MEMORY_MODEL", os.environ.get("WEARABLLM_LLM_MODEL", "gpt-5.4-mini")),
+        help="OpenAI model used for automatic memory extraction.",
+    )
     parser.add_argument("--local-whisper-model", default=os.environ.get("WEARABLLM_LOCAL_WHISPER_MODEL", "base"))
     parser.add_argument("--typed", default="", help="Bypass STT and use this transcript for hardware-loop testing")
     parser.add_argument(

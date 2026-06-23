@@ -33,6 +33,14 @@ npm install
 npm run android
 ```
 
+To verify a production Android Hermes bundle without an emulator:
+
+```bash
+npm run bundle:android
+```
+
+The generated `dist/android` directory is ignored by git.
+
 Set the bridge URL to your computer's LAN IP, for example:
 
 ```text
@@ -52,14 +60,15 @@ The health panel also derives a one-line next step for the first dry-run board
 loop from those fields.
 When device config is enabled, `Check` also shows the
 ignored firmware `sdkconfig` readiness, Wi-Fi set/empty state, PTT settings,
-and TFT display/self-test state for the next flash. Bridge JSON errors are
+staged firmware bridge target, bridge target match, speaker/TTS settings, and
+TFT display/self-test state for the next flash. Bridge JSON errors are
 surfaced directly in app alerts so configuration problems are easier to
 diagnose during bench tests.
 
 ## Device Config Setup
 
 The app can store device Wi-Fi credentials, PTT wiring settings, PTT debounce,
-an RGB ring boot-test toggle, and TFT display bring-up toggles in Android
+speaker/TTS bring-up settings, an RGB ring boot-test toggle, and TFT display bring-up toggles in Android
 SecureStore. Wi-Fi supports an optional AP MAC/BSSID for networks with multiple
 radios. During bench testing, start the bridge with device config enabled:
 
@@ -70,11 +79,21 @@ cd ../
 
 Then use `Send To Bridge` in the app's `Device Config` section. The bridge
 writes the ignored firmware `sdkconfig`; rebuild and flash the board afterward.
+After a successful send, the app refreshes `/health` so the staged firmware
+settings and bridge-target match update in the health panel.
+If the app URL and staged firmware bridge target differ, the health panel can
+switch the app to the staged firmware URL. Editing, saving, or switching the
+bridge URL clears the previous health result and requires a fresh `Check`, so
+readiness from one computer cannot be displayed against another target.
 The AP MAC field is optional; when present, the app expects the standard
-six-byte colon-separated form, such as `ca:50:35:23:2b:1f`, and normalizes
+six-byte colon-separated form, such as `02:00:00:00:00:01`, and normalizes
 uppercase values before sending them. For PTT, the default is `GPIO0`,
 active-level `0`, debounce `35 ms`, pull `up`, which matches the BOOT button
 and a simple GPIO-to-GND external pushbutton.
+
+For speaker/TTS bring-up, leave `Speaker Output` and `TTS Playback` off for the
+first mic/bridge loop. `TTS Playback` turns on `Speaker Output` because firmware
+needs the ES8311 output path before it can play bridge WAV responses.
 
 For the TFT, `TFT Boot Test` enables the display and asks firmware to show the
 boot color/text wiring check after the next flash. Leave `TFT Display` enabled

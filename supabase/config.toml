@@ -1,0 +1,4 @@
+project_id = "wearabllm"
+
+[functions.wearabllm-transcript]
+verify_jwt = false

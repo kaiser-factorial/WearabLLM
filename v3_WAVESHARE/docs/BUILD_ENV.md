@@ -5,14 +5,14 @@
 This workspace has ESP-IDF v5.5 checked out at:
 
 ```text
-/Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5
+$HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5
 ```
 
 The install was run with Codex's bundled Python 3.12 first on `PATH`, because Homebrew `python3` is currently Python 3.14 and failed to create the ESP-IDF virtual environment.
 
 ```bash
-PATH="/Users/corinakaiser/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
-  /Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5/install.sh esp32s3
+PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
+  $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/install.sh esp32s3
 ```
 
 Host tools installed with Homebrew:
@@ -22,6 +22,19 @@ brew install cmake ninja
 ```
 
 ## Build Command
+
+Inside Codex's restricted macOS sandbox only, ESP-IDF's component manager may
+fail while listing host processes through `psutil`. The opt-in local shim keeps
+the component manager on its built-in `os.getppid()` fallback:
+
+```bash
+WEARABLLM_IDF_SANDBOX=1 \
+PYTHONPATH="$PWD/scripts/idf_sandbox_shim${PYTHONPATH:+:$PYTHONPATH}" \
+./scripts/firmware_build.sh
+```
+
+Do not set `WEARABLLM_IDF_SANDBOX` for a normal Terminal build; the ordinary
+`firmware_build.sh` command remains the supported user path.
 
 Before a bench session, run the v3 preflight:
 
@@ -69,15 +82,15 @@ Raw equivalent:
 
 ```bash
 cd v3_WAVESHARE/firmware
-PATH="/Users/corinakaiser/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
-  bash -c '. /Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
+PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
+  bash -c '. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
 ```
 
 For an interactive shell:
 
 ```bash
-export PATH="/Users/corinakaiser/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH"
-. /Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
+export PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH"
+. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
 idf.py build
 ```
 

@@ -14,7 +14,7 @@ config WEARABLLM_WIFI_BSSID
     string "Wi-Fi BSSID/AP MAC (optional)"
     default ""
     help
-        Optional access point MAC address, formatted like ca:50:35:23:2b:1f.
+        Optional access point MAC address, formatted like 02:00:00:00:00:01.
         Leave blank for normal SSID roaming. Set this only when you need the
         ESP32-S3 to connect to one specific AP that shares the configured SSID.
 
@@ -23,6 +23,63 @@ config WEARABLLM_BRIDGE_URL
     default "http://192.168.1.10:8765/v1/query"
     help
         Local bridge endpoint that receives audio/wav and returns JSON.
+
+config WEARABLLM_DIRECT_OPENAI
+    bool "Call OpenAI directly from firmware (API key is extractable)"
+    default n
+    help
+        Removes the runtime bridge dependency by embedding a project API key in
+        the firmware image. Anyone who can read the image can recover the key.
+
+config WEARABLLM_OPENAI_API_KEY
+    string "OpenAI project API key"
+    default ""
+    depends on WEARABLLM_DIRECT_OPENAI
+
+config WEARABLLM_OPENAI_STT_MODEL
+    string "OpenAI transcription model"
+    default "gpt-4o-transcribe"
+    depends on WEARABLLM_DIRECT_OPENAI
+
+config WEARABLLM_OPENAI_LLM_MODEL
+    string "OpenAI response model"
+    default "gpt-5.4-mini"
+    depends on WEARABLLM_DIRECT_OPENAI
+
+config WEARABLLM_OPENAI_TTS_MODEL
+    string "OpenAI TTS model"
+    default "gpt-4o-mini-tts"
+    depends on WEARABLLM_DIRECT_OPENAI
+
+config WEARABLLM_OPENAI_TTS_VOICE
+    string "OpenAI TTS voice"
+    default "verse"
+    depends on WEARABLLM_DIRECT_OPENAI
+
+config WEARABLLM_TRANSCRIPT_LOG_ENABLED
+    bool "Upload transcripts to a private HTTPS endpoint"
+    default n
+    help
+        Queues successful interactions for best-effort background upload.
+        Device interaction and TTS continue if logging is unavailable.
+
+config WEARABLLM_TRANSCRIPT_LOG_URL
+    string "Transcript log HTTPS URL"
+    default ""
+    depends on WEARABLLM_TRANSCRIPT_LOG_ENABLED
+
+config WEARABLLM_TRANSCRIPT_DEVICE_ID
+    string "Transcript log device ID"
+    default "wearabllm-esp32"
+    depends on WEARABLLM_TRANSCRIPT_LOG_ENABLED
+
+config WEARABLLM_TRANSCRIPT_DEVICE_TOKEN
+    string "Transcript log device token (extractable)"
+    default ""
+    depends on WEARABLLM_TRANSCRIPT_LOG_ENABLED
+    help
+        Shared secret checked by the transcript endpoint. Like the OpenAI key,
+        it can be recovered from a firmware image and must be rotatable.
 
 config WEARABLLM_WIFI_CONNECT_TIMEOUT_MS
     int "Wi-Fi connect wait timeout ms"
@@ -149,7 +206,7 @@ config WEARABLLM_TTS_URL
 config WEARABLLM_TTS_MAX_BYTES
     int "Maximum TTS WAV bytes"
     default 131072
-    depends on WEARABLLM_TTS_ENABLED
+    depends on WEARABLLM_TTS_ENABLED || WEARABLLM_DIRECT_OPENAI
     help
         Maximum audio/wav response to buffer in RAM for phase-2 playback.
 

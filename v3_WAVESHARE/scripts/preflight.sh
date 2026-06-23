@@ -11,6 +11,23 @@ BRIDGE_PID=""
 RUN_FIRMWARE=1
 RUN_APP=1
 RUN_SMOKE=1
+PYTHON_BIN="${WEARABLLM_PYTHON:-python3}"
+
+if ! "${PYTHON_BIN}" -c 'import audioop' >/dev/null 2>&1; then
+    for candidate in /usr/bin/python3 \
+        "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"; do
+        if [ -x "${candidate}" ] && "${candidate}" -c 'import audioop' >/dev/null 2>&1; then
+            PYTHON_BIN="${candidate}"
+            break
+        fi
+    done
+fi
+
+if ! "${PYTHON_BIN}" -c 'import audioop' >/dev/null 2>&1; then
+    echo "No Python runtime with audioop support was found." >&2
+    echo "Install v3_WAVESHARE/bridge/requirements.txt or set WEARABLLM_PYTHON." >&2
+    exit 1
+fi
 
 usage() {
     cat <<'EOF'
@@ -84,7 +101,7 @@ wait_for_bridge() {
 cd "${REPO_ROOT}"
 
 step "Python compile checks"
-python3 -m py_compile \
+"${PYTHON_BIN}" -m py_compile \
     v3_WAVESHARE/scripts/analyze_serial_log.py \
     v3_WAVESHARE/scripts/bench_doctor.py \
     v3_WAVESHARE/scripts/bench_report.py \
@@ -92,10 +109,11 @@ python3 -m py_compile \
     v3_WAVESHARE/scripts/configure_firmware.py \
     v3_WAVESHARE/scripts/inspect_captures.py \
     v3_WAVESHARE/scripts/validate_protocol.py \
+    v3_WAVESHARE/scripts/verify_firmware_image.py \
     v3_WAVESHARE/bridge/wearabllm_bridge.py
 
 step "Protocol consistency"
-python3 v3_WAVESHARE/scripts/validate_protocol.py
+"${PYTHON_BIN}" v3_WAVESHARE/scripts/validate_protocol.py
 
 bash -n \
     v3_WAVESHARE/scripts/bridge_smoke.sh \
@@ -106,7 +124,10 @@ bash -n \
     v3_WAVESHARE/scripts/serial_capture.sh
 
 step "Bridge unit tests"
-python3 -m unittest discover -s v3_WAVESHARE/bridge -p 'test_*.py'
+"${PYTHON_BIN}" -m unittest discover -s v3_WAVESHARE/bridge -p 'test_*.py'
+
+step "Bench helper unit tests"
+"${PYTHON_BIN}" -m unittest discover -s v3_WAVESHARE/scripts -p 'test_*.py'
 
 if [ "${RUN_APP}" = "1" ]; then
     step "App protocol and type checks"
@@ -123,7 +144,7 @@ if [ "${RUN_SMOKE}" = "1" ]; then
     step "Dry-run bridge smoke on 127.0.0.1:${BRIDGE_PORT}"
     cd "${V3_DIR}/bridge"
     WEARABLLM_DRY_RUN_SEQUENCE=GS,RF \
-        python3 wearabllm_bridge.py \
+        "${PYTHON_BIN}" wearabllm_bridge.py \
             --host 127.0.0.1 \
             --port "${BRIDGE_PORT}" \
             --dry-run \

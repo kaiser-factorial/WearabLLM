@@ -10,6 +10,10 @@ const DEVICE_PTT_GPIO_KEY = 'wearabllm_v3_device_ptt_gpio';
 const DEVICE_PTT_ACTIVE_LEVEL_KEY = 'wearabllm_v3_device_ptt_active_level';
 const DEVICE_PTT_DEBOUNCE_MS_KEY = 'wearabllm_v3_device_ptt_debounce_ms';
 const DEVICE_PTT_PULL_KEY = 'wearabllm_v3_device_ptt_pull';
+const DEVICE_AUDIO_OUT_ENABLED_KEY = 'wearabllm_v3_device_audio_out_enabled';
+const DEVICE_AUDIO_OUT_VOLUME_KEY = 'wearabllm_v3_device_audio_out_volume';
+const DEVICE_TTS_ENABLED_KEY = 'wearabllm_v3_device_tts_enabled';
+const DEVICE_TTS_MAX_BYTES_KEY = 'wearabllm_v3_device_tts_max_bytes';
 const DEVICE_LED_SELF_TEST_KEY = 'wearabllm_v3_device_led_self_test';
 const DEVICE_DISPLAY_ENABLED_KEY = 'wearabllm_v3_device_display_enabled';
 const DEVICE_DISPLAY_SELF_TEST_KEY = 'wearabllm_v3_device_display_self_test';
@@ -31,6 +35,10 @@ export interface DeviceWifiSettings {
   pttActiveLevel: string;
   pttDebounceMs: string;
   pttPull: string;
+  audioOutEnabled: boolean;
+  audioOutVolume: string;
+  ttsEnabled: boolean;
+  ttsMaxBytes: string;
   ledSelfTest: boolean;
   displayEnabled: boolean;
   displaySelfTest: boolean;
@@ -45,6 +53,10 @@ export async function loadDeviceWifiSettings(): Promise<DeviceWifiSettings> {
     pttActiveLevel,
     pttDebounceMs,
     pttPull,
+    audioOutEnabled,
+    audioOutVolume,
+    ttsEnabled,
+    ttsMaxBytes,
     ledSelfTest,
     displayEnabled,
     displaySelfTest,
@@ -56,6 +68,10 @@ export async function loadDeviceWifiSettings(): Promise<DeviceWifiSettings> {
     SecureStore.getItemAsync(DEVICE_PTT_ACTIVE_LEVEL_KEY),
     SecureStore.getItemAsync(DEVICE_PTT_DEBOUNCE_MS_KEY),
     SecureStore.getItemAsync(DEVICE_PTT_PULL_KEY),
+    SecureStore.getItemAsync(DEVICE_AUDIO_OUT_ENABLED_KEY),
+    SecureStore.getItemAsync(DEVICE_AUDIO_OUT_VOLUME_KEY),
+    SecureStore.getItemAsync(DEVICE_TTS_ENABLED_KEY),
+    SecureStore.getItemAsync(DEVICE_TTS_MAX_BYTES_KEY),
     SecureStore.getItemAsync(DEVICE_LED_SELF_TEST_KEY),
     SecureStore.getItemAsync(DEVICE_DISPLAY_ENABLED_KEY),
     SecureStore.getItemAsync(DEVICE_DISPLAY_SELF_TEST_KEY),
@@ -68,6 +84,10 @@ export async function loadDeviceWifiSettings(): Promise<DeviceWifiSettings> {
     pttActiveLevel: pttActiveLevel ?? '0',
     pttDebounceMs: pttDebounceMs ?? '35',
     pttPull: pttPull ?? 'up',
+    audioOutEnabled: audioOutEnabled === 'true',
+    audioOutVolume: audioOutVolume ?? '45',
+    ttsEnabled: ttsEnabled === 'true',
+    ttsMaxBytes: ttsMaxBytes ?? '131072',
     ledSelfTest: ledSelfTest === 'true',
     displayEnabled: displayEnabled === 'true',
     displaySelfTest: displaySelfTest === 'true',
@@ -83,6 +103,10 @@ export async function saveDeviceWifiSettings(settings: DeviceWifiSettings): Prom
     SecureStore.setItemAsync(DEVICE_PTT_ACTIVE_LEVEL_KEY, settings.pttActiveLevel),
     SecureStore.setItemAsync(DEVICE_PTT_DEBOUNCE_MS_KEY, settings.pttDebounceMs),
     SecureStore.setItemAsync(DEVICE_PTT_PULL_KEY, settings.pttPull),
+    SecureStore.setItemAsync(DEVICE_AUDIO_OUT_ENABLED_KEY, String(settings.audioOutEnabled)),
+    SecureStore.setItemAsync(DEVICE_AUDIO_OUT_VOLUME_KEY, settings.audioOutVolume),
+    SecureStore.setItemAsync(DEVICE_TTS_ENABLED_KEY, String(settings.ttsEnabled)),
+    SecureStore.setItemAsync(DEVICE_TTS_MAX_BYTES_KEY, settings.ttsMaxBytes),
     SecureStore.setItemAsync(DEVICE_LED_SELF_TEST_KEY, String(settings.ledSelfTest)),
     SecureStore.setItemAsync(DEVICE_DISPLAY_ENABLED_KEY, String(settings.displayEnabled)),
     SecureStore.setItemAsync(DEVICE_DISPLAY_SELF_TEST_KEY, String(settings.displaySelfTest)),

@@ -76,6 +76,10 @@ cd v3_WAVESHARE
 ./scripts/run_bridge_dryrun.sh
 ```
 
+The helper reads the ignored firmware config and uses the port from the staged
+bridge URL unless `WEARABLLM_BRIDGE_PORT` is set. It also prints the firmware
+bridge target and capture directory before starting the server.
+
 To force a specific dry-run LED command for ring animation testing:
 
 ```bash
@@ -104,6 +108,10 @@ In a second terminal, verify all dry-run bridge endpoints:
 cd v3_WAVESHARE
 ./scripts/bridge_smoke.sh
 ```
+
+Without an explicit URL, this checks `127.0.0.1` on the port from the staged
+firmware bridge URL. Pass a URL or set `WEARABLLM_BRIDGE_BASE_URL` to check a
+different bridge host.
 
 In dry-run mode, this also posts a generated non-silent `audio/wav` to `/v1/query`, which is the same endpoint used by the firmware. In live mode it skips that audio query by default to avoid unplanned STT/API calls. To force the audio query anyway:
 
@@ -158,7 +166,7 @@ In another terminal:
 
 ```bash
 cd v3_WAVESHARE/firmware
-. /Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
+. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
 idf.py set-target esp32s3
 idf.py menuconfig
 ```
@@ -208,7 +216,7 @@ If your network has multiple access points with the same name, you can
 optionally pin the ESP32 to one AP MAC/BSSID:
 
 ```bash
-export WEARABLLM_WIFI_BSSID="ca:50:35:23:2b:1f"
+export WEARABLLM_WIFI_BSSID="02:00:00:00:00:01"
 ./scripts/configure_firmware.py
 ```
 
@@ -300,6 +308,16 @@ cd v3_WAVESHARE
 ./scripts/firmware_flash_monitor.sh
 ```
 
+For the first phase-1 flash, enable the stricter profile gate:
+
+```bash
+WEARABLLM_FIRST_FLASH=1 ./scripts/firmware_flash_monitor.sh /dev/cu.usbmodem101
+```
+
+The flash helper always runs `scripts/verify_firmware_image.py` first. The
+first-flash flag additionally refuses an image with TFT, speaker, TTS, or the
+RGB boot self-test enabled.
+
 If the wildcard does not match, list serial devices:
 
 ```bash
@@ -341,6 +359,11 @@ summarizes the latest serial/WAV evidence without touching the board:
 ```bash
 ./scripts/bench_doctor.py
 ```
+
+The doctor also compares the IPv4 address in the staged firmware bridge URL
+with this computer's current LAN addresses. If the computer changed networks,
+it prints the exact `configure_firmware.py --bridge-host ...` command to run
+before rebuilding. This avoids flashing a valid build that targets an old IP.
 
 To summarize the newest saved log:
 
@@ -403,6 +426,10 @@ cd v3_WAVESHARE
 ./scripts/analyze_serial_log.py logs/serial-YYYYmmdd-HHMMSS.log
 ```
 
+On updated firmware it also summarizes the latest complete set of four
+`ES7210 packed lane` peak/RMS readings, making a silent or disconnected mic
+channel visible in both `analyze_serial_log.py` and `bench_report.py` output.
+
 ### 6. First Interaction Test
 
 Hold the BOOT button, say a short phrase, then release.
@@ -426,7 +453,12 @@ bridge HTTP result: err=ESP_OK status=200 response_bytes=<n>
 transcript: <recognized speech>
 bridge command=BS reply_len=<n>
 LED command: BS
+interaction #1 complete result=ok total_ms=<ms> command=BS capture_source=onboard-mic
 ```
+
+Treat `capture_source=onboard-mic` as the mic-path gate. The firmware can use a
+short silent fallback after an audio-driver error so networking and LEDs remain
+testable; that fallback is useful for isolation but is not microphone success.
 
 If the bridge returns malformed JSON, an unknown LED code, or a response larger
 than the firmware's current response buffer, the board logs a bridge request
@@ -478,10 +510,16 @@ Do not move to live OpenAI/STT until this saved WAV has real audible mic audio.
 After the dry-run audio file sounds usable, restart the bridge without `--dry-run`:
 
 ```bash
-cd v3_WAVESHARE/bridge
-source .venv/bin/activate
-export OPENAI_API_KEY="..."
-python wearabllm_bridge.py --host 0.0.0.0 --port 8765 --save-wav-dir ./captures
+cd v3_WAVESHARE
+./scripts/run_bridge_live.sh
+```
+
+The launcher first checks macOS Keychain. On first use it requests the key with
+hidden input and stores it under service `wearabllm-openai-api-key`; it does not
+write the key to project files or shell history. To forget it:
+
+```bash
+security delete-generic-password -a "$USER" -s wearabllm-openai-api-key
 ```
 
 Flash does not need to change if the bridge URL is the same. Hold BOOT, ask a simple yes/no question, and confirm:
@@ -646,7 +684,7 @@ http://192.168.1.23:8765/v1/query
 For the first real board test, run the bridge with WAV saving enabled:
 
 ```bash
-python wearabllm_bridge.py --save-wav-dir ./captures --dry-run
+./scripts/run_bridge_dryrun.sh
 ```
 
 Then hold the device button and speak a short fixed phrase, such as:
@@ -703,20 +741,20 @@ open captures/wearabllm-*.wav
 Prerequisite: ESP-IDF installed and exported in the current shell. On this Mac, the local ESP-IDF checkout is:
 
 ```text
-/Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5
+$HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5
 ```
 
 ```bash
 cd v3_WAVESHARE/firmware
-PATH="/Users/corinakaiser/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
-  bash -c '. /Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
+PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
+  bash -c '. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
 ```
 
 For normal interactive work:
 
 ```bash
 cd v3_WAVESHARE/firmware
-. /Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
+. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
 idf.py set-target esp32s3
 idf.py menuconfig
 idf.py build
@@ -780,6 +818,13 @@ Leave it disabled until the mic capture and bridge loop are stable. When enabled
 WearabLLM v3 -> Speaker output volume -> 45
 ```
 
+You can also stage this for the next flash through the Android app's
+`Device Config` panel or the local helper:
+
+```bash
+./scripts/configure_firmware.py --enable-audio-out --audio-out-volume 45
+```
+
 Expected speaker behavior:
 
 - boot log includes `ES8311 speaker output ready`
@@ -799,6 +844,13 @@ WearabLLM v3 -> Enable ES8311 speaker output
 WearabLLM v3 -> Enable bridge TTS WAV playback
 WearabLLM v3 -> Bridge TTS URL -> http://192.168.1.23:8765/v1/tts
 WearabLLM v3 -> Max TTS WAV response bytes -> 131072
+```
+
+The Android app's `TTS Playback` toggle and the helper flag below stage the same
+next-flash settings. Enabling TTS also enables the speaker output path:
+
+```bash
+./scripts/configure_firmware.py --enable-tts --tts-max-bytes 131072
 ```
 
 For a no-API hardware smoke test, run the bridge in dry-run mode:
@@ -863,8 +915,8 @@ python3 -m unittest discover -s v3_WAVESHARE/bridge -p 'test_*.py'
 python3 -m py_compile v3_WAVESHARE/bridge/wearabllm_bridge.py v3_WAVESHARE/bridge/test_wearabllm_bridge.py
 
 cd v3_WAVESHARE/firmware
-PATH="/Users/corinakaiser/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
-  bash -c '. /Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
+PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
+  bash -c '. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
 ```
 
 The firmware build output is `build/wearabllm_waveshare.bin`.

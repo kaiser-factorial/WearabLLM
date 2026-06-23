@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 V3_DIR = SCRIPT_DIR.parent
@@ -20,6 +22,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(BRIDGE_DIR))
 
 from analyze_serial_log import analyze, newest_log  # noqa: E402
+from bringup_info import candidate_ipv4_addresses  # noqa: E402
 from wearabllm_bridge import inspect_wav  # noqa: E402
 
 
@@ -52,6 +55,35 @@ def normalize_bridge_base_url(raw_url: str) -> str:
         if url.endswith(suffix):
             return url[: -len(suffix)]
     return url
+
+
+def analyze_bridge_target(
+    raw_url: str, local_addresses: list[str] | None = None
+) -> dict[str, Any]:
+    """Check whether a staged IPv4 bridge URL points back to this computer."""
+    addresses = candidate_ipv4_addresses() if local_addresses is None else local_addresses
+    normalized = normalize_bridge_base_url(raw_url)
+    host = urlsplit(normalized).hostname if normalized else None
+    matches_local: bool | None = None
+    is_ipv4 = False
+
+    if host:
+        try:
+            ipaddress.IPv4Address(host)
+            is_ipv4 = True
+            matches_local = host in addresses
+        except ipaddress.AddressValueError:
+            if host.lower() == "localhost":
+                matches_local = False
+
+    suggested_host = addresses[0] if matches_local is False and addresses else None
+    return {
+        "host": host,
+        "is_ipv4": is_ipv4,
+        "local_addresses": addresses,
+        "matches_local": matches_local,
+        "suggested_host": suggested_host,
+    }
 
 
 def firmware_status() -> dict[str, Any]:
@@ -170,6 +202,7 @@ def serial_status(path: Path | None) -> dict[str, Any]:
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     firmware = firmware_status()
     configured_bridge = str(firmware.get("bridge_url") or "")
+    bridge_target = analyze_bridge_target(configured_bridge)
     bridge_base_url = normalize_bridge_base_url(args.bridge_url or configured_bridge)
     bridge = bridge_health(bridge_base_url, timeout_seconds=2.0)
     serial_path = args.serial_log.expanduser() if args.serial_log else newest_log()
@@ -182,12 +215,14 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     bridge_config = bridge_config if isinstance(bridge_config, dict) else {}
     ready = bool(
         firmware.get("ready")
+        and bridge_target.get("matches_local") is not False
         and bridge.get("reachable")
         and bridge_config.get("dry_run") is True
     )
 
     return {
         "firmware": firmware,
+        "bridge_target": bridge_target,
         "bridge": bridge,
         "serial": serial,
         "wav": wav,
@@ -203,6 +238,7 @@ def yes_no(value: object) -> str:
 
 def format_human(payload: dict[str, Any]) -> str:
     firmware = payload["firmware"]
+    bridge_target = payload["bridge_target"]
     bridge = payload["bridge"]
     serial = payload["serial"]
     wav = payload["wav"]
@@ -218,6 +254,13 @@ def format_human(payload: dict[str, Any]) -> str:
     lines.append(f"  Wi-Fi password: {'set' if firmware.get('wifi_password_set') else 'empty'}")
     lines.append(f"  Wi-Fi BSSID: {firmware.get('wifi_bssid') or 'not pinned'}")
     lines.append(f"  bridge URL: {firmware.get('bridge_url') or 'empty'}")
+    local_addresses = bridge_target.get("local_addresses") or []
+    lines.append(f"  current computer LAN IPs: {', '.join(local_addresses) or 'none detected'}")
+    target_match = bridge_target.get("matches_local")
+    lines.append(
+        "  bridge host is this computer: "
+        + ("yes" if target_match is True else "no" if target_match is False else "unknown")
+    )
     lines.append(
         "  PTT: "
         f"GPIO {firmware.get('ptt_gpio') if firmware.get('ptt_gpio') is not None else 'unset'}, "
@@ -226,6 +269,16 @@ def format_human(payload: dict[str, Any]) -> str:
         f"pull {firmware.get('ptt_pull')}"
     )
     lines.append(f"  RGB ring boot test: {'on' if firmware.get('led_self_test') else 'off'}")
+    lines.append(
+        "  speaker: "
+        f"{'on' if firmware.get('audio_out_enabled') else 'off'}, "
+        f"volume {firmware.get('audio_out_volume') if firmware.get('audio_out_volume') is not None else 'default'}"
+    )
+    lines.append(
+        "  TTS playback: "
+        f"{'on' if firmware.get('tts_enabled') else 'off'}, "
+        f"max bytes {firmware.get('tts_max_bytes') if firmware.get('tts_max_bytes') is not None else 'default'}"
+    )
     lines.append(
         "  TFT: "
         f"{'on' if firmware.get('display_enabled') else 'off'}, "
@@ -269,6 +322,16 @@ def format_human(payload: dict[str, Any]) -> str:
     if not payload["ready_for_dry_run"]:
         if not firmware.get("ready"):
             lines.append("Next: finish firmware Wi-Fi/bridge config, then rebuild and flash.")
+        elif bridge_target.get("matches_local") is False:
+            suggested_host = bridge_target.get("suggested_host")
+            if suggested_host:
+                lines.append(
+                    "Next: update the stale firmware bridge address with "
+                    f"`./scripts/configure_firmware.py --bridge-host {suggested_host}`, "
+                    "then rebuild before flashing."
+                )
+            else:
+                lines.append("Next: update the firmware bridge URL to this computer's LAN IP, then rebuild.")
         elif not bridge.get("reachable"):
             lines.append("Next: start the dry-run bridge or fix the bridge URL.")
         elif bridge_config.get("dry_run") is not True:

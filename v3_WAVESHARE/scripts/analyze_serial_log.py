@@ -21,6 +21,8 @@ CHECKS = [
     ("wifi_connected", "Wi-Fi connected", "Wi-Fi connected:"),
     ("wifi_ap", "Wi-Fi AP details logged", "Wi-Fi AP:"),
     ("listening", "PTT/listening state seen", "push-to-talk held: listening"),
+    ("capture_source", "onboard mic used instead of fallback", "capture source=onboard-mic"),
+    ("mic_lanes", "four ES7210 mic lane stats seen", "ES7210 packed lane 3:"),
     ("capture_stats", "capture stats seen", "capture stats:"),
     ("bridge_post", "posted WAV to bridge", "posting WAV to bridge:"),
     ("bridge_ok", "bridge HTTP 200 response", "bridge HTTP result: err=ESP_OK status=200"),
@@ -38,8 +40,18 @@ CAPTURE_RE = re.compile(
     r"samples=(?P<samples>\d+) peak=(?P<peak>\d+) rms=(?P<rms>\d+) "
     r"appears_silent=(?P<silent>yes|no)"
 )
+MIC_LANE_RE = re.compile(
+    r"ES7210 packed lane (?P<lane>[0-3]): "
+    r"peak=(?P<peak>\d+) rms=(?P<rms>\d+) "
+    r"appears_silent=(?P<silent>yes|no)"
+)
 BRIDGE_RE = re.compile(r"bridge HTTP result: err=(?P<err>\S+) status=(?P<status>\d+)")
 COMMAND_RE = re.compile(r"bridge command=(?P<command>[A-Z]{2}) reply_len=(?P<reply_len>\d+)")
+INTERACTION_RE = re.compile(
+    r"interaction #(?P<id>\d+) complete result=(?P<result>ok|error) "
+    r"total_ms=(?P<total_ms>\d+)(?: command=(?P<command>[A-Z]{2})| err=(?P<err>\S+)) "
+    r"capture_source=(?P<capture_source>onboard-mic|silent-fallback)"
+)
 IP_RE = re.compile(r"Wi-Fi connected: (?P<ip>\d+\.\d+\.\d+\.\d+)")
 AP_RE = re.compile(
     r"Wi-Fi AP: ssid=(?P<ssid>.*?) "
@@ -83,6 +95,11 @@ def first_match(pattern: re.Pattern[str], text: str) -> dict[str, str] | None:
     return match.groupdict() if match else None
 
 
+def last_match(pattern: re.Pattern[str], text: str) -> dict[str, str] | None:
+    matches = list(pattern.finditer(text))
+    return matches[-1].groupdict() if matches else None
+
+
 def collect_errors(lines: list[str]) -> list[str]:
     errors: list[str] = []
     for line in lines:
@@ -94,6 +111,20 @@ def collect_errors(lines: list[str]) -> list[str]:
                 errors.append(line.strip())
                 break
     return errors[-8:]
+
+
+def collect_latest_mic_lanes(text: str) -> list[dict[str, str]]:
+    current: dict[int, dict[str, str]] = {}
+    latest_complete: dict[int, dict[str, str]] = {}
+    for match in MIC_LANE_RE.finditer(text):
+        data = match.groupdict()
+        lane = int(data["lane"])
+        if lane == 0:
+            current = {}
+        current[lane] = data
+        if len(current) == 4:
+            latest_complete = dict(current)
+    return [latest_complete[lane] for lane in range(4)] if len(latest_complete) == 4 else []
 
 
 def analyze(path: Path) -> dict[str, object]:
@@ -108,8 +139,10 @@ def analyze(path: Path) -> dict[str, object]:
     }
 
     capture = first_match(CAPTURE_RE, text)
+    mic_lanes = collect_latest_mic_lanes(text)
     bridge = first_match(BRIDGE_RE, text)
     command = first_match(COMMAND_RE, text)
+    interaction = last_match(INTERACTION_RE, text)
     ip = first_match(IP_RE, text)
     ap = first_match(AP_RE, text)
 
@@ -126,8 +159,10 @@ def analyze(path: Path) -> dict[str, object]:
         "wifi_ip": ip["ip"] if ip else None,
         "wifi_ap": ap,
         "capture": capture,
+        "mic_lanes": mic_lanes,
         "bridge": bridge,
         "command": command,
+        "interaction": interaction,
         "recent_errors": collect_errors(lines),
     }
 
@@ -157,6 +192,15 @@ def format_human(result: dict[str, object]) -> str:
     if isinstance(command, dict):
         lines.append(f"Command: {command.get('command')} reply_len={command.get('reply_len')}")
 
+    interaction = result.get("interaction")
+    if isinstance(interaction, dict):
+        lines.append(
+            "Interaction: "
+            f"#{interaction.get('id')} result={interaction.get('result')} "
+            f"total={interaction.get('total_ms')} ms "
+            f"source={interaction.get('capture_source')}"
+        )
+
     capture = result.get("capture")
     if isinstance(capture, dict):
         lines.append(
@@ -164,6 +208,16 @@ def format_human(result: dict[str, object]) -> str:
             f"{capture.get('duration')} ms, peak={capture.get('peak')}, "
             f"rms={capture.get('rms')}, silent={capture.get('silent')}"
         )
+
+    mic_lanes = result.get("mic_lanes")
+    if isinstance(mic_lanes, list) and mic_lanes:
+        lines.append("ES7210 packed lanes:")
+        for lane in mic_lanes:
+            if isinstance(lane, dict):
+                lines.append(
+                    f"  lane {lane.get('lane')}: peak={lane.get('peak')}, "
+                    f"rms={lane.get('rms')}, silent={lane.get('silent')}"
+                )
 
     bridge = result.get("bridge")
     if isinstance(bridge, dict):

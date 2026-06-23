@@ -4,9 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V3_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FIRMWARE_DIR="${V3_DIR}/firmware"
-IDF_PATH_DEFAULT="/Users/corinakaiser/Projects/wearabLLM/.toolchains/esp-idf-v5.5"
+REPO_DIR="$(cd "${V3_DIR}/.." && pwd)"
+WORKSPACE_DIR="$(cd "${REPO_DIR}/.." && pwd)"
+IDF_PATH_DEFAULT="${WORKSPACE_DIR}/.toolchains/esp-idf-v5.5"
 IDF_PATH="${IDF_PATH:-${IDF_PATH_DEFAULT}}"
-CODEX_PYTHON_BIN="/Users/corinakaiser/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin"
+CODEX_PYTHON_BIN="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin"
 
 usage() {
     cat <<'EOF'
@@ -19,6 +21,8 @@ Variants:
   display-test   Compile with TFT enabled plus boot wiring self-test.
   audio-out      Compile with optional ES8311 speaker output enabled.
   tts            Compile with speaker output plus bridge TTS WAV playback enabled.
+  direct-openai  Compile the bridge-free path with a non-secret placeholder key.
+  transcript-log Compile the background HTTPS transcript uploader.
   all            Build every variant above.
 EOF
 }
@@ -41,9 +45,9 @@ for variant in "$@"; do
             exit 0
             ;;
         all)
-            variants+=(default led-self-test display display-test audio-out tts)
+            variants+=(default led-self-test display display-test audio-out tts direct-openai transcript-log)
             ;;
-        default|led-self-test|display|display-test|audio-out|tts)
+        default|led-self-test|display|display-test|audio-out|tts|direct-openai|transcript-log)
             variants+=("${variant}")
             ;;
         *)
@@ -88,6 +92,16 @@ make_defaults() {
                 echo "CONFIG_WEARABLLM_AUDIO_OUT_VOLUME=45"
                 echo "CONFIG_WEARABLLM_TTS_ENABLED=y"
                 echo "CONFIG_WEARABLLM_TTS_MAX_BYTES=131072"
+                ;;
+            direct-openai)
+                echo "CONFIG_WEARABLLM_DIRECT_OPENAI=y"
+                echo 'CONFIG_WEARABLLM_OPENAI_API_KEY="placeholder-build-only"'
+                echo "CONFIG_WEARABLLM_AUDIO_OUT_ENABLED=y"
+                ;;
+            transcript-log)
+                echo "CONFIG_WEARABLLM_TRANSCRIPT_LOG_ENABLED=y"
+                echo 'CONFIG_WEARABLLM_TRANSCRIPT_LOG_URL="https://example.supabase.co/functions/v1/wearabllm-transcript"'
+                echo 'CONFIG_WEARABLLM_TRANSCRIPT_DEVICE_TOKEN="placeholder-build-only"'
                 ;;
         esac
     } >> "${defaults_file}"

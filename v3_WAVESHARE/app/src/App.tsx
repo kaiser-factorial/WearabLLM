@@ -17,10 +17,12 @@ import {
   fetchBridgeHealth,
   normalizeDeviceWifiBssid,
   normalizeBridgeBaseUrl,
+  normalizeAudioOutVolume,
   normalizePttActiveLevel,
   normalizePttDebounceMs,
   normalizePttGpio,
   normalizePttPull,
+  normalizeTtsMaxBytes,
   queryBridgeText,
   summarizeBridgeBenchStatus,
   BridgeHealth,
@@ -61,6 +63,10 @@ export default function App() {
   const [devicePttActiveLevel, setDevicePttActiveLevel] = useState('0');
   const [devicePttDebounceMs, setDevicePttDebounceMs] = useState('35');
   const [devicePttPull, setDevicePttPull] = useState('up');
+  const [deviceAudioOutEnabled, setDeviceAudioOutEnabled] = useState(false);
+  const [deviceAudioOutVolume, setDeviceAudioOutVolume] = useState('45');
+  const [deviceTtsEnabled, setDeviceTtsEnabled] = useState(false);
+  const [deviceTtsMaxBytes, setDeviceTtsMaxBytes] = useState('131072');
   const [deviceLedSelfTest, setDeviceLedSelfTest] = useState(false);
   const [deviceDisplayEnabled, setDeviceDisplayEnabled] = useState(false);
   const [deviceDisplaySelfTest, setDeviceDisplaySelfTest] = useState(false);
@@ -74,6 +80,8 @@ export default function App() {
   const [isListening, setIsListening] = useState(false);
   const [status, setStatus] = useState('Bridge idle');
   const voiceListenerRef = useRef<VoiceListener | null>(null);
+  const bridgeUrlRef = useRef(bridgeUrl);
+  const healthRequestIdRef = useRef(0);
 
   useEffect(() => {
     loadBridgeUrl().then(setBridgeUrl).catch(() => undefined);
@@ -86,12 +94,20 @@ export default function App() {
         setDevicePttActiveLevel(settings.pttActiveLevel);
         setDevicePttDebounceMs(settings.pttDebounceMs);
         setDevicePttPull(settings.pttPull);
+        setDeviceAudioOutEnabled(settings.audioOutEnabled);
+        setDeviceAudioOutVolume(settings.audioOutVolume);
+        setDeviceTtsEnabled(settings.ttsEnabled);
+        setDeviceTtsMaxBytes(settings.ttsMaxBytes);
         setDeviceLedSelfTest(settings.ledSelfTest);
         setDeviceDisplayEnabled(settings.displayEnabled);
         setDeviceDisplaySelfTest(settings.displaySelfTest);
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    bridgeUrlRef.current = bridgeUrl;
+  }, [bridgeUrl]);
 
   useEffect(() => {
     const listener = new VoiceListener();
@@ -115,22 +131,61 @@ export default function App() {
       listener.destroy();
       voiceListenerRef.current = null;
     };
-  }, [bridgeUrl]);
+  }, []);
 
   const commandColor = useMemo(
     () => (lastResponse ? COMMAND_COLORS[lastResponse.command] : '#64748b'),
     [lastResponse],
   );
   const bridgeBenchSummary = useMemo(
-    () => (bridgeHealth ? summarizeBridgeBenchStatus(bridgeHealth) : null),
-    [bridgeHealth],
+    () => (bridgeHealth ? summarizeBridgeBenchStatus(bridgeHealth, bridgeUrl) : null),
+    [bridgeHealth, bridgeUrl],
   );
 
   async function handleSaveBridgeUrl() {
     const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrl);
+    bridgeUrlRef.current = normalizedUrl;
+    healthRequestIdRef.current += 1;
+    setBridgeUrl(normalizedUrl);
+    setBridgeHealth(null);
+    await saveBridgeUrl(normalizedUrl);
+    setStatus('Bridge URL saved; check connection');
+  }
+
+  function handleBridgeUrlChange(value: string) {
+    bridgeUrlRef.current = value;
+    healthRequestIdRef.current += 1;
+    setBridgeUrl(value);
+    setBridgeHealth(null);
+    setStatus('Bridge URL changed; check connection');
+  }
+
+  async function refreshBridgeHealth(normalizedUrl: string): Promise<BridgeHealth | null> {
+    const requestId = healthRequestIdRef.current + 1;
+    healthRequestIdRef.current = requestId;
+    bridgeUrlRef.current = normalizedUrl;
     setBridgeUrl(normalizedUrl);
     await saveBridgeUrl(normalizedUrl);
-    setStatus('Bridge URL saved');
+    let health: BridgeHealth;
+    try {
+      health = await fetchBridgeHealth(normalizedUrl);
+    } catch (error) {
+      if (
+        requestId !== healthRequestIdRef.current ||
+        normalizeBridgeBaseUrl(bridgeUrlRef.current) !== normalizedUrl
+      ) {
+        return null;
+      }
+      throw error;
+    }
+    if (
+      requestId !== healthRequestIdRef.current ||
+      normalizeBridgeBaseUrl(bridgeUrlRef.current) !== normalizedUrl
+    ) {
+      return null;
+    }
+    setBridgeHealth(health);
+    return health;
   }
 
   async function handleCheckBridge() {
@@ -138,11 +193,10 @@ export default function App() {
     setStatus('Checking bridge health');
     try {
       const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrl);
-      setBridgeUrl(normalizedUrl);
-      await saveBridgeUrl(normalizedUrl);
-      const health = await fetchBridgeHealth(normalizedUrl);
-      setBridgeHealth(health);
-      setStatus(health.config.dry_run ? 'Bridge reachable in dry-run mode' : 'Bridge reachable in live mode');
+      const health = await refreshBridgeHealth(normalizedUrl);
+      if (health) {
+        setStatus(health.config.dry_run ? 'Bridge reachable in dry-run mode' : 'Bridge reachable in live mode');
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setBridgeHealth(null);
@@ -153,18 +207,36 @@ export default function App() {
     }
   }
 
+  async function handleUseFirmwareBridgeUrl() {
+    const firmwareUrl = bridgeHealth?.config.firmware_config?.bridge_url;
+    if (!firmwareUrl) {
+      return;
+    }
+    const normalizedUrl = normalizeBridgeBaseUrl(firmwareUrl);
+    healthRequestIdRef.current += 1;
+    bridgeUrlRef.current = normalizedUrl;
+    setBridgeUrl(normalizedUrl);
+    setBridgeHealth(null);
+    await saveBridgeUrl(normalizedUrl);
+    setStatus('Firmware bridge URL selected; check connection');
+  }
+
   async function handleSaveDeviceWifi() {
     let normalizedBssid = '';
     let normalizedPttGpio: number | null = null;
     let normalizedPttActiveLevel: number | null = null;
     let normalizedPttDebounceMs: number | null = null;
     let normalizedPttPull = '';
+    let normalizedAudioOutVolume: number | null = null;
+    let normalizedTtsMaxBytes: number | null = null;
     try {
       normalizedBssid = normalizeDeviceWifiBssid(deviceWifiBssid);
       normalizedPttGpio = normalizePttGpio(devicePttGpio);
       normalizedPttActiveLevel = normalizePttActiveLevel(devicePttActiveLevel);
       normalizedPttDebounceMs = normalizePttDebounceMs(devicePttDebounceMs);
       normalizedPttPull = normalizePttPull(devicePttPull);
+      normalizedAudioOutVolume = normalizeAudioOutVolume(deviceAudioOutVolume);
+      normalizedTtsMaxBytes = normalizeTtsMaxBytes(deviceTtsMaxBytes);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       Alert.alert('Invalid device config', message);
@@ -180,6 +252,10 @@ export default function App() {
       pttActiveLevel: normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel),
       pttDebounceMs: normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs),
       pttPull: normalizedPttPull,
+      audioOutEnabled: deviceAudioOutEnabled || deviceTtsEnabled,
+      audioOutVolume: normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume),
+      ttsEnabled: deviceTtsEnabled,
+      ttsMaxBytes: normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes),
       ledSelfTest: deviceLedSelfTest,
       displayEnabled: deviceDisplayEnabled || deviceDisplaySelfTest,
       displaySelfTest: deviceDisplaySelfTest,
@@ -190,6 +266,9 @@ export default function App() {
     setDevicePttActiveLevel(normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel));
     setDevicePttDebounceMs(normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs));
     setDevicePttPull(normalizedPttPull);
+    setDeviceAudioOutEnabled(deviceAudioOutEnabled || deviceTtsEnabled);
+    setDeviceAudioOutVolume(normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume));
+    setDeviceTtsMaxBytes(normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes));
     setStatus('Device config saved locally');
   }
 
@@ -208,6 +287,8 @@ export default function App() {
       const normalizedPttActiveLevel = normalizePttActiveLevel(devicePttActiveLevel);
       const normalizedPttDebounceMs = normalizePttDebounceMs(devicePttDebounceMs);
       const normalizedPttPull = normalizePttPull(devicePttPull);
+      const normalizedAudioOutVolume = normalizeAudioOutVolume(deviceAudioOutVolume);
+      const normalizedTtsMaxBytes = normalizeTtsMaxBytes(deviceTtsMaxBytes);
       await saveDeviceWifiSettings({
         ssid,
         password: deviceWifiPassword,
@@ -216,6 +297,10 @@ export default function App() {
         pttActiveLevel: normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel),
         pttDebounceMs: normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs),
         pttPull: normalizedPttPull,
+        audioOutEnabled: deviceAudioOutEnabled || deviceTtsEnabled,
+        audioOutVolume: normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume),
+        ttsEnabled: deviceTtsEnabled,
+        ttsMaxBytes: normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes),
         ledSelfTest: deviceLedSelfTest,
         displayEnabled: deviceDisplayEnabled || deviceDisplaySelfTest,
         displaySelfTest: deviceDisplaySelfTest,
@@ -226,9 +311,10 @@ export default function App() {
       setDevicePttActiveLevel(normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel));
       setDevicePttDebounceMs(normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs));
       setDevicePttPull(normalizedPttPull);
-      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrl);
-      setBridgeUrl(normalizedUrl);
-      await saveBridgeUrl(normalizedUrl);
+      setDeviceAudioOutEnabled(deviceAudioOutEnabled || deviceTtsEnabled);
+      setDeviceAudioOutVolume(normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume));
+      setDeviceTtsMaxBytes(normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes));
+      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
       const response = await configureDeviceWifi(normalizedUrl, {
         ssid,
         password: deviceWifiPassword,
@@ -237,10 +323,15 @@ export default function App() {
         ptt_active_level: normalizedPttActiveLevel,
         ptt_debounce_ms: normalizedPttDebounceMs,
         ptt_pull: normalizedPttPull,
+        audio_out_enabled: deviceAudioOutEnabled || deviceTtsEnabled,
+        audio_out_volume: normalizedAudioOutVolume,
+        tts_enabled: deviceTtsEnabled,
+        tts_max_bytes: normalizedTtsMaxBytes,
         led_self_test: deviceLedSelfTest,
         display_enabled: deviceDisplayEnabled || deviceDisplaySelfTest,
         display_self_test: deviceDisplaySelfTest,
       });
+      await refreshBridgeHealth(normalizedUrl);
       setStatus('Device config saved for next flash');
       Alert.alert('Device config updated', response.message || 'Rebuild and flash firmware for changes to take effect.');
     } catch (error) {
@@ -262,7 +353,7 @@ export default function App() {
     setIsSending(true);
     setStatus('Sending transcript to bridge');
     try {
-      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrl);
+      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
       setBridgeUrl(normalizedUrl);
       await saveBridgeUrl(normalizedUrl);
       const response = await queryBridgeText(normalizedUrl, cleanTranscript);
@@ -317,6 +408,20 @@ export default function App() {
     }
   }
 
+  function setTtsEnabled(value: boolean) {
+    setDeviceTtsEnabled(value);
+    if (value) {
+      setDeviceAudioOutEnabled(true);
+    }
+  }
+
+  function setAudioOutEnabled(value: boolean) {
+    setDeviceAudioOutEnabled(value);
+    if (!value) {
+      setDeviceTtsEnabled(false);
+    }
+  }
+
   return (
     <SafeAreaView style={styles.root}>
       <StatusBar style="light" />
@@ -331,7 +436,7 @@ export default function App() {
           <View style={styles.row}>
             <TextInput
               value={bridgeUrl}
-              onChangeText={setBridgeUrl}
+              onChangeText={handleBridgeUrlChange}
               autoCapitalize="none"
               autoCorrect={false}
               keyboardType="url"
@@ -395,10 +500,27 @@ export default function App() {
                       Device Wi-Fi: {bridgeHealth.config.firmware_config.wifi_ssid_set ? 'SSID set' : 'SSID empty'} / {bridgeHealth.config.firmware_config.wifi_password_set ? 'password set' : 'password empty'}
                     </Text>
                     <Text style={styles.healthLine}>
+                      Firmware bridge: {bridgeHealth.config.firmware_config.bridge_url ?? 'empty'}
+                    </Text>
+                    <Text style={styles.healthLine}>
+                      Bridge target match: {bridgeBenchSummary?.bridgeTargetMatches == null ? 'unknown' : bridgeBenchSummary.bridgeTargetMatches ? 'yes' : 'no'}
+                    </Text>
+                    {bridgeBenchSummary?.bridgeTargetMatches === false && bridgeHealth.config.firmware_config.bridge_url ? (
+                      <Pressable style={styles.inlineButton} onPress={handleUseFirmwareBridgeUrl}>
+                        <Text style={styles.inlineButtonText}>Use Firmware URL</Text>
+                      </Pressable>
+                    ) : null}
+                    <Text style={styles.healthLine}>
                       PTT: GPIO {bridgeHealth.config.firmware_config.ptt_gpio ?? 'default'} / active {bridgeHealth.config.firmware_config.ptt_active_level ?? 'default'} / debounce {bridgeHealth.config.firmware_config.ptt_debounce_ms ?? 'default'} ms / pull {bridgeHealth.config.firmware_config.ptt_pull ?? 'default'}
                     </Text>
                     <Text style={styles.healthLine}>
                       RGB ring boot test: {bridgeHealth.config.firmware_config.led_self_test ? 'on' : 'off'}
+                    </Text>
+                    <Text style={styles.healthLine}>
+                      Speaker: {bridgeHealth.config.firmware_config.audio_out_enabled ? 'on' : 'off'} / volume {bridgeHealth.config.firmware_config.audio_out_volume ?? 'default'}
+                    </Text>
+                    <Text style={styles.healthLine}>
+                      TTS playback: {bridgeHealth.config.firmware_config.tts_enabled ? 'on' : 'off'} / max {formatBytes(bridgeHealth.config.firmware_config.tts_max_bytes ?? undefined)}
                     </Text>
                     <Text style={styles.healthLine}>
                       TFT: {bridgeHealth.config.firmware_config.display_enabled ? 'on' : 'off'} / boot test {bridgeHealth.config.firmware_config.display_self_test ? 'on' : 'off'}
@@ -452,7 +574,7 @@ export default function App() {
             onChangeText={setDeviceWifiBssid}
             autoCapitalize="none"
             autoCorrect={false}
-            placeholder="AP MAC optional, e.g. ca:50:35:23:2b:1f"
+            placeholder="AP MAC optional, e.g. 02:00:00:00:00:01"
             placeholderTextColor="#64748b"
             style={styles.input}
           />
@@ -513,6 +635,48 @@ export default function App() {
             </View>
           </View>
           <View style={styles.toggleGrid}>
+            <View style={styles.pttGrid}>
+              <View style={styles.pttInputBlock}>
+                <Text style={styles.fieldLabel}>Speaker Volume</Text>
+                <TextInput
+                  value={deviceAudioOutVolume}
+                  onChangeText={setDeviceAudioOutVolume}
+                  keyboardType="number-pad"
+                  placeholder="45"
+                  placeholderTextColor="#64748b"
+                  style={styles.input}
+                />
+              </View>
+              <View style={styles.pttInputBlock}>
+                <Text style={styles.fieldLabel}>TTS Max Bytes</Text>
+                <TextInput
+                  value={deviceTtsMaxBytes}
+                  onChangeText={setDeviceTtsMaxBytes}
+                  keyboardType="number-pad"
+                  placeholder="131072"
+                  placeholderTextColor="#64748b"
+                  style={styles.input}
+                />
+              </View>
+            </View>
+            <Pressable style={styles.toggleRow} onPress={() => setAudioOutEnabled(!deviceAudioOutEnabled)}>
+              <View style={[styles.checkbox, deviceAudioOutEnabled && styles.checkboxChecked]}>
+                <Text style={[styles.checkboxMark, deviceAudioOutEnabled && styles.checkboxMarkChecked]}>x</Text>
+              </View>
+              <View style={styles.toggleTextBlock}>
+                <Text style={styles.toggleLabel}>Speaker Output</Text>
+                <Text style={styles.toggleMeta}>ES8311 earcon after bridge replies</Text>
+              </View>
+            </Pressable>
+            <Pressable style={styles.toggleRow} onPress={() => setTtsEnabled(!deviceTtsEnabled)}>
+              <View style={[styles.checkbox, deviceTtsEnabled && styles.checkboxChecked]}>
+                <Text style={[styles.checkboxMark, deviceTtsEnabled && styles.checkboxMarkChecked]}>x</Text>
+              </View>
+              <View style={styles.toggleTextBlock}>
+                <Text style={styles.toggleLabel}>TTS Playback</Text>
+                <Text style={styles.toggleMeta}>Fetch bridge WAV after replies</Text>
+              </View>
+            </Pressable>
             <Pressable style={styles.toggleRow} onPress={() => setDeviceLedSelfTest(!deviceLedSelfTest)}>
               <View style={[styles.checkbox, deviceLedSelfTest && styles.checkboxChecked]}>
                 <Text style={[styles.checkboxMark, deviceLedSelfTest && styles.checkboxMarkChecked]}>x</Text>
@@ -554,7 +718,7 @@ export default function App() {
             </Pressable>
           </View>
           <Text style={styles.helperText}>
-            Sends Wi-Fi, PTT, and TFT settings to the local bridge only when device config is enabled; rebuild and flash afterward.
+            Sends Wi-Fi, PTT, speaker, TTS, and TFT settings to the local bridge only when device config is enabled; rebuild and flash afterward.
           </Text>
         </View>
 
@@ -810,6 +974,21 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: '#e2e8f0',
     fontWeight: '700',
+  },
+  inlineButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#1f2937',
+    borderColor: '#475569',
+    borderRadius: 8,
+    borderWidth: 1,
+    minHeight: 38,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  inlineButtonText: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '800',
   },
   healthPanel: {
     backgroundColor: '#111827',

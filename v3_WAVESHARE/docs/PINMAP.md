@@ -15,6 +15,7 @@ These are from the Waveshare docs and demo bundle inspection.
 | I2S SDIN | `GPIO15` | mic/audio input to ESP32 |
 | I2S DOUT | `GPIO16` | audio output from ESP32 |
 | ES8311 speaker codec | board I2C + I2S | optional firmware path, no extra header wiring |
+| Speaker amplifier enable | TCA9555 `EXIO8` | active high; firmware preserves other expander outputs |
 | microSD CLK | `GPIO40` | onboard TF slot |
 | microSD D0 | `GPIO41` | onboard TF slot |
 | microSD CMD | `GPIO42` | onboard TF slot |
@@ -53,6 +54,15 @@ Better later options:
 - use one of Waveshare's user buttons through the TCA9555 expander
 - add a dedicated external pushbutton on a confirmed-free direct GPIO
 - reserve direct GPIOs needed by the TFT before choosing this
+
+## Vendor References
+
+- [Waveshare ESP32-S3-AUDIO-Board wiki](https://www.waveshare.com/wiki/ESP32-S3-AUDIO-Board)
+- [Waveshare board demo archive](https://files.waveshare.com/wiki/ESP32-S3-AUDIO-Board/ESP32-S3-AUDIO-Board-Demo.zip)
+- [Waveshare board schematic, revision 1.1](https://files.waveshare.com/wiki/ESP32-S3-AUDIO-Board/ESP32-S3-AUDIO-Board_1.1.pdf)
+
+The speaker amplifier mapping is taken from the vendor demo's
+`Audio_ES8311.cpp`, where `Audio_PA_EN()` drives TCA9555 `EXIO8` high.
 
 ## SPI TFT Adapter
 

@@ -328,7 +328,7 @@ export function SettingsScreen() {
 
       <View style={styles.creatorsSection}>
         <Text style={styles.creatorsTitle}>Created by</Text>
-        <Text style={styles.creatorName}>Corina Kaiser</Text>
+        <Text style={styles.creatorName}>@kaiser-factorial</Text>
         <Text style={styles.creatorRole}>Design, hardware, & vision</Text>
         <Text style={styles.creatorName}>Claude</Text>
         <Text style={styles.creatorRole}>Code, architecture, & debugging</Text>

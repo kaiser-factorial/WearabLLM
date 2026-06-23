@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="${1:-${WEARABLLM_BRIDGE_BASE_URL:-http://127.0.0.1:8765}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIGURED_BASE_URL="$(
+    "${SCRIPT_DIR}/configure_firmware.py" --status-json 2>/dev/null | python3 -c '
+import json
+import sys
+from urllib.parse import urlparse
+
+try:
+    payload = json.load(sys.stdin)
+except json.JSONDecodeError:
+    payload = {}
+url = urlparse(payload.get("bridge_url") or "")
+port = url.port or 8765
+print(f"http://127.0.0.1:{port}")
+' || printf 'http://127.0.0.1:8765'
+)"
+BASE_URL="${1:-${WEARABLLM_BRIDGE_BASE_URL:-${CONFIGURED_BASE_URL}}}"
 BASE_URL="${BASE_URL%/}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wearabllm-bridge-smoke.XXXXXX")"
 

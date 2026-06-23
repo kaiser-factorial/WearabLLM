@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 V3_DIR = SCRIPT_DIR.parent
 BRIDGE_DIR = V3_DIR / "bridge"
+CONFIGURE_FIRMWARE = SCRIPT_DIR / "configure_firmware.py"
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(BRIDGE_DIR))
 
@@ -24,6 +26,38 @@ def newest_wav() -> Path | None:
         return None
     wavs = sorted(capture_dir.glob("*.wav"), key=lambda item: item.stat().st_mtime)
     return wavs[-1] if wavs else None
+
+
+def firmware_result() -> dict[str, object]:
+    result = subprocess.run(
+        [str(CONFIGURE_FIRMWARE), "--status-json"],
+        cwd=str(V3_DIR),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "ready": False,
+            "error": (result.stderr or result.stdout).strip() or f"configure_firmware.py exited {result.returncode}",
+        }
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "available": False,
+            "ready": False,
+            "error": f"invalid configure_firmware.py JSON: {exc}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "ready": False,
+            "error": "configure_firmware.py status was not a JSON object",
+        }
+    payload["available"] = True
+    return payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,8 +91,47 @@ def wav_result(path: Path | None) -> dict[str, object]:
     }
 
 
-def format_human(serial: dict[str, object] | None, wav: dict[str, object]) -> str:
+def format_human(
+    firmware: dict[str, object],
+    serial: dict[str, object] | None,
+    wav: dict[str, object],
+) -> str:
     lines = ["WearabLLM v3 bench report"]
+    lines.append("")
+
+    lines.append("Firmware config:")
+    if not firmware.get("available", True):
+        lines.append(f"  unavailable: {firmware.get('error') or 'unknown error'}")
+    else:
+        lines.append(f"  ready: {'yes' if firmware.get('ready') else 'no'}")
+        lines.append(f"  Wi-Fi SSID: {'set' if firmware.get('wifi_ssid_set') else 'empty'}")
+        lines.append(f"  Wi-Fi password: {'set' if firmware.get('wifi_password_set') else 'empty'}")
+        lines.append(f"  Wi-Fi BSSID: {firmware.get('wifi_bssid') or 'not pinned'}")
+        lines.append(f"  bridge URL: {firmware.get('bridge_url') or 'empty'}")
+        lines.append(
+            "  PTT: "
+            f"GPIO {firmware.get('ptt_gpio') if firmware.get('ptt_gpio') is not None else 'unset'}, "
+            f"active {firmware.get('ptt_active_level')}, "
+            f"debounce {firmware.get('ptt_debounce_ms')} ms, "
+            f"pull {firmware.get('ptt_pull')}"
+        )
+        lines.append(f"  RGB ring boot test: {'on' if firmware.get('led_self_test') else 'off'}")
+        lines.append(
+            "  speaker: "
+            f"{'on' if firmware.get('audio_out_enabled') else 'off'}, "
+            f"volume {firmware.get('audio_out_volume') if firmware.get('audio_out_volume') is not None else 'default'}"
+        )
+        lines.append(
+            "  TTS playback: "
+            f"{'on' if firmware.get('tts_enabled') else 'off'}, "
+            f"max bytes {firmware.get('tts_max_bytes') if firmware.get('tts_max_bytes') is not None else 'default'}"
+        )
+        lines.append(
+            "  TFT: "
+            f"{'on' if firmware.get('display_enabled') else 'off'}, "
+            f"boot test {'on' if firmware.get('display_self_test') else 'off'}"
+        )
+
     lines.append("")
 
     if serial is None:
@@ -78,6 +151,14 @@ def format_human(serial: dict[str, object] | None, wav: dict[str, object]) -> st
         command = serial.get("command")
         if isinstance(command, dict):
             lines.append(f"  command: {command.get('command')} reply_len={command.get('reply_len')}")
+        interaction = serial.get("interaction")
+        if isinstance(interaction, dict):
+            lines.append(
+                "  interaction: "
+                f"#{interaction.get('id')} result={interaction.get('result')} "
+                f"total={interaction.get('total_ms')} ms "
+                f"source={interaction.get('capture_source')}"
+            )
         capture = serial.get("capture")
         if isinstance(capture, dict):
             lines.append(
@@ -85,6 +166,15 @@ def format_human(serial: dict[str, object] | None, wav: dict[str, object]) -> st
                 f"{capture.get('duration')} ms, peak={capture.get('peak')}, "
                 f"rms={capture.get('rms')}, silent={capture.get('silent')}"
             )
+        mic_lanes = serial.get("mic_lanes")
+        if isinstance(mic_lanes, list) and mic_lanes:
+            lines.append("  ES7210 packed lanes:")
+            for lane in mic_lanes:
+                if isinstance(lane, dict):
+                    lines.append(
+                        f"    {lane.get('lane')}: peak={lane.get('peak')}, "
+                        f"rms={lane.get('rms')}, silent={lane.get('silent')}"
+                    )
 
     lines.append("")
     if not wav["exists"]:
@@ -124,12 +214,14 @@ def format_human(serial: dict[str, object] | None, wav: dict[str, object]) -> st
 
 def main() -> int:
     args = parse_args()
+    firmware = firmware_result()
     serial_path = args.serial_log.expanduser() if args.serial_log else newest_log()
     wav_path = args.wav.expanduser() if args.wav else newest_wav()
 
     serial = analyze(serial_path) if serial_path and serial_path.exists() else None
     wav = wav_result(wav_path if wav_path and wav_path.exists() else None)
     payload = {
+        "firmware": firmware,
         "serial": serial,
         "wav": wav,
         "loop_ok": bool(serial and serial.get("loop_ok")),
@@ -139,7 +231,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(format_human(serial, wav))
+        print(format_human(firmware, serial, wav))
 
     if args.require_loop and not payload["loop_ok"]:
         return 2
