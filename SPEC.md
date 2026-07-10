@@ -1,6 +1,6 @@
 # WearabLLM Project Spec
 
-Last updated: 2026-06-23
+Last updated: 2026-07-10
 
 ## One-Line Summary
 
@@ -11,7 +11,7 @@ WearabLLM is a physical LLM interface for talking to an assistant and receiving 
 The core idea is:
 
 ```text
-user speaks -> bridge/app transcribes -> LLM interprets -> device responds physically
+user speaks -> ESP32 captures audio -> cloud or bridge LLM path -> device responds physically
 ```
 
 The device is meant to feel like a small expressive companion or oracle rather than a general-purpose chatbot screen. The LLM's text answer can still appear in an app, but the primary output language is physical: LED color, LED motion, sound, and potentially haptic feedback.
@@ -24,8 +24,13 @@ The project began on an Adafruit Circuit Playground Bluefruit because that board
 - Use the board's onboard microphone path so users no longer need to speak into the phone for the first hardware loop.
 - Use the board's 7-pixel RGB ring as the first valence display.
 - Support both BOOT-button push-to-talk and hands-free activation with the on-device `Hi ESP` wake word.
-- Keep recent conversation turns in bridge memory so follow-up questions have context.
-- Use the onboard speaker for bridge-generated OpenAI TTS, with physical volume controls.
+- Operate from home Wi-Fi without requiring a computer-hosted bridge.
+- Keep short direct-mode conversation context through OpenAI `previous_response_id`.
+- Retain the bridge as an optional development and durable-memory path.
+- Stream successful transcripts to a private Supabase table without exposing a
+  database-admin key to firmware.
+- Use the onboard speaker for OpenAI TTS, with physical volume controls.
+- Add authenticated OTA updates after one final USB partition/updater flash.
 - Keep the optional SPI TFT gated off until its perfboard wiring is verified.
 - Preserve the existing semantic response scale, but represent it more richly:
   - color communicates response category or tone
@@ -37,15 +42,16 @@ The project began on an Adafruit Circuit Playground Bluefruit because that board
 
 ### Main Project Trees
 
-There are active and historical project folders:
+The repository root is the active Git root. Project folders are:
 
-- `v3_WAVESHARE/`: active Waveshare ESP32-S3-AUDIO-Board firmware, local bridge, Android app scaffold, protocol docs, and bring-up scripts.
-- `WearabLLM/`: older intended main app/firmware tree in some snapshots.
-- `servo_bluefruit/WearabLLM_Codex/`: contains a fuller older snapshot with readable docs and firmware.
-- `servo_bluefruit/WearabLLM/desktop-app/`: contains an Electron desktop scaffold for BLE and LLM command testing.
-- `servo_bluefruit/servo_potentiometer_copy/`: older Arduino servo experiment.
-
-Important note for future agents: some files in `WearabLLM/` currently appear as local placeholder files on macOS/iCloud. They have file sizes but zero allocated blocks, and reads may time out. If a file in `WearabLLM/` cannot be read, check the matching file under `servo_bluefruit/WearabLLM_Codex/` or the desktop scaffold.
+- `v3_WAVESHARE/`: active Waveshare firmware, optional Python bridge, Android
+  app scaffold, local transcript viewer, protocol docs, and
+  bring-up/deployment scripts.
+- `supabase/`: private transcript-table migration and token-gated Edge Function.
+- `v1/`: readable historical Bluefruit/phone-app baseline.
+- `v2_servo_bluefruit/`: local ignored servo-era archive; only its README is
+  published by the top-level repository.
+- `hardware_tests/`: standalone hardware probes.
 
 ### v3 Waveshare Prototype
 
@@ -66,11 +72,14 @@ Current interaction loop:
 say "Hi ESP" or hold BOOT/PTT
 -> dim-white RGB ring while listening
 -> board captures WAV from onboard mic
--> board posts audio/wav to local bridge over Wi-Fi
--> bridge performs STT and context-aware LLM response selection
--> bridge returns command + reply JSON
+-> board calls OpenAI transcription over HTTPS
+-> board calls the Responses API for command + reply
 -> board applies LED valence command and plays the reply through TTS
+-> board optionally queues transcript/reply upload to Supabase
 ```
+
+The local bridge implements the same response contract as an optional
+development, local-STT, and durable-memory fallback.
 
 Current v3 implementation:
 
@@ -80,6 +89,7 @@ Current v3 implementation:
 - HTTP protocol docs in `v3_WAVESHARE/protocol`
 - hardware bring-up docs in `v3_WAVESHARE/docs`
 - bench helpers in `v3_WAVESHARE/scripts`
+- Supabase migration and Edge Function in `supabase`
 
 Current v3 firmware capabilities:
 
@@ -89,7 +99,15 @@ Current v3 firmware capabilities:
 - LED states: dim blue idle, dim neutral white listening, bright neutral white thinking, red error, response command color/animation
 - Wi-Fi station setup with local ignored `sdkconfig` credentials and optional BSSID/AP MAC pinning
 - serial Wi-Fi diagnostics that include connected AP BSSID, channel, RSSI, and auth mode after association
-- HTTP POST to the bridge
+- selectable bridge or direct-OpenAI HTTPS request path
+- direct `gpt-4o-transcribe` speech transcription
+- direct `gpt-5.4-mini` Responses API command/reply generation with reboot-
+  scoped `previous_response_id` context
+- direct `gpt-4o-mini-tts` WAV generation
+- optional background HTTPS transcript upload to a token-gated endpoint;
+  failures do not block device interaction
+- dependency-free localhost transcript viewer at `http://127.0.0.1:8787`,
+  backed by a local Python proxy so the device token never reaches browser code
 - ES7210/I2S microphone WAV capture
 - silent WAV fallback if audio initialization or capture fails, so the network/bridge/LED path can still be tested
 - configurable minimum and maximum capture duration; current staged maximum is 15 seconds
@@ -101,6 +119,21 @@ Current v3 firmware capabilities:
 - ES8311 speaker earcon and WAV playback behind `CONFIG_WEARABLLM_AUDIO_OUT_ENABLED`
 - bridge TTS WAV fetch/playback behind `CONFIG_WEARABLLM_TTS_ENABLED`
 - K1/+ and K3/- physical volume controls in 10-point increments over 0-100; current boot default is 70 and K2/set remains reserved
+
+Current Supabase capabilities:
+
+- private `device_transcripts` table migration with RLS enabled and no anon or
+  authenticated client policy
+- Edge Function validates a rotatable per-device token and writes with a
+  server-side Supabase secret key
+- token-gated Edge Function reads support bounded incremental transcript
+  retrieval for the local viewer
+- firmware receives only the function URL and device token, never the database
+  service/secret key
+- deployment/config helper generates the device token locally
+- dependency-free localhost viewer polls every 1.5 seconds through a Python
+  proxy bound to `127.0.0.1`; the device token is never exposed to browser code
+- RAM-only four-event background queue; offline persistence is not yet implemented
 
 Current v3 bridge capabilities:
 
@@ -152,6 +185,26 @@ Verified v3 state:
 - optional firmware variant builds pass locally for display, display boot self-test, audio-out, and TTS paths
 - app-assisted next-flash config covers Wi-Fi, BSSID, PTT, RGB self-test, speaker output, TTS playback, and TFT toggles
 - current firmware image has been built, coherence-verified, flashed, and observed booting with `Hi ESP`, 15-second capture, TTS, and K1/K3 button initialization
+- direct-OpenAI firmware has been configured, built, and flashed; bridge and
+  transcript-logging variants also compile successfully
+- direct TTS playback accepts OpenAI's streaming-length 24 kHz mono WAV,
+  resamples it to the board's 16 kHz output path, and has been verified through
+  the ES8311 speaker on physical hardware
+- the localhost transcript viewer is live and has displayed real device rows
+- repository privacy audit found no likely passwords, API keys, or private keys
+  in the current publishable tree or Git history; secret-bearing local files and
+  firmware binaries are ignored
+- GitHub PR #1 merged the standalone firmware, Supabase scaffold, and repository
+  cleanup into `main` as commit `608fbbf`
+- Supabase migration `20260623130000` is applied to project
+  `anjwyaatldrjzecwnspq`; the `wearabllm-transcript` Edge Function is active,
+  its device secret is set server-side, and an unauthenticated request is
+  rejected with HTTP 401
+- the matching Supabase endpoint and generated device token remain only in
+  ignored local `firmware/sdkconfig`; the resulting firmware was built, flashed,
+  and observed enabling background transcript logging after joining home Wi-Fi
+- physical-board interactions have been written to `device_transcripts` and
+  displayed through the live localhost transcript viewer
 
 Not yet verified or integrated:
 
@@ -160,6 +213,8 @@ Not yet verified or integrated:
 - correction-aware replacement of stale facts and live bench validation of automatic extraction quality
 - physical confirmation that K1 and K3 produce the expected 10-point volume changes, although expander initialization, firmware build, flash, and boot are verified
 - BLE/SoftAP live provisioning; current device configuration still requires rebuilding and flashing firmware
+- disconnected direct-mode interaction verification after power-only boot
+- authenticated OTA updater and two-slot OTA partition layout
 
 ### v1 Phone App
 
@@ -367,17 +422,27 @@ Build the next version around board-native voice input instead of phone-mic inpu
 Current v3 architecture:
 
 ```text
-Waveshare BOOT or Hi ESP -> onboard mic -> ESP32-S3 Wi-Fi -> local bridge -> STT/contextual LLM -> LEDs + Verse TTS
+Waveshare BOOT or Hi ESP -> onboard mic -> home Wi-Fi -> OpenAI -> LEDs + TTS
+                                               |
+                                               +-> optional private Supabase log
 ```
 
-The board for the current prototype is chosen: Waveshare ESP32-S3-AUDIO-Board. The core audio/bridge/LED/speaker loop is working; current work should build on it without regressing the verified path.
+The board for the current prototype is chosen: Waveshare ESP32-S3-AUDIO-Board.
+The direct firmware profile removes the runtime computer dependency. The local
+bridge remains supported for development, local STT, and richer durable-memory
+experiments.
 
 Keep these v3 phase boundaries:
 
-1. Preserve the verified BOOT/wake-word -> mic -> bridge -> LED/TTS loop.
-2. Validate the local durable-memory extraction policy and bounded retrieval alongside the existing in-session 20-turn history; keep cloud sync gated on remote forget support.
-3. Verify TFT wiring independently before enabling the normal display path.
-4. BLE/phone-hosted provisioning remains later work; current Wi-Fi configuration writes local firmware config for the next flash, not live over-the-air device provisioning.
+1. Preserve both verified bridge fallback behavior and the compiled/flashed
+   direct BOOT/wake-word -> mic -> OpenAI -> LED/TTS path.
+2. Preserve the deployed private Supabase endpoint and verified physical-board
+   transcript ingestion path plus the localhost viewer read path.
+3. Add authenticated OTA only after a deliberate two-slot partition migration
+   and one final USB flash.
+4. Decide whether direct mode needs durable memory beyond reboot-scoped
+   `previous_response_id`; keep personal-memory cloud sync gated on deletion parity.
+5. Verify TFT wiring independently before enabling the normal display path.
 
 Future board or wearable revisions should still be judged by:
 
@@ -416,31 +481,39 @@ The old 2-character command should remain supported during transition so current
 
 ### Microphone Direction
 
-The main design answer for v3 is: capture audio on the board, run open-ended STT off-board.
+The main design answer for v3 is: capture audio on the board and run open-ended
+STT through OpenAI directly, with the bridge retained as an optional fallback.
 
 Relevant options:
 
-1. Board mic, WAV uploaded over Wi-Fi to the local bridge. This is the current v3 phase-1 path.
-2. Board mic, WAV uploaded to an Android-hosted bridge later.
-3. Board mic for wake/voice activity only, phone still records full speech.
-4. Local wake-word detection through ESP-SR WakeNet9, which is now implemented as `Hi ESP`.
+1. Board mic, WAV uploaded directly to OpenAI over HTTPS. This is the selected
+   bridge-free profile.
+2. Board mic, WAV uploaded over Wi-Fi to the optional local bridge.
+3. Board mic, WAV uploaded to an Android-hosted bridge later.
+4. Local wake-word detection through ESP-SR WakeNet9, implemented as `Hi ESP`.
 
-The board has native microphones and codecs, but not native open-ended STT for arbitrary questions. Use OpenAI transcription or local Whisper on the bridge for phase 1. Treat ESP-SR/ESP-Skainet as a future wake word or fixed-command layer, not a replacement for open-ended Whisper-style transcription.
+The board has native microphones and codecs, but not native open-ended STT for
+arbitrary questions. Direct mode uses OpenAI transcription; bridge mode can use
+OpenAI or local Whisper. ESP-SR handles wake-word detection, not arbitrary STT.
 
 ## Suggested Next Milestones
 
-1. Physically exercise K1/+ and K3/- and confirm 10-point changes across multiple TTS responses.
-2. Decide whether volume should persist in NVS across reboots; it currently resets to the configured boot default.
-3. Evaluate auto-extraction quality, add correction-aware replacement, then build an authenticated Home Assistant adapter; keep personal records local-only until remote deletion has parity.
-4. Finish TFT perfboard wiring and continuity checks.
-5. Flash the display-test variant only when ready to test the TFT wiring, then confirm color bands/readable text.
-6. Enable and verify the normal TFT status/response display without changing the working audio path.
-7. Later, evolve the response schema to include confidence/display/audio metadata while preserving the 9-command compatibility layer.
+1. Publish the verified transcript viewer, Supabase read path, and direct TTS
+   compatibility fix.
+2. Implement authenticated OTA and migrate to two app slots; retain rollback.
+3. Verify power-only direct interaction and K1/K3 volume changes.
+4. Decide whether volume and direct conversation state should persist locally.
+5. Evaluate whether direct mode needs a durable transcript or conversation
+   persistence layer after the current reboot-scoped `previous_response_id`
+   path.
+6. Finish TFT wiring/testing without changing the working audio path.
+7. Later evolve the response schema while preserving the 9-command layer.
 
 ## Open Decisions
 
 - Should the final form be the Waveshare board, a smaller wearable board, or a two-device system?
-- Should the Android phone eventually host the bridge/STT/API path, or should a laptop/local server remain acceptable?
+- Should the optional bridge remain a developer feature, or become a selectable
+  home-server mode for durable memory and lower key-exposure risk?
 - Should audio stay over Wi-Fi, move to BLE for control only, or use BLE provisioning plus Wi-Fi audio?
 - Which physical PTT control should replace the BOOT button for the final build?
 - Should the TFT remain a small response display or become a richer interaction surface?
@@ -450,17 +523,22 @@ The board has native microphones and codecs, but not native open-ended STT for a
 - Should physical volume persist in NVS, and should K2/set become mute, session reset, or another control?
 - How should Supermemory retrieval be scoped, ranked, and exposed to the user for reset/forget operations?
 - Does sensor context still matter in the Waveshare version?
-- Should Wi-Fi provisioning become BLE or SoftAP based so firmware can be updated without reflashing?
+- Should Wi-Fi provisioning become BLE or SoftAP based?
+- Should OTA use a hosted signed image manifest, a local authenticated upload,
+  or both?
+- What transcript retention/deletion policy should Supabase enforce?
 
 ## Agent Handoff Notes
 
 - Start by reading this file, then inspect `v3_WAVESHARE/README.md`, `v3_WAVESHARE/docs/STATUS.md`, and `v3_WAVESHARE/docs/BRINGUP.md` for current work.
-- For project history, inspect `v1/docs/session-log.md`, `v1/phone-app/src/api/llm.ts`, and the older `servo_bluefruit/WearabLLM_Codex/` snapshot if present.
-- If `WearabLLM/` files fail to read with `Operation timed out`, check whether they are cloud placeholders and use the readable duplicate snapshots.
+- For project history, inspect `v1/docs/session-log.md` and
+  `v1/phone-app/src/api/llm.ts`. The full v2 servo archive is intentionally
+  local/ignored.
 - Do not assume the servo is still a requirement. Treat it as legacy unless the user explicitly asks to revive it.
 - Do not break the existing 9-command response scale unless replacing it with an intentional migration plan.
 - Run `v3_WAVESHARE/scripts/validate_protocol.py` after changing command names, meanings, prompt text, bridge parsing, app command definitions, firmware command handling, or protocol docs.
-- Before changing BLE code, remember BLE is v1/current-future provisioning work; v3 phase 1 uses Wi-Fi HTTP to the bridge.
+- Before changing BLE code, remember BLE is legacy/future provisioning work;
+  the current direct profile uses Wi-Fi HTTPS.
 - Before changing the LLM prompt, update the parser and firmware/app command schema together.
 - Prefer a narrow, testable hardware loop for each step: dry-run bridge before live STT, saved WAV before live LLM, LED command before display, display before speaker/TTS.
 - Do not flash/reset a connected physical board while the user is actively wiring unless explicitly asked.

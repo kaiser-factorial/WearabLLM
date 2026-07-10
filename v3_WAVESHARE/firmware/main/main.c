@@ -917,7 +917,7 @@ static void interaction_task(void *arg)
                         ESP_LOGI(TAG, "playing TTS WAV: %u bytes", (unsigned)tts_wav_len);
                         tts_err = wearabllm_audio_play_wav(tts_wav, tts_wav_len);
                     }
-                    if (tts_err != ESP_OK && tts_err != ESP_ERR_NOT_SUPPORTED) {
+                    if (tts_err != ESP_OK) {
                         ESP_LOGW(TAG, "tts playback failed: %s", esp_err_to_name(tts_err));
                     }
                     free(tts_wav);

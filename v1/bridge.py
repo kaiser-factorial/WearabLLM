@@ -32,6 +32,13 @@ import sys
 import tempfile
 
 import anthropic
+import sys
+import os
+# Note: this previously pointed four levels up ("../../../../shield-py"), which
+# resolved to ~/shield-py — a directory that never existed, so the import below
+# only worked if shield happened to be installed in the running Python env.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../shield/python"))
+from shield import ShieldAnthropicClient, detect_injection, wrap_untrusted, emit_event
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -112,9 +119,18 @@ def transcribe(audio: np.ndarray, model: whisper.Whisper) -> str:
 # ── Claude helpers ────────────────────────────────────────────────────────────
 
 def build_prompt(question: str, sensor_data: str | None) -> str:
+    # Detect and log injection attempts in voice input before building the prompt.
+    scan = detect_injection(question)
+    if scan.flagged:
+        emit_event("injection_detected", source="wearabLLM:voice",
+                   detail=question[:200], score=scan.score, patterns=scan.matches)
+        print(f"[shield] Injection patterns in voice input: {scan.matches}")
+
+    # Wrap the transcribed question as untrusted so the model treats it as data.
+    safe_question = wrap_untrusted(question, "voice_transcript")
     if sensor_data:
-        return f"[Sensor data: {sensor_data}]\n\n{question}"
-    return question
+        return f"[Sensor data: {sensor_data}]\n\n{safe_question}"
+    return safe_question
 
 
 def parse_led_command(text: str) -> str:
@@ -132,7 +148,7 @@ def strip_led_line(text: str) -> str:
     ).strip()
 
 
-def ask_claude(client: anthropic.Anthropic, prompt: str) -> tuple[str, str]:
+def ask_claude(client: ShieldAnthropicClient, prompt: str) -> tuple[str, str]:
     full_text = ""
     with client.messages.stream(
         model=CLAUDE_MODEL,
@@ -207,7 +223,7 @@ async def send_ble(client: BleakClient, cmd: bytes) -> None:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-async def run(claude: anthropic.Anthropic, whisper_model: whisper.Whisper,
+async def run(claude: ShieldAnthropicClient, whisper_model: whisper.Whisper,
               ble_client: BleakClient | None) -> None:
 
     mode = f"BLE ({DEVICE_NAME})" if ble_client else "DRY RUN (no BLE)"
@@ -246,7 +262,7 @@ async def run(claude: anthropic.Anthropic, whisper_model: whisper.Whisper,
 
 
 async def main() -> None:
-    claude = anthropic.Anthropic()
+    claude = ShieldAnthropicClient(anthropic.Anthropic(), app_label="wearabLLM")
 
     print(f"Loading Whisper '{WHISPER_MODEL}' model...", end="", flush=True)
     whisper_model = await asyncio.to_thread(whisper.load_model, WHISPER_MODEL)

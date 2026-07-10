@@ -40,6 +40,7 @@ Implemented in this folder:
 - app hold-to-speak input through Android native STT, routed to `/v1/query_text`
 - phase-2 bridge TTS scaffold at `/v1/tts`
 - optional firmware TTS fetch/play scaffold behind `CONFIG_WEARABLLM_TTS_ENABLED`
+- private Supabase transcript upload plus a local-only live browser viewer
 - bridge dry-run mode and optional received-WAV capture saving
 - board-side capture diagnostics in serial logs: duration, peak, RMS, and silence flag
 - pre-flash image/config coherence gate with a stricter optional first-flash profile
@@ -125,6 +126,15 @@ Run the full local software preflight:
 ```bash
 ./scripts/preflight.sh
 ```
+
+Open the live transcript viewer at `http://127.0.0.1:8787`:
+
+```bash
+./scripts/run_transcript_viewer.sh
+```
+
+It refreshes every 1.5 seconds. The local Python proxy reads the ignored
+firmware config and keeps the Supabase device token out of browser JavaScript.
 
 Compile-check optional firmware paths:
 
