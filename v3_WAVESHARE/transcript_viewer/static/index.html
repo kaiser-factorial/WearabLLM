@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WearabLLM Live Transcripts</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">WearabLLM</p>
+          <h1>Live transcripts</h1>
+        </div>
+        <div id="status" class="status connecting"><span></span> Connecting</div>
+      </header>
+      <section class="toolbar">
+        <p id="summary">Loading recent interactions…</p>
+        <button id="clear" type="button">Clear screen</button>
+      </section>
+      <section id="feed" class="feed" aria-live="polite"></section>
+      <template id="entry-template">
+        <article class="entry">
+          <div class="meta"><time></time><span class="command"></span><span class="device"></span></div>
+          <p class="label">You said</p>
+          <p class="transcript"></p>
+          <div class="reply-wrap"><p class="label">WearabLLM</p><p class="reply"></p></div>
+        </article>
+      </template>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

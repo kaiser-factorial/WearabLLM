@@ -94,6 +94,8 @@ v3_WAVESHARE/logs/
 v3_WAVESHARE/bridge/__pycache__/
 v3_WAVESHARE/bridge/*.pyc
 v3_WAVESHARE/scripts/__pycache__/
+**/__pycache__/
+**/*.pyc
 
 # Local Supabase CLI state and function secrets
 supabase/.temp/

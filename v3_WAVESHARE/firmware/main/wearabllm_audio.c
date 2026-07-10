@@ -269,9 +269,13 @@ static esp_err_t parse_wav_pcm16_mono(
     size_t offset = 12;
     while (offset + 8 <= wav_len) {
         const uint8_t *chunk = wav_data + offset;
-        uint32_t chunk_size = read_le32(chunk + 4);
+        uint32_t declared_chunk_size = read_le32(chunk + 4);
         size_t payload_offset = offset + 8;
-        if (payload_offset + chunk_size > wav_len) {
+        size_t available = wav_len - payload_offset;
+        bool streaming_data =
+            memcmp(chunk, "data", 4) == 0 && declared_chunk_size == UINT32_MAX;
+        size_t chunk_size = streaming_data ? available : declared_chunk_size;
+        if (chunk_size > available) {
             return ESP_ERR_INVALID_SIZE;
         }
 
@@ -288,6 +292,7 @@ static esp_err_t parse_wav_pcm16_mono(
             saw_data = true;
         }
 
+        if (streaming_data) break;
         offset = payload_offset + chunk_size + (chunk_size & 1U);
     }
 
@@ -295,12 +300,16 @@ static esp_err_t parse_wav_pcm16_mono(
     ESP_RETURN_ON_FALSE(audio_format == WAV_PCM_FORMAT, ESP_ERR_NOT_SUPPORTED, TAG, "wav is not PCM");
     ESP_RETURN_ON_FALSE(channels == 1, ESP_ERR_NOT_SUPPORTED, TAG, "wav is not mono");
     ESP_RETURN_ON_FALSE(bits_per_sample == 16, ESP_ERR_NOT_SUPPORTED, TAG, "wav is not 16-bit");
-    ESP_RETURN_ON_FALSE(rate == WEARABLLM_AUDIO_SAMPLE_RATE,
+    ESP_RETURN_ON_FALSE(rate >= 8000 && rate <= 48000,
                         ESP_ERR_NOT_SUPPORTED,
                         TAG,
-                        "wav sample rate is %" PRIu32 ", expected %d",
-                        rate,
-                        WEARABLLM_AUDIO_SAMPLE_RATE);
+                        "wav sample rate is unsupported: %" PRIu32,
+                        rate);
+    ESP_RETURN_ON_FALSE((data_len % sizeof(int16_t)) == 0,
+                        ESP_ERR_INVALID_SIZE,
+                        TAG,
+                        "wav PCM length is not sample-aligned");
+    ESP_RETURN_ON_FALSE(data_len > 0, ESP_ERR_INVALID_SIZE, TAG, "wav PCM data is empty");
 
     *pcm_data = data_start;
     *pcm_len = data_len;
@@ -573,17 +582,25 @@ esp_err_t wearabllm_audio_play_wav(const uint8_t *wav_data, size_t wav_len)
         return start_ret;
     }
 
-    size_t offset = 0;
-    while (offset < pcm_len) {
-        size_t pcm_bytes = pcm_len - offset;
-        if (pcm_bytes > PLAYBACK_CHUNK_FRAMES * sizeof(int16_t)) {
-            pcm_bytes = PLAYBACK_CHUNK_FRAMES * sizeof(int16_t);
-        }
-        size_t frames = pcm_bytes / sizeof(int16_t);
-        const int16_t *pcm = (const int16_t *)(pcm_data + offset);
+    const int16_t *pcm = (const int16_t *)pcm_data;
+    const size_t input_frames = pcm_len / sizeof(int16_t);
+    const size_t output_frames =
+        (input_frames * (uint64_t)WEARABLLM_AUDIO_SAMPLE_RATE) / sample_rate;
+    size_t output_offset = 0;
+    while (output_offset < output_frames) {
+        size_t frames = output_frames - output_offset;
+        if (frames > PLAYBACK_CHUNK_FRAMES) frames = PLAYBACK_CHUNK_FRAMES;
 
         for (size_t i = 0; i < frames; i++) {
-            int32_t sample = ((int32_t)pcm[i]) << 16;
+            size_t output_index = output_offset + i;
+            uint64_t source_position = (uint64_t)output_index * sample_rate;
+            size_t source_index = source_position / WEARABLLM_AUDIO_SAMPLE_RATE;
+            uint32_t fraction = source_position % WEARABLLM_AUDIO_SAMPLE_RATE;
+            int32_t first = pcm[source_index];
+            int32_t second = source_index + 1 < input_frames ? pcm[source_index + 1] : first;
+            int32_t sample16 = first +
+                (int32_t)(((int64_t)(second - first) * fraction) / WEARABLLM_AUDIO_SAMPLE_RATE);
+            int32_t sample = sample16 * 65536;
             playback[i * 2 + 0] = sample;
             playback[i * 2 + 1] = sample;
         }
@@ -594,7 +611,7 @@ esp_err_t wearabllm_audio_play_wav(const uint8_t *wav_data, size_t wav_len)
             end_playback();
             return ret;
         }
-        offset += frames * sizeof(int16_t);
+        output_offset += frames;
     }
 
     free(playback);
@@ -603,7 +620,11 @@ esp_err_t wearabllm_audio_play_wav(const uint8_t *wav_data, size_t wav_len)
     esp_err_t end_ret = end_playback();
     ESP_RETURN_ON_ERROR(ret, TAG, "wav silence tail failed");
     ESP_RETURN_ON_ERROR(end_ret, TAG, "speaker playback stop failed");
-    ESP_LOGI(TAG, "played %" PRIu32 " Hz mono WAV, %u bytes PCM", sample_rate, (unsigned)pcm_len);
+    ESP_LOGI(TAG,
+             "played %" PRIu32 " Hz mono WAV as %d Hz, %u bytes PCM",
+             sample_rate,
+             WEARABLLM_AUDIO_SAMPLE_RATE,
+             (unsigned)pcm_len);
     return ESP_OK;
 #else
     (void)wav_data;

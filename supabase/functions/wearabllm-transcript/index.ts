@@ -14,13 +14,45 @@ function secretKey(): string {
 }
 
 Deno.serve(async (request) => {
-  if (request.method !== "POST") return response(405, { error: "method_not_allowed" });
-
   const expectedToken = Deno.env.get("WEARABLLM_DEVICE_TOKEN") ?? "";
   const receivedToken = request.headers.get("X-WearabLLM-Device-Token") ?? "";
   if (!expectedToken || receivedToken !== expectedToken) {
     return response(401, { error: "unauthorized" });
   }
+
+  const url = Deno.env.get("SUPABASE_URL") ?? "";
+  const key = secretKey();
+  if (!url || !key) return response(500, { error: "server_not_configured" });
+  const supabase = createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  if (request.method === "GET") {
+    const requestUrl = new URL(request.url);
+    const requestedLimit = Number(requestUrl.searchParams.get("limit") ?? "100");
+    const afterId = Number(requestUrl.searchParams.get("after_id") ?? "0");
+    if (
+      !Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 200 ||
+      !Number.isSafeInteger(afterId) || afterId < 0
+    ) {
+      return response(400, { error: "invalid_query" });
+    }
+
+    let query = supabase
+      .from("device_transcripts")
+      .select("id,created_at,device_id,interaction_id,command,transcript,reply,capture_source")
+      .order("id", { ascending: false })
+      .limit(requestedLimit);
+    if (afterId > 0) query = query.gt("id", afterId);
+    const { data, error } = await query;
+    if (error) {
+      console.error("device transcript read failed", error.code);
+      return response(500, { error: "read_failed" });
+    }
+    return response(200, { transcripts: data ?? [] });
+  }
+
+  if (request.method !== "POST") return response(405, { error: "method_not_allowed" });
 
   const contentLength = Number(request.headers.get("content-length") ?? "0");
   if (contentLength > 8192) return response(413, { error: "payload_too_large" });
@@ -46,12 +78,6 @@ Deno.serve(async (request) => {
     return response(400, { error: "invalid_event" });
   }
 
-  const url = Deno.env.get("SUPABASE_URL") ?? "";
-  const key = secretKey();
-  if (!url || !key) return response(500, { error: "server_not_configured" });
-  const supabase = createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
   const { error } = await supabase.from("device_transcripts").insert({
     device_id: deviceId,
     interaction_id: interactionId,
