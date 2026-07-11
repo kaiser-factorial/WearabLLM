@@ -16,6 +16,9 @@ Opens `http://127.0.0.1:8787`.
   same thread the Waveshare uses
 - Keeps a secondary **device event feed** from private Supabase transcript rows
   (command + mic transcript log)
+- **Command center** tab for live agent personality:
+  system prompt, LLM/TTS models, TTS voice + delivery instructions
+- **Deploy to Hugging Face** from the laptop (code upload only; secrets stay local)
 - Binds only to `127.0.0.1`; device tokens stay in the Python proxy and never
   reach browser JavaScript
 
@@ -49,7 +52,21 @@ python3 v3_WAVESHARE/transcript_viewer/server.py \
 | GET | `/api/sessions` | bridge `GET /v1/conversation/sessions` |
 | POST | `/api/reply` | bridge `POST /v1/query_text` |
 | POST | `/api/session/reset` | bridge `POST /v1/session/reset` |
+| GET/POST | `/api/admin/config` | bridge `GET/POST /v1/admin/config` |
+| POST | `/api/admin/deploy` | local `scripts/deploy_hf_space.py` |
 | GET | `/api/transcripts` | Supabase transcript function |
+
+### Command center notes
+
+- **Save to agent** updates the live hosted bridge personality immediately.
+- When the bridge has Supabase service credentials, settings persist in
+  `wearabllm_agent_settings` (apply migration
+  `supabase/migrations/20260711000000_create_wearabllm_agent_settings.sql`).
+- **Deploy to HF** only packages bridge source (`agent_config.py`,
+  `durable_memory.py`, `wearabllm_bridge.py`, Dockerfile). It does not upload
+  `sdkconfig` or API keys.
+- Firmware device config (Wi-Fi, PTT, etc.) still uses the existing next-flash
+  path; Sphere is the conversation + agent brain control surface first.
 
 ## Hosted bridge requirement
 

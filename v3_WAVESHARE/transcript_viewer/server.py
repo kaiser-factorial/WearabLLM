@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
+import subprocess
 import threading
 import urllib.error
 import urllib.parse
@@ -23,8 +25,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SDKCONFIG = ROOT / "v3_WAVESHARE" / "firmware" / "sdkconfig"
+V3_DIR = ROOT / "v3_WAVESHARE"
+DEFAULT_SDKCONFIG = V3_DIR / "firmware" / "sdkconfig"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+DEPLOY_SCRIPT = V3_DIR / "scripts" / "deploy_hf_space.py"
+DEFAULT_HF_SPACE = os.environ.get("WEARABLLM_HF_SPACE", "brick-factorial/wearabllm-agent")
 
 
 def read_kconfig_string(path: Path, key: str) -> str:
@@ -63,6 +68,8 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
     bridge_base = ""
     bridge_token = ""
     default_device_id = "web-console"
+    hf_space_repo = DEFAULT_HF_SPACE
+    allow_deploy = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
@@ -105,6 +112,8 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
                     "default_device_id": self.default_device_id,
                     "bridge_configured": bool(self.bridge_base),
                     "transcripts_configured": bool(self.transcript_endpoint and self.transcript_token),
+                    "hf_space_repo": self.hf_space_repo,
+                    "deploy_available": bool(self.allow_deploy and DEPLOY_SCRIPT.is_file()),
                     "known_devices": [
                         {
                             "id": "wearabllm-esp32",
@@ -143,6 +152,9 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
         if path == "/api/transcripts":
             self.proxy_transcripts(parsed.query)
             return
+        if path == "/api/admin/config":
+            self.proxy_bridge_get("/v1/admin/config", "")
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -152,6 +164,12 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/session/reset":
             self.proxy_session_reset()
+            return
+        if parsed.path == "/api/admin/config":
+            self.proxy_admin_config_update()
+            return
+        if parsed.path == "/api/admin/deploy":
+            self.handle_local_deploy()
             return
         self.send_json(404, {"error": "not_found"})
 
@@ -218,6 +236,84 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
             method="POST",
         )
         self._forward(request)
+
+    def proxy_admin_config_update(self) -> None:
+        if not self.bridge_base:
+            self.send_json(503, {"error": "bridge_not_configured"})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 64_000:
+            self.send_json(400, {"error": "invalid_body"})
+            return
+        raw = self.rfile.read(length)
+        request = urllib.request.Request(
+            f"{self.bridge_base}/v1/admin/config",
+            data=raw,
+            headers={
+                **self._bridge_headers(),
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        self._forward(request)
+
+    def handle_local_deploy(self) -> None:
+        """Run the laptop-side HF Space deploy script. Secrets never enter the browser."""
+        if not self.allow_deploy:
+            self.send_json(403, {"error": "deploy_disabled"})
+            return
+        if not DEPLOY_SCRIPT.is_file():
+            self.send_json(500, {"error": "deploy_script_missing"})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        dry_run = False
+        repo_id = self.hf_space_repo
+        if length > 0:
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except json.JSONDecodeError:
+                self.send_json(400, {"error": "invalid_json"})
+                return
+            dry_run = bool(payload.get("dry_run"))
+            if payload.get("repo_id"):
+                repo_id = str(payload["repo_id"]).strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo_id or ""):
+            self.send_json(400, {"error": "invalid_repo_id"})
+            return
+        command = [
+            os.environ.get("WEARABLLM_PYTHON", "python3"),
+            str(DEPLOY_SCRIPT),
+            "--repo-id",
+            repo_id,
+        ]
+        if dry_run:
+            command.append("--dry-run")
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(V3_DIR),
+                text=True,
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.send_json(504, {"error": "deploy_timeout"})
+            return
+        except OSError as exc:
+            self.send_json(500, {"error": f"deploy_failed: {exc}"})
+            return
+        output = (result.stdout or "") + (("\n" + result.stderr) if result.stderr else "")
+        self.send_json(
+            200 if result.returncode == 0 else 500,
+            {
+                "ok": result.returncode == 0,
+                "repo_id": repo_id,
+                "dry_run": dry_run,
+                "exit_code": result.returncode,
+                "output": output[-8000:],
+            },
+        )
 
     def proxy_transcripts(self, query: str) -> None:
         if not self.transcript_endpoint or not self.transcript_token:
@@ -289,6 +385,8 @@ def main() -> None:
     parser.add_argument("--sdkconfig", type=Path, default=DEFAULT_SDKCONFIG)
     parser.add_argument("--bridge-url", default="", help="Override bridge base or /v1/query URL")
     parser.add_argument("--bridge-token", default="", help="Override bridge device token")
+    parser.add_argument("--hf-space", default=DEFAULT_HF_SPACE, help="HF Space repo for deploy button")
+    parser.add_argument("--no-deploy", action="store_true", help="Disable local deploy button actions")
     parser.add_argument("--no-open", action="store_true")
     args = parser.parse_args()
 
@@ -312,6 +410,8 @@ def main() -> None:
     ConsoleHandler.transcript_endpoint = transcript_endpoint
     ConsoleHandler.transcript_token = transcript_token
     ConsoleHandler.default_device_id = "web-console"
+    ConsoleHandler.hf_space_repo = args.hf_space
+    ConsoleHandler.allow_deploy = not args.no_deploy
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ConsoleHandler)
     local_url = f"http://127.0.0.1:{args.port}"

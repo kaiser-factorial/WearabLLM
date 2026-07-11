@@ -19,10 +19,12 @@ import wearabllm_bridge
 from wearabllm_bridge import (
     BridgeState,
     DEFAULT_MAX_AUDIO_BYTES,
+    OPENAI_TTS_PCM_SAMPLE_RATE,
     inspect_wav,
     json_bytes,
     make_silence_wav,
     make_handler,
+    normalize_tts_pcm,
     normalize_tts_wav,
     parse_command_sequence,
     parse_llm_response,
@@ -228,6 +230,42 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(create.call_args.kwargs["voice"], "verse")
         self.assertEqual(create.call_args.kwargs["instructions"], TTS_INSTRUCTIONS)
         self.assertEqual(create.call_args.kwargs["response_format"], "wav")
+
+    def test_openrouter_tts_requests_pcm_and_wraps_wav(self):
+        pcm = struct.pack("<h", 1200) * OPENAI_TTS_PCM_SAMPLE_RATE  # 1 second at 24 kHz
+        create = Mock(return_value=SimpleNamespace(read=lambda: pcm))
+        state = BridgeState.__new__(BridgeState)
+        state.args = Namespace(
+            provider="openrouter",
+            dry_run=False,
+            tts_model="openai/gpt-4o-mini-tts-2025-12-15",
+            tts_voice="nova",
+            tts_instructions=TTS_INSTRUCTIONS,
+        )
+        state.openai_client = SimpleNamespace(
+            audio=SimpleNamespace(speech=SimpleNamespace(create=create))
+        )
+
+        result = state.synthesize_tts_wav("OpenRouter format check")
+
+        self.assertTrue(result.startswith(b"RIFF"))
+        self.assertEqual(create.call_args.kwargs["response_format"], "pcm")
+        self.assertEqual(create.call_args.kwargs["voice"], "nova")
+        self.assertEqual(create.call_args.kwargs["instructions"], TTS_INSTRUCTIONS)
+        with wave.open(BytesIO(result), "rb") as wav_file:
+            self.assertEqual(wav_file.getframerate(), 16000)
+            self.assertEqual(wav_file.getnchannels(), 1)
+            self.assertEqual(wav_file.getsampwidth(), 2)
+            self.assertGreater(wav_file.getnframes(), 0)
+
+    def test_normalize_tts_pcm_resamples_to_board_wav(self):
+        pcm = struct.pack("<h", 1000) * 2400  # 0.1 s at 24 kHz
+        normalized = normalize_tts_pcm(pcm, OPENAI_TTS_PCM_SAMPLE_RATE)
+        with wave.open(BytesIO(normalized), "rb") as wav_file:
+            self.assertEqual(wav_file.getframerate(), 16000)
+            self.assertEqual(wav_file.getnchannels(), 1)
+            self.assertEqual(wav_file.getsampwidth(), 2)
+            self.assertGreater(wav_file.getnframes(), 0)
 
     def test_normalize_tts_wav_resamples_and_rewrites_header(self):
         with BytesIO() as source:
@@ -875,6 +913,33 @@ class BridgeHandlerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
         self.assertGreaterEqual(len(payload["devices"]), 3)
+
+    def test_admin_config_get_and_update(self):
+        status, payload = self.request(
+            "GET",
+            "/v1/admin/config",
+            headers={"X-WearabLLM-Device-Token": "console-token"},
+            device_token="console-token",
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertIn("system_prompt", payload["config"])
+
+        updated_prompt = payload["config"]["system_prompt"] + "\nPrefer witty brevity when helpful. GS and PP remain valid."
+        status, payload = self.request(
+            "POST",
+            "/v1/admin/config",
+            body=json.dumps({"system_prompt": updated_prompt, "tts_voice": "nova"}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-WearabLLM-Device-Token": "console-token",
+            },
+            device_token="console-token",
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["config"]["tts_voice"], "nova")
+        self.assertIn("witty brevity", payload["config"]["system_prompt"])
 
 
 class JsonBytesTest(unittest.TestCase):

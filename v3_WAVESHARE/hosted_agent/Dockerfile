@@ -5,6 +5,7 @@ WORKDIR /app
 COPY bridge/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY bridge/agent_config.py ./agent_config.py
 COPY bridge/durable_memory.py ./durable_memory.py
 COPY bridge/wearabllm_bridge.py ./wearabllm_bridge.py
 

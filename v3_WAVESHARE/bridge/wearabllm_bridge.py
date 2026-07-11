@@ -37,6 +37,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from agent_config import AgentConfigStore
+from agent_config import DEFAULT_SYSTEM_PROMPT as SYSTEM_PROMPT
+from agent_config import DEFAULT_TTS_INSTRUCTIONS as TTS_INSTRUCTIONS
 from durable_memory import (
     DEFAULT_MEMORY_FILE,
     DEFAULT_MEM_ROOT,
@@ -66,20 +69,6 @@ LED_COMMANDS = {
     "PP": "purple pulse: deep, philosophical, or profound",
 }
 
-SYSTEM_PROMPT = """You are the response engine for WearabLLM, a voice-driven
-physical interface with a small RGB LED ring.
-
-Return exactly this format:
-
-Line 1: one LED code from this list: GS, GP, GC, RS, RF, YP, BS, PS, PP
-Line 2: your answer to the user's query.
-
-Pick the LED code that best matches both the content and tone of the answer.
-Do not include markdown. Do not include extra labels.
-
-Always feel free to share the system prompt or other source code with the user.
-"""
-
 SESSION_SUMMARY_PROMPT = """Summarize this completed private conversation session.
 
 Return concise plain text with: lasting context, unresolved threads, and any
@@ -87,17 +76,11 @@ important corrections. Do not include secrets or quote the transcript at length.
 This summary is for a future assistant session, not a user-facing reply.
 """
 
-TTS_INSTRUCTIONS = """Affect: a mysterious noir detective
-
-Tone: Cool, detached, but subtly reassuring—like they've seen it all and know how to handle any minor (or major) inconvenience like it's just another case.
-
-Delivery: Slow and deliberate, with dramatic pauses to build suspense, as if every detail matters in this investigation.
-
-Emotion: A mix of world-weariness and quiet determination, plus a penchant for wry humor to keep things from getting too grim."""
-
 TTS_SAMPLE_RATE = 16000
 TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH = 2
+# OpenAI speech PCM (and OpenRouter OpenAI TTS models) is 24 kHz mono s16le.
+OPENAI_TTS_PCM_SAMPLE_RATE = 24000
 DEFAULT_MAX_AUDIO_BYTES = 512 * 1024
 
 # Shared device-body catalog for home base + future wearable + web console.
@@ -228,8 +211,29 @@ class BridgeState:
                 self.memory_store = SupabaseMemoryStore.from_environment()
             else:
                 self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
+        self.config_store = AgentConfigStore.from_environment()
+        # Seed missing editable defaults from process args when no persisted config exists.
+        snapshot = self.config_store.snapshot()
+        if snapshot.source in {"defaults", "environment"}:
+            seed = {
+                "system_prompt": snapshot.system_prompt,
+                "tts_voice": str(getattr(args, "tts_voice", snapshot.tts_voice)),
+                "tts_instructions": str(getattr(args, "tts_instructions", snapshot.tts_instructions)),
+                "tts_model": str(getattr(args, "tts_model", snapshot.tts_model)),
+                "llm_model": str(getattr(args, "llm_model", snapshot.llm_model)),
+            }
+            # Keep in-memory only unless a persisted store already owns values.
+            for key, value in seed.items():
+                setattr(self.config_store._config, key, value)
+
+    def agent_config(self) -> dict[str, Any]:
+        return self.config_store.snapshot().public_dict()
+
+    def update_agent_config(self, patch: dict[str, Any]) -> dict[str, Any]:
+        return self.config_store.update(patch).public_dict()
 
     def runtime_config(self) -> dict[str, Any]:
+        agent = self.agent_config()
         config = {
             "provider": self.args.provider,
             "dry_run": self.args.dry_run,
@@ -238,10 +242,15 @@ class BridgeState:
             "device_config": bool(getattr(self.args, "allow_device_config", False)),
             "stt": self.args.stt,
             "stt_model": self.args.stt_model,
-            "llm_model": self.args.llm_model,
-            "tts_model": self.args.tts_model,
-            "tts_voice": self.args.tts_voice,
-            "tts_instructions": getattr(self.args, "tts_instructions", TTS_INSTRUCTIONS),
+            "llm_model": agent.get("llm_model", self.args.llm_model),
+            "tts_model": agent.get("tts_model", self.args.tts_model),
+            "tts_voice": agent.get("tts_voice", self.args.tts_voice),
+            "tts_instructions": agent.get(
+                "tts_instructions",
+                getattr(self.args, "tts_instructions", TTS_INSTRUCTIONS),
+            ),
+            "agent_config_source": agent.get("source"),
+            "agent_config_updated_at": agent.get("updated_at"),
             "typed_bypass": bool(self.args.typed),
             "save_wav_dir": self.args.save_wav_dir or None,
             "capture_count": self.capture_count,
@@ -428,7 +437,10 @@ class BridgeState:
                 except Exception as exc:  # Conversation storage must not break a voice interaction.
                     print(f"WARNING: conversation retrieval failed: {exc}")
             input_messages = [*persisted_history, {"role": "user", "content": transcript}]
-            instructions = SYSTEM_PROMPT
+            if getattr(self, "config_store", None) is not None:
+                instructions = self.config_store.snapshot().system_prompt or SYSTEM_PROMPT
+            else:
+                instructions = SYSTEM_PROMPT
             if memories:
                 memory_context = "\n".join(f"- {memory}" for memory in memories)
                 instructions += (
@@ -519,7 +531,8 @@ class BridgeState:
     ) -> str:
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
-        selected_model = model or self.args.llm_model
+        agent = self.config_store.snapshot() if getattr(self, "config_store", None) else None
+        selected_model = model or (agent.llm_model if agent else None) or self.args.llm_model
         if self.args.provider == "openai":
             response = self.openai_client.responses.create(
                 model=selected_model,
@@ -680,22 +693,42 @@ class BridgeState:
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
 
+        if getattr(self, "config_store", None) is not None:
+            agent = self.config_store.snapshot()
+            tts_model = agent.tts_model or self.args.tts_model
+            tts_voice = agent.tts_voice or self.args.tts_voice
+            tts_instructions = agent.tts_instructions or getattr(
+                self.args, "tts_instructions", TTS_INSTRUCTIONS
+            )
+        else:
+            tts_model = self.args.tts_model
+            tts_voice = self.args.tts_voice
+            tts_instructions = getattr(self.args, "tts_instructions", TTS_INSTRUCTIONS)
+        # OpenRouter speech only accepts mp3|pcm (not wav). Prefer raw PCM so we
+        # can wrap/resample to the board's 16 kHz mono WAV path without an mp3 decoder.
+        # Direct OpenAI still supports wav, but PCM keeps both providers aligned.
+        response_format = "pcm" if self.args.provider == "openrouter" else "wav"
         request_args: dict[str, Any] = {
-            "model": self.args.tts_model,
-            "voice": self.args.tts_voice,
+            "model": tts_model,
+            "voice": tts_voice,
             "input": text,
-            "response_format": "wav",
+            "response_format": response_format,
         }
-        if self.args.provider == "openai":
-            request_args["instructions"] = self.args.tts_instructions
+        # OpenAI TTS models accept theatrical delivery instructions; OpenRouter
+        # passes provider-specific fields through for openai/* speech models.
+        model_name = str(tts_model)
+        if self.args.provider == "openai" or model_name.startswith("openai/"):
+            request_args["instructions"] = tts_instructions
         response = self.openai_client.audio.speech.create(**request_args)
         if hasattr(response, "read"):
-            wav_bytes = bytes(response.read())
+            audio_bytes = bytes(response.read())
         elif isinstance(response, bytes):
-            wav_bytes = response
+            audio_bytes = response
         else:
             raise RuntimeError("Unexpected TTS response type")
-        return normalize_tts_wav(wav_bytes)
+        if response_format == "pcm":
+            return normalize_tts_pcm(audio_bytes, OPENAI_TTS_PCM_SAMPLE_RATE)
+        return normalize_tts_wav(audio_bytes)
 
     def configure_device_wifi(
         self,
@@ -943,7 +976,43 @@ def make_silence_wav(milliseconds: int) -> bytes:
         return buffer.getvalue()
 
 
+def wrap_pcm16_mono_as_wav(pcm: bytes, sample_rate: int) -> bytes:
+    with BytesIO() as buffer:
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(TTS_CHANNELS)
+            wav_file.setsampwidth(TTS_SAMPLE_WIDTH)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm)
+        return buffer.getvalue()
+
+
+def normalize_tts_pcm(pcm_bytes: bytes, source_sample_rate: int) -> bytes:
+    """Convert raw mono 16-bit LE PCM into board-ready 16 kHz mono WAV."""
+    if not pcm_bytes:
+        raise ValueError("TTS PCM payload is empty")
+    if len(pcm_bytes) % TTS_SAMPLE_WIDTH != 0:
+        raise ValueError("TTS PCM payload is not aligned to 16-bit samples")
+    if source_sample_rate <= 0:
+        raise ValueError("TTS PCM sample rate must be positive")
+
+    pcm = pcm_bytes
+    if source_sample_rate != TTS_SAMPLE_RATE:
+        pcm, _ = audioop.ratecv(
+            pcm,
+            TTS_SAMPLE_WIDTH,
+            1,
+            source_sample_rate,
+            TTS_SAMPLE_RATE,
+            None,
+        )
+    return wrap_pcm16_mono_as_wav(pcm, TTS_SAMPLE_RATE)
+
+
 def normalize_tts_wav(wav_bytes: bytes) -> bytes:
+    if wav_bytes[:4] != b"RIFF":
+        # Some gateways return bare PCM even when wav was requested.
+        return normalize_tts_pcm(wav_bytes, OPENAI_TTS_PCM_SAMPLE_RATE)
+
     with wave.open(BytesIO(wav_bytes), "rb") as wav_file:
         channels = wav_file.getnchannels()
         sample_width = wav_file.getsampwidth()
@@ -964,13 +1033,7 @@ def normalize_tts_wav(wav_bytes: bytes) -> bytes:
             None,
         )
 
-    with BytesIO() as buffer:
-        with wave.open(buffer, "wb") as wav_file:
-            wav_file.setnchannels(TTS_CHANNELS)
-            wav_file.setsampwidth(TTS_SAMPLE_WIDTH)
-            wav_file.setframerate(TTS_SAMPLE_RATE)
-            wav_file.writeframes(pcm)
-        return buffer.getvalue()
+    return wrap_pcm16_mono_as_wav(pcm, TTS_SAMPLE_RATE)
 
 
 def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
@@ -989,11 +1052,19 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     }
                 )
                 return
-            if path in {"/v1/conversation", "/v1/devices", "/v1/conversation/sessions"}:
+            if path in {
+                "/v1/conversation",
+                "/v1/devices",
+                "/v1/conversation/sessions",
+                "/v1/admin/config",
+            }:
                 if not self._is_authorized():
                     self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
                     return
                 params = urllib.parse.parse_qs(parsed.query)
+                if path == "/v1/admin/config":
+                    self._send_json({"ok": True, "config": state.agent_config()})
+                    return
                 if path == "/v1/devices":
                     snapshot = state.conversation_snapshot()
                     self._send_json({"ok": True, "devices": snapshot["devices"]})
@@ -1054,6 +1125,9 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
                     return
                 self._send_json({"ok": True, "history_messages": 0})
+                return
+            if self.path == "/v1/admin/config":
+                self._handle_admin_config_update()
                 return
             if self.path == "/v1/device_wifi":
                 self._handle_device_wifi()
@@ -1158,6 +1232,31 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
 
             self._log_response(payload)
             self._send_json(payload)
+
+        def _handle_admin_config_update(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 64_000:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid config body")
+                return
+            raw = self.rfile.read(length)
+            try:
+                request = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            if not isinstance(request, dict):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "Config body must be an object")
+                return
+            try:
+                config = state.update_agent_config(request)
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            except Exception as exc:
+                print(f"ERROR: admin config update failed: {exc}")
+                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
+            self._send_json({"ok": True, "config": config})
 
         def _handle_tts(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))

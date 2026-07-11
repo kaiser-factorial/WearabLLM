@@ -3,6 +3,7 @@ const els = {
   deviceList: document.querySelector("#device-list"),
   thread: document.querySelector("#thread"),
   threadTitle: document.querySelector("#thread-title"),
+  viewEyebrow: document.querySelector("#view-eyebrow"),
   sessionActive: document.querySelector("#session-active"),
   sessionTurns: document.querySelector("#session-turns"),
   sessionFilter: document.querySelector("#session-filter"),
@@ -14,6 +15,24 @@ const els = {
   eventFeed: document.querySelector("#event-feed"),
   refresh: document.querySelector("#refresh"),
   resetSession: document.querySelector("#reset-session"),
+  chatView: document.querySelector("#chat-view"),
+  commandView: document.querySelector("#command-view"),
+  configForm: document.querySelector("#config-form"),
+  configSource: document.querySelector("#config-source"),
+  configStatus: document.querySelector("#config-status"),
+  configReload: document.querySelector("#config-reload"),
+  cfgSystemPrompt: document.querySelector("#cfg-system-prompt"),
+  cfgLlmModel: document.querySelector("#cfg-llm-model"),
+  cfgTtsModel: document.querySelector("#cfg-tts-model"),
+  cfgTtsVoice: document.querySelector("#cfg-tts-voice"),
+  cfgTtsInstructions: document.querySelector("#cfg-tts-instructions"),
+  cfgUpdated: document.querySelector("#cfg-updated"),
+  deployRepo: document.querySelector("#deploy-repo"),
+  deployBridge: document.querySelector("#deploy-bridge"),
+  deployAvailability: document.querySelector("#deploy-availability"),
+  deployDry: document.querySelector("#deploy-dry"),
+  deployLive: document.querySelector("#deploy-live"),
+  deployLog: document.querySelector("#deploy-log"),
 };
 
 const state = {
@@ -22,6 +41,7 @@ const state = {
   replyAsDeviceId: "web-console",
   turns: [],
   session: null,
+  view: "chat",
   polling: false,
   sending: false,
   pausePolling: false,
@@ -30,6 +50,8 @@ const state = {
   devicesSignature: "",
   turnsSignature: "",
   replyOptionsSignature: "",
+  bootstrap: null,
+  agentConfig: null,
 };
 
 function setStatus(kind, text) {
@@ -359,16 +381,126 @@ async function refreshEvents() {
   }
 }
 
+function setView(view) {
+  state.view = view;
+  const isChat = view === "chat";
+  els.chatView.classList.toggle("active", isChat);
+  els.chatView.hidden = !isChat;
+  els.commandView.classList.toggle("active", !isChat);
+  els.commandView.hidden = isChat;
+  document.querySelectorAll(".tab").forEach((tab) => {
+    const active = tab.dataset.view === view;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  if (isChat) {
+    els.viewEyebrow.textContent = "Conversation";
+    els.threadTitle.textContent =
+      state.selectedDeviceId === "all"
+        ? "All bodies"
+        : labelFor(state.selectedDeviceId);
+  } else {
+    els.viewEyebrow.textContent = "Command center";
+    els.threadTitle.textContent = "Agent & deploy";
+    loadAgentConfig();
+  }
+}
+
+function fillConfigForm(config) {
+  state.agentConfig = config;
+  els.cfgSystemPrompt.value = config.system_prompt || "";
+  els.cfgLlmModel.value = config.llm_model || "";
+  els.cfgTtsModel.value = config.tts_model || "";
+  els.cfgTtsVoice.value = config.tts_voice || "";
+  els.cfgTtsInstructions.value = config.tts_instructions || "";
+  els.cfgUpdated.value = config.updated_at
+    ? formatTimeTitle(config.updated_at)
+    : "not saved yet";
+  els.configSource.textContent = `source: ${config.source || "unknown"}`;
+}
+
+async function loadAgentConfig() {
+  els.configStatus.textContent = "Loading config…";
+  try {
+    const payload = await fetchJson("/api/admin/config");
+    fillConfigForm(payload.config || {});
+    els.configStatus.textContent = "Loaded live agent config";
+  } catch (error) {
+    els.configStatus.textContent = error.message || "Config load failed";
+  }
+}
+
+async function saveAgentConfig(event) {
+  event.preventDefault();
+  els.configStatus.textContent = "Saving…";
+  try {
+    const payload = await fetchJson("/api/admin/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_prompt: els.cfgSystemPrompt.value,
+        llm_model: els.cfgLlmModel.value,
+        tts_model: els.cfgTtsModel.value,
+        tts_voice: els.cfgTtsVoice.value,
+        tts_instructions: els.cfgTtsInstructions.value,
+      }),
+    });
+    fillConfigForm(payload.config || {});
+    els.configStatus.textContent = "Saved to live agent";
+  } catch (error) {
+    els.configStatus.textContent = error.message || "Save failed";
+  }
+}
+
+async function runDeploy({ dryRun }) {
+  if (!dryRun) {
+    const ok = window.confirm(
+      `Deploy bridge code to Hugging Face Space ${state.bootstrap?.hf_space_repo || ""}?\n\nThis uploads source from this laptop. Secrets stay local.`
+    );
+    if (!ok) return;
+  }
+  els.deployLog.textContent = dryRun ? "Packing dry-run…" : "Deploying…";
+  try {
+    const payload = await fetchJson("/api/admin/deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dry_run: Boolean(dryRun),
+        repo_id: state.bootstrap?.hf_space_repo || undefined,
+      }),
+    });
+    els.deployLog.textContent = payload.output || JSON.stringify(payload, null, 2);
+    if (!payload.ok) {
+      els.configStatus.textContent = "Deploy failed — see log";
+    }
+  } catch (error) {
+    els.deployLog.textContent = error.message || "Deploy failed";
+  }
+}
+
 async function bootstrap() {
   const payload = await fetchJson("/api/bootstrap");
+  state.bootstrap = payload;
   state.devices = mergeDevices(payload.known_devices || [], []);
   state.replyAsDeviceId = payload.default_device_id || "web-console";
   renderDevices({ force: true });
+  els.deployRepo.textContent = payload.hf_space_repo || "—";
+  els.deployBridge.textContent = payload.bridge_configured ? "configured" : "missing";
+  els.deployAvailability.textContent = payload.deploy_available ? "available" : "disabled";
   if (!payload.bridge_configured) {
     setStatus("offline", "Bridge missing");
     els.composerStatus.textContent = "Configure WEARABLLM_BRIDGE_URL in firmware sdkconfig.";
   }
 }
+
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => setView(tab.dataset.view || "chat"));
+});
+
+els.configForm?.addEventListener("submit", saveAgentConfig);
+els.configReload?.addEventListener("click", () => loadAgentConfig());
+els.deployDry?.addEventListener("click", () => runDeploy({ dryRun: true }));
+els.deployLive?.addEventListener("click", () => runDeploy({ dryRun: false }));
 
 els.replyAs.addEventListener("change", () => {
   state.replyAsDeviceId = els.replyAs.value;

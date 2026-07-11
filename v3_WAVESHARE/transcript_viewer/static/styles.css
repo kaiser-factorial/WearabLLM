@@ -224,9 +224,105 @@ body {
 
 .stage {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr;
   min-height: 100vh;
   max-height: 100vh;
+}
+
+.view {
+  min-height: 0;
+  display: none;
+  grid-template-rows: 1fr auto;
+}
+.view.active { display: grid; }
+.view.command-view.active {
+  display: block;
+  overflow: auto;
+  padding: 18px 32px 28px;
+}
+
+.view-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+}
+.tab.active {
+  background: rgba(124, 240, 194, 0.16);
+  color: var(--text);
+}
+
+.command-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.9fr);
+  gap: 16px;
+}
+.command-card {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(18, 23, 34, 0.84);
+  box-shadow: var(--shadow);
+}
+.command-card label {
+  display: block;
+  margin: 14px 0 6px;
+}
+.command-card textarea,
+.command-card input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(9, 11, 16, 0.88);
+  color: var(--text);
+  font: inherit;
+  padding: 10px 12px;
+}
+.command-card textarea {
+  resize: vertical;
+  min-height: 88px;
+  line-height: 1.45;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.86rem;
+}
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.deploy-log {
+  margin: 14px 0 0;
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #0a0d13;
+  color: #b7c4d8;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 1100px) {
+  .command-grid { grid-template-columns: 1fr; }
+  .field-row { grid-template-columns: 1fr; }
 }
 
 .stage-head {

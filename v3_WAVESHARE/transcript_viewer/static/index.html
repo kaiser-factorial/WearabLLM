@@ -48,36 +48,113 @@
       <main class="stage">
         <header class="stage-head">
           <div>
-            <p class="eyebrow">Conversation</p>
+            <p class="eyebrow" id="view-eyebrow">Conversation</p>
             <h2 id="thread-title">All bodies</h2>
           </div>
           <div class="stage-actions">
+            <div class="view-tabs" role="tablist" aria-label="Sphere views">
+              <button type="button" class="tab active" data-view="chat" role="tab" aria-selected="true">Chat</button>
+              <button type="button" class="tab" data-view="command" role="tab" aria-selected="false">Command</button>
+            </div>
             <button id="refresh" type="button" class="ghost">Refresh</button>
           </div>
         </header>
 
-        <section id="thread" class="thread" aria-live="polite"></section>
+        <section id="chat-view" class="view active">
+          <section id="thread" class="thread" aria-live="polite"></section>
 
-        <footer class="composer">
-          <div class="composer-meta">
-            <label for="reply-as">Reply as</label>
-            <select id="reply-as"></select>
-            <span id="composer-hint" class="hint">Continues the shared principal thread</span>
-          </div>
-          <form id="reply-form" class="reply-form">
-            <textarea
-              id="reply-input"
-              rows="3"
-              maxlength="2000"
-              placeholder="Type to continue the conversation from here…"
-              required
-            ></textarea>
-            <div class="composer-actions">
-              <p id="composer-status" class="hint"></p>
-              <button id="send" type="submit">Send</button>
+          <footer class="composer">
+            <div class="composer-meta">
+              <label for="reply-as">Reply as</label>
+              <select id="reply-as"></select>
+              <span id="composer-hint" class="hint">Continues the shared principal thread</span>
             </div>
-          </form>
-        </footer>
+            <form id="reply-form" class="reply-form">
+              <textarea
+                id="reply-input"
+                rows="3"
+                maxlength="2000"
+                placeholder="Type to continue the conversation from here…"
+                required
+              ></textarea>
+              <div class="composer-actions">
+                <p id="composer-status" class="hint"></p>
+                <button id="send" type="submit">Send</button>
+              </div>
+            </form>
+          </footer>
+        </section>
+
+        <section id="command-view" class="view command-view" hidden>
+          <div class="command-grid">
+            <form id="config-form" class="command-card">
+              <div class="panel-head">
+                <h2>Agent personality</h2>
+                <span id="config-source" class="hint">—</span>
+              </div>
+              <p class="hint">
+                Edits apply to the live hosted bridge for every body (home base, web, future wearable).
+                Persist across Space restarts when Supabase settings are available.
+              </p>
+
+              <label for="cfg-system-prompt">System prompt</label>
+              <textarea id="cfg-system-prompt" rows="10" maxlength="12000" required></textarea>
+
+              <div class="field-row">
+                <div>
+                  <label for="cfg-llm-model">LLM model</label>
+                  <input id="cfg-llm-model" type="text" maxlength="120" required>
+                </div>
+                <div>
+                  <label for="cfg-tts-model">TTS model</label>
+                  <input id="cfg-tts-model" type="text" maxlength="120" required>
+                </div>
+              </div>
+
+              <div class="field-row">
+                <div>
+                  <label for="cfg-tts-voice">TTS voice</label>
+                  <input id="cfg-tts-voice" type="text" maxlength="40" required>
+                </div>
+                <div>
+                  <label for="cfg-updated">Updated</label>
+                  <input id="cfg-updated" type="text" readonly>
+                </div>
+              </div>
+
+              <label for="cfg-tts-instructions">TTS delivery instructions</label>
+              <textarea id="cfg-tts-instructions" rows="6" maxlength="4000" required></textarea>
+
+              <div class="composer-actions">
+                <p id="config-status" class="hint"></p>
+                <div class="button-row">
+                  <button id="config-reload" type="button" class="ghost">Reload</button>
+                  <button id="config-save" type="submit">Save to agent</button>
+                </div>
+              </div>
+            </form>
+
+            <section class="command-card">
+              <div class="panel-head">
+                <h2>Deploy &amp; bodies</h2>
+              </div>
+              <p class="hint">
+                Code deploys run on this laptop and upload bridge sources to Hugging Face.
+                Device secrets never leave the local Sphere proxy.
+              </p>
+              <dl class="session-meta">
+                <div><dt>HF Space</dt><dd id="deploy-repo">—</dd></div>
+                <div><dt>Bridge</dt><dd id="deploy-bridge">—</dd></div>
+                <div><dt>Deploy</dt><dd id="deploy-availability">—</dd></div>
+              </dl>
+              <div class="button-row">
+                <button id="deploy-dry" type="button" class="ghost">Dry-run pack</button>
+                <button id="deploy-live" type="button">Deploy to HF</button>
+              </div>
+              <pre id="deploy-log" class="deploy-log" aria-live="polite">Ready.</pre>
+            </section>
+          </div>
+        </section>
       </main>
     </div>
     <script src="/app.js" defer></script>
