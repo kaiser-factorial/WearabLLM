@@ -131,7 +131,10 @@ Current v3 firmware capabilities:
 - optional TFT boot wiring self-test behind `CONFIG_WEARABLLM_DISPLAY_SELF_TEST_ON_BOOT`
 - ES8311 speaker earcon and WAV playback behind `CONFIG_WEARABLLM_AUDIO_OUT_ENABLED`
 - bridge TTS WAV fetch/playback behind `CONFIG_WEARABLLM_TTS_ENABLED`
-- K1/+ and K3/- physical volume controls in 10-point increments over 0-100; current boot default is 70 and K2/set remains reserved
+- K1/+ and K3/- physical volume controls in 10-point increments over 0-100;
+  current compile-time default is 70
+- K2/set toggles mute; amber ring while muted, dim-blue idle when unmuted
+- speaker volume and mute state persist in NVS across reboots
 
 Current Supabase capabilities:
 
@@ -228,7 +231,7 @@ Not yet verified or integrated:
 - physical TFT wiring, TFT boot self-test output, and normal display driver output
 - authenticated ingestion from a separate Home Assistant host
 - correction-aware replacement of stale facts and live bench validation of automatic extraction quality
-- physical confirmation that K1 and K3 produce the expected 10-point volume changes, although expander initialization, firmware build, flash, and boot are verified
+- physical confirmation that K1/K2/K3 produce the expected volume/mute behavior and that NVS prefs survive reboot (firmware and boot logs support this path)
 - BLE/SoftAP live provisioning; current device configuration still requires rebuilding and flashing firmware
 - a complete hosted physical interaction: wake/PTT, microphone capture,
   OpenRouter request, LED command, audible TTS, and Supabase transcript row
@@ -516,11 +519,12 @@ OpenAI or local Whisper. ESP-SR handles wake-word detection, not arbitrary STT.
 
 ## Suggested Next Milestones
 
-1. Publish the verified transcript viewer, Supabase read path, and direct TTS
-   compatibility fix.
+1. ~~Publish the verified transcript viewer, Supabase read path, and direct TTS
+   compatibility fix.~~ Done (merged to `main`).
 2. Implement authenticated OTA and migrate to two app slots; retain rollback.
-3. Verify power-only direct interaction and K1/K3 volume changes.
-4. Decide whether volume and direct conversation state should persist locally.
+3. Verify power-only hosted interaction end-to-end and physical K1/K2/K3 volume/mute.
+4. ~~Persist volume locally.~~ Done (NVS volume + mute). Decide whether direct-mode
+   conversation state should also persist beyond reboot-scoped context.
 5. Evaluate whether direct mode needs a durable transcript or conversation
    persistence layer after the current reboot-scoped `previous_response_id`
    path.
@@ -538,7 +542,7 @@ OpenAI or local Whisper. ESP-SR handles wake-word detection, not arbitrary STT.
 - How should BLK/backlight and future potentiometer/extra controls be routed on the perfboard adapter?
 - Should confidence be model-reported, heuristic, or mapped from code category?
 - Should sound be generated tones, cached WAV clips, bridge TTS, or a mix?
-- Should physical volume persist in NVS, and should K2/set become mute, session reset, or another control?
+- ~~Should physical volume persist in NVS, and should K2/set become mute?~~ Yes: NVS volume + mute on K2. Session reset remains a separate control if needed later.
 - How should Supermemory retrieval be scoped, ranked, and exposed to the user for reset/forget operations?
 - Does sensor context still matter in the Waveshare version?
 - Should Wi-Fi provisioning become BLE or SoftAP based?
