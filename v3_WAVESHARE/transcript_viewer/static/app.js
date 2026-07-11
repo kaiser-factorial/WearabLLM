@@ -24,6 +24,7 @@ const state = {
   session: null,
   polling: false,
   sending: false,
+  pausePolling: false,
   seenEvents: new Set(),
   lastStatus: "",
   devicesSignature: "",
@@ -36,16 +37,17 @@ function setStatus(kind, text) {
   if (state.lastStatus === key) return;
   state.lastStatus = key;
   els.status.className = `status ${kind}`;
-  els.status.innerHTML = `<span></span> ${text}`;
+  const dot = document.createElement("span");
+  els.status.replaceChildren(dot, document.createTextNode(` ${text}`));
 }
 
-function kindFor(deviceId, devices = state.devices) {
-  const found = devices.find((item) => item.id === deviceId);
+function kindFor(deviceId) {
+  const found = state.devices.find((item) => item.id === deviceId);
   return found?.kind || "custom";
 }
 
-function labelFor(deviceId, devices = state.devices) {
-  const found = devices.find((item) => item.id === deviceId);
+function labelFor(deviceId) {
+  const found = state.devices.find((item) => item.id === deviceId);
   return found?.label || deviceId;
 }
 
@@ -61,8 +63,7 @@ function formatTime(value, { relative = false } = {}) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
     if (relative) {
-      const deltaMs = Date.now() - date.getTime();
-      const seconds = Math.round(deltaMs / 1000);
+      const seconds = Math.round((Date.now() - date.getTime()) / 1000);
       if (seconds < 45) return "just now";
       if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
       if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
@@ -120,13 +121,19 @@ function devicesSignature(devices, selectedId) {
 }
 
 function turnsSignature(turns) {
-  return JSON.stringify(
-    turns.map((t) => [t.id, t.role, t.device_id, t.content, t.created_at])
-  );
+  return turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${t.created_at}`).join("\n");
 }
 
-function nearBottom(el, px = 80) {
+function nearBottom(el, px = 96) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < px;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function renderDevices({ force = false } = {}) {
@@ -153,7 +160,14 @@ function renderDevices({ force = false } = {}) {
     ...cards.map((device) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `device-card ${device.kind || "custom"}${device.id === state.selectedDeviceId ? " active" : ""}${device.status === "planned" ? " planned" : ""}`;
+      button.className = [
+        "device-card",
+        device.kind || "custom",
+        device.id === state.selectedDeviceId ? "active" : "",
+        device.status === "planned" ? "planned" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", device.id === state.selectedDeviceId ? "true" : "false");
       button.innerHTML = `
@@ -183,13 +197,12 @@ function syncReplyAsOptions() {
   const replyOptions = state.devices.filter(
     (device) => device.status !== "planned" || device.id === "web-console"
   );
-  const signature = JSON.stringify(replyOptions.map((d) => [d.id, d.label]));
+  const signature = replyOptions.map((d) => `${d.id}:${d.label}`).join("|");
   const preferred = replyOptions.some((item) => item.id === state.replyAsDeviceId)
     ? state.replyAsDeviceId
     : "web-console";
   state.replyAsDeviceId = preferred;
 
-  // Avoid rebuilding <select> while the user is interacting with it or typing.
   if (signature === state.replyOptionsSignature) {
     if (els.replyAs.value !== preferred && document.activeElement !== els.replyAs) {
       els.replyAs.value = preferred;
@@ -204,7 +217,7 @@ function syncReplyAsOptions() {
       const option = document.createElement("option");
       option.value = device.id;
       option.textContent = device.label;
-      option.selected = device.id === preferred;
+      if (device.id === preferred) option.selected = true;
       return option;
     })
   );
@@ -214,11 +227,14 @@ function syncReplyAsOptions() {
 function renderThread({ force = false } = {}) {
   const signature = turnsSignature(state.turns);
   if (!force && signature === state.turnsSignature) {
-    els.sessionTurns.textContent = String(state.turns.length);
+    if (els.sessionTurns.textContent !== String(state.turns.length)) {
+      els.sessionTurns.textContent = String(state.turns.length);
+    }
     return;
   }
 
-  const shouldStick = force || nearBottom(els.thread) || state.turnsSignature === "";
+  const stick = force || nearBottom(els.thread) || state.turnsSignature === "";
+  const previousScroll = els.thread.scrollTop;
   state.turnsSignature = signature;
 
   if (!state.turns.length) {
@@ -233,36 +249,37 @@ function renderThread({ force = false } = {}) {
   }
 
   els.sessionTurns.textContent = String(state.turns.length);
-  els.thread.replaceChildren(
-    ...state.turns.map((turn) => {
-      const role = turn.role === "assistant" ? "assistant" : "user";
-      const deviceId = turn.device_id || "unknown";
-      const kind = kindFor(deviceId);
-      const article = document.createElement("article");
-      article.className = `bubble ${role}`;
-      const when = formatTime(turn.created_at);
-      const whenTitle = formatTimeTitle(turn.created_at);
-      article.innerHTML = `
-        <div class="bubble-meta">
-          <span class="device-pill ${kind}">${escapeHtml(labelFor(deviceId))}</span>
-          <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
-          <time class="timestamp" datetime="${escapeHtml(turn.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
-        </div>
-        <p></p>
-      `;
-      article.querySelector("p").textContent = turn.content || "";
-      return article;
-    })
-  );
-  if (shouldStick) {
-    els.thread.scrollTop = els.thread.scrollHeight;
+  const fragment = document.createDocumentFragment();
+  for (const turn of state.turns) {
+    const role = turn.role === "assistant" ? "assistant" : "user";
+    const deviceId = turn.device_id || "unknown";
+    const kind = kindFor(deviceId);
+    const article = document.createElement("article");
+    article.className = `bubble ${role}`;
+    article.dataset.turnId = String(turn.id ?? "");
+    const when = formatTime(turn.created_at);
+    const whenTitle = formatTimeTitle(turn.created_at);
+    article.innerHTML = `
+      <div class="bubble-meta">
+        <span class="device-pill ${kind}">${escapeHtml(labelFor(deviceId))}</span>
+        <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
+        <time class="timestamp" datetime="${escapeHtml(turn.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
+      </div>
+      <p></p>
+    `;
+    article.querySelector("p").textContent = turn.content || "";
+    fragment.append(article);
   }
+  els.thread.replaceChildren(fragment);
+  els.thread.scrollTop = stick ? els.thread.scrollHeight : previousScroll;
 }
 
 function renderEvents(rows) {
+  let added = 0;
   for (const row of rows.slice().reverse()) {
     if (state.seenEvents.has(row.id)) continue;
     state.seenEvents.add(row.id);
+    added += 1;
     const when = formatTime(row.created_at, { relative: true });
     const whenTitle = formatTimeTitle(row.created_at);
     const item = document.createElement("article");
@@ -281,7 +298,7 @@ function renderEvents(rows) {
   while (els.eventFeed.children.length > 30) {
     els.eventFeed.lastElementChild.remove();
   }
-  refreshEventTimestamps();
+  if (added > 0) refreshEventTimestamps();
 }
 
 function refreshEventTimestamps() {
@@ -291,39 +308,26 @@ function refreshEventTimestamps() {
     if (!stamp || !createdAt) continue;
     const next = formatTime(createdAt, { relative: true });
     if (stamp.textContent !== next) stamp.textContent = next;
-    stamp.dateTime = createdAt;
     stamp.title = formatTimeTitle(createdAt);
   }
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
 }
 
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, { cache: "no-store", ...options });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = payload.error || `HTTP ${response.status}`;
-    throw new Error(message);
+    throw new Error(payload.error || `HTTP ${response.status}`);
   }
   return payload;
 }
 
 async function refreshConversation({ forceRender = false } = {}) {
   if (state.polling) return;
-  // Don't thrash the DOM while the composer is mid-send or focused typing is active
-  // and nothing changed — still fetch, but render only on diffs.
+  if (state.pausePolling && !forceRender) return;
   state.polling = true;
   try {
     const params = new URLSearchParams({ limit: "300" });
-    if (state.selectedDeviceId !== "all") {
-      params.set("device_id", state.selectedDeviceId);
-    }
+    if (state.selectedDeviceId !== "all") params.set("device_id", state.selectedDeviceId);
     const payload = await fetchJson(`/api/conversation?${params.toString()}`);
     state.turns = Array.isArray(payload.turns) ? payload.turns : [];
     state.session = payload.session || null;
@@ -344,10 +348,10 @@ async function refreshConversation({ forceRender = false } = {}) {
 }
 
 async function refreshEvents() {
+  if (state.pausePolling) return;
   try {
     const payload = await fetchJson("/api/transcripts?limit=20");
-    const rows = Array.isArray(payload.transcripts) ? payload.transcripts : [];
-    renderEvents(rows);
+    renderEvents(Array.isArray(payload.transcripts) ? payload.transcripts : []);
   } catch (error) {
     if (!String(error.message).includes("transcripts_not_configured")) {
       console.warn("event feed", error);
@@ -370,6 +374,19 @@ els.replyAs.addEventListener("change", () => {
   state.replyAsDeviceId = els.replyAs.value;
 });
 
+els.replyInput.addEventListener("focus", () => {
+  state.pausePolling = true;
+});
+els.replyInput.addEventListener("blur", () => {
+  state.pausePolling = false;
+  refreshConversation();
+  refreshEvents();
+});
+els.replyInput.addEventListener("input", () => {
+  // Keep polling paused while the user is composing.
+  state.pausePolling = true;
+});
+
 els.replyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.sending) return;
@@ -377,6 +394,7 @@ els.replyForm.addEventListener("submit", async (event) => {
   if (!transcript) return;
 
   state.sending = true;
+  state.pausePolling = true;
   els.send.disabled = true;
   els.composerStatus.textContent = "Thinking…";
   try {
@@ -389,9 +407,7 @@ els.replyForm.addEventListener("submit", async (event) => {
       }),
     });
     els.replyInput.value = "";
-    els.composerStatus.textContent = payload.command
-      ? `Got ${payload.command}`
-      : "Reply sent";
+    els.composerStatus.textContent = payload.command ? `Got ${payload.command}` : "Reply sent";
     await refreshConversation({ forceRender: true });
   } catch (error) {
     console.error(error);
@@ -399,12 +415,14 @@ els.replyForm.addEventListener("submit", async (event) => {
     setStatus("offline", "Send failed");
   } finally {
     state.sending = false;
+    state.pausePolling = document.activeElement === els.replyInput;
     els.send.disabled = false;
     els.replyInput.focus();
   }
 });
 
 els.refresh.addEventListener("click", () => {
+  state.pausePolling = false;
   refreshConversation({ forceRender: true });
   refreshEvents();
 });
@@ -430,7 +448,7 @@ els.replyInput.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
+  if (!document.hidden && !state.pausePolling) {
     refreshConversation();
     refreshEvents();
   }
@@ -444,9 +462,8 @@ bootstrap()
   });
 
 setInterval(() => {
-  if (!document.hidden) {
-    refreshConversation();
-    refreshEvents();
-    refreshEventTimestamps();
-  }
-}, 2500);
+  if (document.hidden || state.pausePolling) return;
+  refreshConversation();
+  refreshEvents();
+  refreshEventTimestamps();
+}, 4000);

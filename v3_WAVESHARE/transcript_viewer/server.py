@@ -72,6 +72,17 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
             return
         super().log_message(format, *args)
 
+    def end_headers(self) -> None:
+        # Avoid sticky browser caches of the console UI during rapid iteration.
+        if self.path.startswith("/api/") or self.path in {
+            "/",
+            "/index.html",
+            "/app.js",
+            "/styles.css",
+        }:
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path

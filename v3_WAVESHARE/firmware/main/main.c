@@ -594,11 +594,15 @@ static esp_err_t send_audio_to_bridge(
     char *reply_out,
     size_t reply_len)
 {
-    char response_buf[HTTP_RESPONSE_MAX] = {0};
+    /* Heap-allocate: interaction task stack is too small for an 8KB buffer. */
+    char *response_buf = calloc(1, HTTP_RESPONSE_MAX);
+    if (!response_buf) {
+        return ESP_ERR_NO_MEM;
+    }
     http_response_t response = {
         .data = response_buf,
         .len = 0,
-        .capacity = sizeof(response_buf),
+        .capacity = HTTP_RESPONSE_MAX,
         .overflow = false,
     };
 
@@ -613,6 +617,7 @@ static esp_err_t send_audio_to_bridge(
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
+        free(response_buf);
         return ESP_FAIL;
     }
 
@@ -633,12 +638,14 @@ static esp_err_t send_audio_to_bridge(
              response.len);
 
     if (response.overflow) {
-        ESP_LOGE(TAG, "bridge response exceeded %u bytes; ignoring truncated JSON", (unsigned)sizeof(response_buf));
+        ESP_LOGE(TAG, "bridge response exceeded %u bytes; ignoring truncated JSON", (unsigned)HTTP_RESPONSE_MAX);
+        free(response_buf);
         return ESP_ERR_INVALID_SIZE;
     }
 
     if (err != ESP_OK || status < 200 || status >= 300) {
         ESP_LOGE(TAG, "bridge request failed: err=%s status=%d body=%s", esp_err_to_name(err), status, response_buf);
+        free(response_buf);
         return err == ESP_OK ? ESP_FAIL : err;
     }
 
@@ -647,6 +654,7 @@ static esp_err_t send_audio_to_bridge(
     if (!cJSON_IsString(command) || strlen(command->valuestring) != 2) {
         ESP_LOGE(TAG, "bridge response missing 2-char command: %s", response_buf);
         cJSON_Delete(root);
+        free(response_buf);
         return ESP_FAIL;
     }
 
@@ -658,6 +666,7 @@ static esp_err_t send_audio_to_bridge(
     if (!is_valid_led_command(normalized_command)) {
         ESP_LOGE(TAG, "bridge response has unknown LED command '%s': %s", command->valuestring, response_buf);
         cJSON_Delete(root);
+        free(response_buf);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -680,6 +689,7 @@ static esp_err_t send_audio_to_bridge(
         reply_out[0] = '\0';
     }
     cJSON_Delete(root);
+    free(response_buf);
     return ESP_OK;
 }
 
@@ -895,6 +905,13 @@ static void interaction_task(void *arg)
             ESP_LOGI(TAG, "%s: listening", wake_detected ? "wake word detected" : "push-to-talk held");
             led_set_all(COLOR_LISTENING);
             wearabllm_display_show_state(WEARABLLM_DISPLAY_LISTENING);
+            /* Short earcon so the user hears that capture started (PA enabled). */
+            esp_err_t listen_tone_err = wearabllm_audio_play_tone(740, 70);
+            if (listen_tone_err != ESP_OK && listen_tone_err != ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGW(TAG, "listening earcon failed: %s", esp_err_to_name(listen_tone_err));
+            }
+            /* Brief gap so the earcon is not the dominant content of the capture. */
+            vTaskDelay(pdMS_TO_TICKS(80));
             uint8_t *wav = NULL;
             size_t wav_len = 0;
             bool used_silent_fallback = false;
@@ -914,8 +931,8 @@ static void interaction_task(void *arg)
             wearabllm_display_show_state(WEARABLLM_DISPLAY_THINKING);
             if (err == ESP_OK) {
                 char command[3] = "BS";
-                char transcript[192] = {0};
-                char reply[256] = {0};
+                char transcript[256] = {0};
+                char reply[512] = {0};
                 err = wait_for_wifi_ready();
                 if (err == ESP_OK) {
 #if CONFIG_WEARABLLM_DIRECT_OPENAI
@@ -1045,6 +1062,7 @@ void app_main(void)
              CONFIG_WEARABLLM_AUDIO_MAX_SECONDS);
     ESP_LOGI(TAG, "Wi-Fi SSID configured=%s", CONFIG_WEARABLLM_WIFI_SSID[0] ? "yes" : "no");
 
-    BaseType_t task_result = xTaskCreate(interaction_task, "interaction", 8192, NULL, 5, NULL);
+    /* Larger stack: HTTP client + JSON parse + audio paths need headroom. */
+    BaseType_t task_result = xTaskCreate(interaction_task, "interaction", 16384, NULL, 5, NULL);
     ESP_ERROR_CHECK(task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }

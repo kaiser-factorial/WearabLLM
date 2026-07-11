@@ -273,7 +273,6 @@ body {
   padding: 14px 16px;
   border-radius: 18px;
   border: 1px solid var(--line);
-  animation: rise 0.28s ease;
 }
 .bubble.user {
   align-self: flex-end;
