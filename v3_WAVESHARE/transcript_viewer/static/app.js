@@ -25,9 +25,16 @@ const state = {
   polling: false,
   sending: false,
   seenEvents: new Set(),
+  lastStatus: "",
+  devicesSignature: "",
+  turnsSignature: "",
+  replyOptionsSignature: "",
 };
 
 function setStatus(kind, text) {
+  const key = `${kind}:${text}`;
+  if (state.lastStatus === key) return;
+  state.lastStatus = key;
   els.status.className = `status ${kind}`;
   els.status.innerHTML = `<span></span> ${text}`;
 }
@@ -61,7 +68,6 @@ function formatTime(value, { relative = false } = {}) {
       if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
       if (seconds < 86400 * 7) return `${Math.round(seconds / 86400)}d ago`;
     }
-    // Compact local stamp: "Jul 10, 11:42 PM"
     return date.toLocaleString(undefined, {
       month: "short",
       day: "numeric",
@@ -103,11 +109,34 @@ function mergeDevices(known = [], remote = []) {
       seen: Boolean(previous.seen || item.seen),
     });
   }
-  // Always offer an "all bodies" virtual filter via UI, not as a device body.
   return Array.from(byId.values()).sort((a, b) => a.label.localeCompare(b.label));
 }
 
-function renderDevices() {
+function devicesSignature(devices, selectedId) {
+  return JSON.stringify({
+    selectedId,
+    devices: devices.map((d) => [d.id, d.label, d.kind, d.status, Boolean(d.seen)]),
+  });
+}
+
+function turnsSignature(turns) {
+  return JSON.stringify(
+    turns.map((t) => [t.id, t.role, t.device_id, t.content, t.created_at])
+  );
+}
+
+function nearBottom(el, px = 80) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < px;
+}
+
+function renderDevices({ force = false } = {}) {
+  const signature = devicesSignature(state.devices, state.selectedDeviceId);
+  if (!force && signature === state.devicesSignature) {
+    syncReplyAsOptions();
+    return;
+  }
+  state.devicesSignature = signature;
+
   const cards = [
     {
       id: "all",
@@ -136,21 +165,40 @@ function renderDevices() {
         <span class="device-badge">${escapeHtml(device.status || "active")}</span>
       `;
       button.addEventListener("click", () => {
+        if (state.selectedDeviceId === device.id) return;
         state.selectedDeviceId = device.id;
         els.threadTitle.textContent = device.id === "all" ? "All bodies" : device.label;
         els.sessionFilter.textContent = device.id === "all" ? "All bodies" : device.label;
-        renderDevices();
-        refreshConversation();
+        renderDevices({ force: true });
+        refreshConversation({ forceRender: true });
       });
       return button;
     })
   );
 
-  const replyOptions = state.devices.filter((device) => device.status !== "planned" || device.id === "web-console");
-  const preferred = replyOptions.some((device) => device.id === state.replyAsDeviceId)
+  syncReplyAsOptions();
+}
+
+function syncReplyAsOptions() {
+  const replyOptions = state.devices.filter(
+    (device) => device.status !== "planned" || device.id === "web-console"
+  );
+  const signature = JSON.stringify(replyOptions.map((d) => [d.id, d.label]));
+  const preferred = replyOptions.some((item) => item.id === state.replyAsDeviceId)
     ? state.replyAsDeviceId
     : "web-console";
   state.replyAsDeviceId = preferred;
+
+  // Avoid rebuilding <select> while the user is interacting with it or typing.
+  if (signature === state.replyOptionsSignature) {
+    if (els.replyAs.value !== preferred && document.activeElement !== els.replyAs) {
+      els.replyAs.value = preferred;
+    }
+    return;
+  }
+  state.replyOptionsSignature = signature;
+
+  const focused = document.activeElement === els.replyAs;
   els.replyAs.replaceChildren(
     ...replyOptions.map((device) => {
       const option = document.createElement("option");
@@ -160,9 +208,19 @@ function renderDevices() {
       return option;
     })
   );
+  if (focused) els.replyAs.focus();
 }
 
-function renderThread() {
+function renderThread({ force = false } = {}) {
+  const signature = turnsSignature(state.turns);
+  if (!force && signature === state.turnsSignature) {
+    els.sessionTurns.textContent = String(state.turns.length);
+    return;
+  }
+
+  const shouldStick = force || nearBottom(els.thread) || state.turnsSignature === "";
+  state.turnsSignature = signature;
+
   if (!state.turns.length) {
     els.thread.innerHTML = `
       <div class="empty">
@@ -196,7 +254,9 @@ function renderThread() {
       return article;
     })
   );
-  els.thread.scrollTop = els.thread.scrollHeight;
+  if (shouldStick) {
+    els.thread.scrollTop = els.thread.scrollHeight;
+  }
 }
 
 function renderEvents(rows) {
@@ -229,7 +289,8 @@ function refreshEventTimestamps() {
     const createdAt = item.dataset.createdAt;
     const stamp = item.querySelector("time.timestamp");
     if (!stamp || !createdAt) continue;
-    stamp.textContent = formatTime(createdAt, { relative: true });
+    const next = formatTime(createdAt, { relative: true });
+    if (stamp.textContent !== next) stamp.textContent = next;
     stamp.dateTime = createdAt;
     stamp.title = formatTimeTitle(createdAt);
   }
@@ -253,8 +314,10 @@ async function fetchJson(url, options = {}) {
   return payload;
 }
 
-async function refreshConversation() {
+async function refreshConversation({ forceRender = false } = {}) {
   if (state.polling) return;
+  // Don't thrash the DOM while the composer is mid-send or focused typing is active
+  // and nothing changed — still fetch, but render only on diffs.
   state.polling = true;
   try {
     const params = new URLSearchParams({ limit: "300" });
@@ -265,9 +328,12 @@ async function refreshConversation() {
     state.turns = Array.isArray(payload.turns) ? payload.turns : [];
     state.session = payload.session || null;
     state.devices = mergeDevices(state.devices, payload.devices || []);
-    els.sessionActive.textContent = shortId(payload.active_session_id || state.session?.id);
+    const sessionLabel = shortId(payload.active_session_id || state.session?.id);
+    if (els.sessionActive.textContent !== sessionLabel) {
+      els.sessionActive.textContent = sessionLabel;
+    }
     renderDevices();
-    renderThread();
+    renderThread({ force: forceRender });
     setStatus("online", "Live");
   } catch (error) {
     console.error(error);
@@ -283,7 +349,6 @@ async function refreshEvents() {
     const rows = Array.isArray(payload.transcripts) ? payload.transcripts : [];
     renderEvents(rows);
   } catch (error) {
-    // Optional side panel; conversation remains primary.
     if (!String(error.message).includes("transcripts_not_configured")) {
       console.warn("event feed", error);
     }
@@ -294,7 +359,7 @@ async function bootstrap() {
   const payload = await fetchJson("/api/bootstrap");
   state.devices = mergeDevices(payload.known_devices || [], []);
   state.replyAsDeviceId = payload.default_device_id || "web-console";
-  renderDevices();
+  renderDevices({ force: true });
   if (!payload.bridge_configured) {
     setStatus("offline", "Bridge missing");
     els.composerStatus.textContent = "Configure WEARABLLM_BRIDGE_URL in firmware sdkconfig.";
@@ -327,7 +392,7 @@ els.replyForm.addEventListener("submit", async (event) => {
     els.composerStatus.textContent = payload.command
       ? `Got ${payload.command}`
       : "Reply sent";
-    await refreshConversation();
+    await refreshConversation({ forceRender: true });
   } catch (error) {
     console.error(error);
     els.composerStatus.textContent = error.message || "Send failed";
@@ -335,11 +400,12 @@ els.replyForm.addEventListener("submit", async (event) => {
   } finally {
     state.sending = false;
     els.send.disabled = false;
+    els.replyInput.focus();
   }
 });
 
 els.refresh.addEventListener("click", () => {
-  refreshConversation();
+  refreshConversation({ forceRender: true });
   refreshEvents();
 });
 
@@ -350,7 +416,7 @@ els.resetSession.addEventListener("click", async () => {
   try {
     await fetchJson("/api/session/reset", { method: "POST" });
     els.composerStatus.textContent = "Session archived";
-    await refreshConversation();
+    await refreshConversation({ forceRender: true });
   } catch (error) {
     els.composerStatus.textContent = error.message || "Reset failed";
   }
@@ -371,7 +437,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 bootstrap()
-  .then(() => Promise.all([refreshConversation(), refreshEvents()]))
+  .then(() => Promise.all([refreshConversation({ forceRender: true }), refreshEvents()]))
   .catch((error) => {
     console.error(error);
     setStatus("offline", "Boot failed");

@@ -9,6 +9,7 @@
 #include "cJSON.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -31,8 +32,12 @@
 static const char *TAG = "wearabllm";
 
 #define WIFI_CONNECTED_BIT BIT0
-#define HTTP_RESPONSE_MAX 1024
+/* Hosted replies can include transcript + multi-sentence answer JSON. */
+#define HTTP_RESPONSE_MAX 8192
 #define TTS_JSON_MAX 384
+/* Hugging Face cold start + STT + LLM can exceed 30s. */
+#define BRIDGE_HTTP_TIMEOUT_MS 90000
+#define TTS_HTTP_TIMEOUT_MS 60000
 
 #ifndef CONFIG_WEARABLLM_LED_SELF_TEST_ON_BOOT
 #define CONFIG_WEARABLLM_LED_SELF_TEST_ON_BOOT 0
@@ -601,7 +606,8 @@ static esp_err_t send_audio_to_bridge(
         .method = HTTP_METHOD_POST,
         .event_handler = http_event_handler,
         .user_data = &response,
-        .timeout_ms = 30000,
+        .timeout_ms = BRIDGE_HTTP_TIMEOUT_MS,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -701,7 +707,8 @@ static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *ou
         .method = HTTP_METHOD_POST,
         .event_handler = http_binary_event_handler,
         .user_data = &response,
-        .timeout_ms = 30000,
+        .timeout_ms = TTS_HTTP_TIMEOUT_MS,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
