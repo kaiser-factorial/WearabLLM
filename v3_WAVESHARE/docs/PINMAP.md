@@ -16,6 +16,9 @@ These are from the Waveshare docs and demo bundle inspection.
 | I2S DOUT | `GPIO16` | audio output from ESP32 |
 | ES8311 speaker codec | board I2C + I2S | optional firmware path, no extra header wiring |
 | Speaker amplifier enable | TCA9555 `EXIO8` | active high; firmware preserves other expander outputs |
+| Volume up (K1) | TCA9555 `EXIO9` | active low; +10 volume, short earcon, NVS save |
+| Mute toggle (K2) | TCA9555 `EXIO10` | active low; mute/unmute, amber ring while muted |
+| Volume down (K3) | TCA9555 `EXIO11` | active low; -10 volume, short earcon, NVS save |
 | microSD CLK | `GPIO40` | onboard TF slot |
 | microSD D0 | `GPIO41` | onboard TF slot |
 | microSD CMD | `GPIO42` | onboard TF slot |

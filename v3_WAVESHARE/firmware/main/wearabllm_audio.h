@@ -13,10 +13,14 @@ extern "C" {
 #define WEARABLLM_AUDIO_SAMPLE_RATE 16000
 #define WEARABLLM_AUDIO_BUTTON_VOLUME_UP (1U << 0)
 #define WEARABLLM_AUDIO_BUTTON_VOLUME_DOWN (1U << 1)
+#define WEARABLLM_AUDIO_BUTTON_MUTE (1U << 2)
 
 typedef bool (*wearabllm_audio_keep_recording_fn)(void *ctx);
 
 esp_err_t wearabllm_audio_init(void);
+
+/* Load speaker volume and mute preference from NVS (namespace wearabllm). */
+esp_err_t wearabllm_audio_load_prefs(void);
 
 esp_err_t wearabllm_audio_capture_wav(
     wearabllm_audio_keep_recording_fn keep_recording,
@@ -43,6 +47,14 @@ esp_err_t wearabllm_audio_play_wav(const uint8_t *wav_data, size_t wav_len);
 esp_err_t wearabllm_audio_set_output_volume(uint8_t volume);
 
 uint8_t wearabllm_audio_get_output_volume(void);
+
+bool wearabllm_audio_is_muted(void);
+
+/* Toggle mute. When muting, remembers the current volume; when unmuting, restores it. */
+esp_err_t wearabllm_audio_toggle_mute(bool *now_muted);
+
+/* Adjust volume by signed step (typically +/-10). Unmutes if currently muted. */
+esp_err_t wearabllm_audio_adjust_output_volume(int delta);
 
 esp_err_t wearabllm_audio_read_volume_buttons(uint8_t *pressed_mask);
 
