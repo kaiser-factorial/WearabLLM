@@ -24,6 +24,22 @@ config WEARABLLM_BRIDGE_URL
     help
         Local bridge endpoint that receives audio/wav and returns JSON.
 
+config WEARABLLM_BRIDGE_AUTH_TOKEN
+    string "Bridge device token (extractable)"
+    default ""
+    help
+        Optional token sent as X-WearabLLM-Device-Token to the bridge query and
+        TTS endpoints. Required by the hosted agent. It can be recovered from a
+        firmware image, so use a rotatable device-specific secret.
+
+config WEARABLLM_DEVICE_ID
+    string "WearabLLM device ID"
+    default "wearabllm-esp32"
+    help
+        Stable non-secret ID sent to the hosted bridge with each request. It
+        lets the shared agent identify the source body in recent conversation
+        records. Give future wearables distinct IDs.
+
 config WEARABLLM_DIRECT_OPENAI
     bool "Call OpenAI directly from firmware (API key is extractable)"
     default n

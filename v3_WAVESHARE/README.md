@@ -11,13 +11,13 @@ user speech -> transcript -> LLM -> 2-character LED command + short answer
 The hardware path changes:
 
 ```text
-hold device button
+say "Hi ESP" or hold device button
   -> white RGB ring while listening
   -> board records audio
-  -> HTTP POST audio/wav to local bridge
-  -> bridge transcribes speech and asks the LLM
-  -> bridge returns {"command":"GS","reply":"..."}
+  -> HTTPS POST audio/wav to protected hosted agent
+  -> agent uses OpenRouter and returns {"command":"GS","reply":"..."}
   -> board shows command color on the 7-LED ring
+  -> board plays hosted TTS through the ES8311 speaker
 ```
 
 ## Current Status
@@ -28,7 +28,7 @@ Implemented in this folder:
 - RGB ring setup using Waveshare's documented/demo pin: `GPIO38`, 7 WS2812 LEDs
 - hold-to-talk state machine using configurable PTT GPIO, active level, and pull mode
 - Wi-Fi station setup
-- HTTP client call to the local bridge
+- HTTP client call to a local or protected hosted bridge
 - optional bridge-free HTTPS path for OpenAI transcription, Responses, and TTS
 - ES7210/I2S microphone capture module using Waveshare's audio codec path
 - optional ES8311 speaker-output earcon scaffold behind `CONFIG_WEARABLLM_AUDIO_OUT_ENABLED`
@@ -41,6 +41,8 @@ Implemented in this folder:
 - phase-2 bridge TTS scaffold at `/v1/tts`
 - optional firmware TTS fetch/play scaffold behind `CONFIG_WEARABLLM_TTS_ENABLED`
 - private Supabase transcript upload plus a local-only live browser viewer
+- prepared Hugging Face Docker Space deployment for the unified cloud agent,
+  with private Supabase durable memory and authenticated device requests
 - bridge dry-run mode and optional received-WAV capture saving
 - board-side capture diagnostics in serial logs: duration, peak, RMS, and silence flag
 - pre-flash image/config coherence gate with a stricter optional first-flash profile
@@ -52,10 +54,10 @@ Implemented in this folder:
 Current verification status:
 
 - Firmware builds locally with ESP-IDF v5.5; the current phase-1 image links successfully with the staged Wi-Fi and bridge configuration.
-- Firmware has been flashed to the physical Waveshare board over `/dev/cu.usbmodem101`.
-- Boot logs confirm ESP32-S3 boot, 16 MB flash, 8 MB PSRAM, app startup, and ES7210 microphone codec initialization.
-- Wi-Fi credentials are configured in the local ignored `sdkconfig`, with optional AP MAC/BSSID pinning for the current bench network.
-- The full board-to-bridge loop is still pending until the updated firmware is flashed and tested on hardware.
+- Hosted-agent firmware was rebuilt and flashed to the physical Waveshare board on 2026-07-10.
+- Boot logs confirm ESP32-S3 boot, 16 MB flash, 8 MB PSRAM, app startup, ES7210 microphone, ES8311 speaker-driver, and local `Hi ESP` wake-word initialization.
+- The board joined the current home Wi-Fi network and received `192.168.86.38`; it is independent of the laptop at runtime once powered.
+- The complete physical spoken loop (wake/PTT, capture, hosted response, LED, audible TTS, and transcript row) is still pending.
 - If audio init or capture fails during the next on-device interaction test, the firmware falls back to a short silent WAV so the bridge/API/LED loop can still be tested.
 
 ## Quick Start Sketch
@@ -205,6 +207,57 @@ Complete one USB build/flash after setup:
 Uploads run on a background queue. A Supabase outage does not block the device,
 although events can be dropped if its four-entry RAM queue fills; this first
 version does not persist unsent transcripts across reboot or power loss.
+
+### Hosted unified agent (Hugging Face + Supabase)
+
+The repository now includes a deployable cloud bridge in `hosted_agent/`. It
+keeps the existing `/v1/query`, `/v1/query_text`, and `/v1/tts` contract, so a
+Waveshare base and a future wearable can use the same agent endpoint. Durable
+facts are stored in the private `wearabllm_memories` Supabase table; the Space
+filesystem is never used as a memory fallback.
+
+Before deployment, apply `supabase/migrations/20260710000000_create_wearabllm_agent_memory.sql`
+to the existing Supabase project. Then authenticate the Hugging Face CLI and
+publish a protected Docker Space (private source, token-protected device endpoint):
+
+```bash
+python -m pip install huggingface_hub
+hf auth login
+./scripts/deploy_hf_space.py --repo-id YOUR_HF_ACCOUNT/wearabllm-agent
+```
+
+Set these Hugging Face **Secrets**: `OPENROUTER_API_KEY`, `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`, and a fresh random `WEARABLLM_DEVICE_TOKEN`. Set
+`WEARABLLM_PRINCIPAL_ID` as a Space variable (for example, `corina`). Never put
+the service-role key or device token into the Space source, Android app, or a
+public repository.
+
+Configure the same device token only in ignored firmware `sdkconfig` with
+`--bridge-auth-token`. The firmware sends it in
+`X-WearabLLM-Device-Token` for both query and bridge-TTS requests. A token is
+extractable from firmware, so use a rotatable device secret; it is deliberately
+not the Supabase service-role key.
+
+When switching the board away from direct mode, use
+`--disable-direct-openai --clear-openai-api-key` so the next image no longer
+contains the direct OpenAI project key.
+
+The hosted memory migration is applied to Supabase project
+`anjwyaatldrjzecwnspq`, and the protected Space is live at
+`https://huggingface.co/spaces/brick-factorial/wearabllm-agent`. Its `/health`
+and authenticated session-reset paths are verified. The OpenRouter reply path
+and a two-turn shared-conversation recall are also verified; reset clears the
+recent shared turns without deleting durable memories. The obsolete hosted
+`OPENAI_API_KEY` has been removed. The bridge-mode firmware builds with the
+direct OpenAI key removed and is flashed to the Waveshare. A physical boot
+confirmed the board's microphone, speaker driver, `Hi ESP` model, and Wi-Fi
+connection; the outstanding verification is one complete spoken interaction.
+
+The active conversation now has a one-hour inactivity boundary. A following
+request consolidates and archives the finished raw session privately, then
+starts fresh bounded prompt context. Raw archive retention has no automatic
+expiry and reset archives the active session rather than deleting it. This
+lifecycle is verified against the live Supabase/Space deployment.
 
 Prepare the next flash for a TFT wiring self-test:
 

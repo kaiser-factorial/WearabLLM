@@ -610,6 +610,10 @@ static esp_err_t send_audio_to_bridge(
     }
 
     esp_http_client_set_header(client, "Content-Type", "audio/wav");
+    if (CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN[0] != '\0') {
+        esp_http_client_set_header(client, "X-WearabLLM-Device-Token", CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN);
+    }
+    esp_http_client_set_header(client, "X-WearabLLM-Device-Id", CONFIG_WEARABLLM_DEVICE_ID);
     esp_http_client_set_post_field(client, (const char *)wav, wav_len);
 
     ESP_LOGI(TAG, "posting WAV to bridge: %u bytes -> %s", (unsigned)wav_len, CONFIG_WEARABLLM_BRIDGE_URL);
@@ -707,6 +711,10 @@ static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *ou
     }
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
+    if (CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN[0] != '\0') {
+        esp_http_client_set_header(client, "X-WearabLLM-Device-Token", CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN);
+    }
+    esp_http_client_set_header(client, "X-WearabLLM-Device-Id", CONFIG_WEARABLLM_DEVICE_ID);
     esp_http_client_set_post_field(client, request_json, strlen(request_json));
 
     esp_err_t err = esp_http_client_perform(client);
