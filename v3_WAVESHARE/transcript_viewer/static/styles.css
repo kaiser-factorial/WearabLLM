@@ -196,15 +196,30 @@ body {
 .event-item .meta {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 8px;
   color: var(--muted);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.68rem;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .event-item .cmd {
   color: var(--accent);
   font-weight: 600;
+}
+.event-item .timestamp,
+.bubble-meta .timestamp {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.event-item .event-device {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-bottom: 4px;
+}
+.event-item .event-text {
+  line-height: 1.4;
 }
 
 .stage {

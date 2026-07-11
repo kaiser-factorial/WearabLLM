@@ -48,10 +48,45 @@ function shortId(value) {
   return text.length > 12 ? `${text.slice(0, 8)}…` : text;
 }
 
-function formatTime(value) {
+function formatTime(value, { relative = false } = {}) {
   if (!value) return "—";
   try {
-    return new Date(value).toLocaleString();
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    if (relative) {
+      const deltaMs = Date.now() - date.getTime();
+      const seconds = Math.round(deltaMs / 1000);
+      if (seconds < 45) return "just now";
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+      if (seconds < 86400 * 7) return `${Math.round(seconds / 86400)}d ago`;
+    }
+    // Compact local stamp: "Jul 10, 11:42 PM"
+    return date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return String(value);
+  }
+}
+
+function formatTimeTitle(value) {
+  if (!value) return "";
+  try {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString(undefined, {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    });
   } catch {
     return String(value);
   }
@@ -147,11 +182,13 @@ function renderThread() {
       const kind = kindFor(deviceId);
       const article = document.createElement("article");
       article.className = `bubble ${role}`;
+      const when = formatTime(turn.created_at);
+      const whenTitle = formatTimeTitle(turn.created_at);
       article.innerHTML = `
         <div class="bubble-meta">
           <span class="device-pill ${kind}">${escapeHtml(labelFor(deviceId))}</span>
           <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
-          <span>${escapeHtml(formatTime(turn.created_at))}</span>
+          <time class="timestamp" datetime="${escapeHtml(turn.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
         </div>
         <p></p>
       `;
@@ -166,19 +203,35 @@ function renderEvents(rows) {
   for (const row of rows.slice().reverse()) {
     if (state.seenEvents.has(row.id)) continue;
     state.seenEvents.add(row.id);
+    const when = formatTime(row.created_at, { relative: true });
+    const whenTitle = formatTimeTitle(row.created_at);
     const item = document.createElement("article");
     item.className = "event-item";
+    item.dataset.createdAt = row.created_at || "";
     item.innerHTML = `
       <div class="meta">
         <span class="cmd">${escapeHtml(row.command || "—")}</span>
-        <span>${escapeHtml(row.device_id || "device")}</span>
+        <time class="timestamp" datetime="${escapeHtml(row.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
       </div>
-      <div>${escapeHtml(row.transcript || "")}</div>
+      <div class="event-device">${escapeHtml(labelFor(row.device_id || "device"))}</div>
+      <div class="event-text">${escapeHtml(row.transcript || "")}</div>
     `;
     els.eventFeed.prepend(item);
   }
   while (els.eventFeed.children.length > 30) {
     els.eventFeed.lastElementChild.remove();
+  }
+  refreshEventTimestamps();
+}
+
+function refreshEventTimestamps() {
+  for (const item of els.eventFeed.querySelectorAll(".event-item")) {
+    const createdAt = item.dataset.createdAt;
+    const stamp = item.querySelector("time.timestamp");
+    if (!stamp || !createdAt) continue;
+    stamp.textContent = formatTime(createdAt, { relative: true });
+    stamp.dateTime = createdAt;
+    stamp.title = formatTimeTitle(createdAt);
   }
 }
 
@@ -328,5 +381,6 @@ setInterval(() => {
   if (!document.hidden) {
     refreshConversation();
     refreshEvents();
+    refreshEventTimestamps();
   }
 }, 2500);
