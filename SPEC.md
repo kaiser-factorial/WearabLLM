@@ -119,8 +119,10 @@ Current v3 firmware capabilities:
 - hosted shared conversation uses one-hour idle sessions: only the active
   bounded turn window enters prompts, while completed raw sessions archive
   privately without automatic expiry
-- dependency-free localhost transcript viewer at `http://127.0.0.1:8787`,
-  backed by a local Python proxy so the device token never reaches browser code
+- dependency-free localhost conversation console at `http://127.0.0.1:8787`,
+  backed by a local Python proxy so device tokens never reach browser code;
+  supports multi-device thread view, web replies as `web-console`, and a
+  secondary transcript event feed
 - ES7210/I2S microphone WAV capture
 - silent WAV fallback if audio initialization or capture fails, so the network/bridge/LED path can still be tested
 - configurable minimum and maximum capture duration; current staged maximum is 15 seconds

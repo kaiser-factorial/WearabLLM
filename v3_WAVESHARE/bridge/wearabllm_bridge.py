@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import wave
 from io import BytesIO
@@ -98,6 +99,32 @@ TTS_SAMPLE_RATE = 16000
 TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH = 2
 DEFAULT_MAX_AUDIO_BYTES = 512 * 1024
+
+# Shared device-body catalog for home base + future wearable + web console.
+# The bridge accepts any valid device id; this list is a UI/discovery hint.
+KNOWN_DEVICE_BODIES: list[dict[str, str]] = [
+    {
+        "id": "wearabllm-esp32",
+        "label": "Home base",
+        "kind": "home",
+        "status": "active",
+        "description": "Waveshare ESP32-S3 audio board on the home network",
+    },
+    {
+        "id": "web-console",
+        "label": "Web console",
+        "kind": "web",
+        "status": "active",
+        "description": "Local browser console for reading and continuing the shared thread",
+    },
+    {
+        "id": "wearabllm-wearable",
+        "label": "Wearable",
+        "kind": "wearable",
+        "status": "planned",
+        "description": "Portable companion body that joins the same principal conversation",
+    },
+]
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 V3_DIR = Path(__file__).resolve().parents[1]
 CONFIGURE_FIRMWARE = V3_DIR / "scripts" / "configure_firmware.py"
@@ -517,6 +544,106 @@ class BridgeState:
                 self.conversation_store.clear()
             self.history.clear()
 
+    def conversation_snapshot(
+        self,
+        *,
+        device_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Return shared conversation turns for the console, multi-device ready."""
+        limit = max(1, min(int(limit), 500))
+        filter_device = (device_id or "").strip() or None
+        requested_session = (session_id or "").strip() or None
+
+        if self.conversation_store:
+            active = self.conversation_store.active_session()
+            sessions = self.conversation_store.list_sessions(limit=20)
+            target_session = None
+            if requested_session:
+                target_session = next(
+                    (item for item in sessions if str(item.get("id")) == requested_session),
+                    None,
+                )
+                if target_session is None and active and str(active.get("id")) == requested_session:
+                    target_session = active
+            else:
+                target_session = active
+
+            turns: list[dict[str, Any]] = []
+            if target_session:
+                turns = self.conversation_store.turns(str(target_session["id"]))
+            if filter_device:
+                turns = [turn for turn in turns if str(turn.get("device_id", "")) == filter_device]
+            if len(turns) > limit:
+                turns = turns[-limit:]
+
+            seen_devices = {
+                str(turn.get("device_id", "")).strip()
+                for turn in turns
+                if str(turn.get("device_id", "")).strip()
+            }
+            if active and not filter_device:
+                seen_devices.update(self.conversation_store.list_device_ids(str(active["id"])))
+
+            return {
+                "ok": True,
+                "conversation_backend": self.conversation_backend,
+                "session": target_session,
+                "active_session_id": str(active["id"]) if active else None,
+                "sessions": sessions,
+                "turns": turns,
+                "devices": self._device_catalog(seen_devices),
+                "filter_device_id": filter_device,
+            }
+
+        with self.history_lock:
+            local_turns: list[dict[str, Any]] = []
+            for index, message in enumerate(self.history[-limit:]):
+                local_turns.append(
+                    {
+                        "id": index + 1,
+                        "device_id": filter_device or "local-bridge",
+                        "role": message.get("role", "user"),
+                        "content": message.get("content", ""),
+                        "created_at": None,
+                    }
+                )
+            if filter_device:
+                local_turns = [turn for turn in local_turns if turn["device_id"] == filter_device]
+            return {
+                "ok": True,
+                "conversation_backend": "local",
+                "session": None,
+                "active_session_id": None,
+                "sessions": [],
+                "turns": local_turns,
+                "devices": self._device_catalog({"local-bridge"}),
+                "filter_device_id": filter_device,
+            }
+
+    def _device_catalog(self, seen_device_ids: set[str]) -> list[dict[str, Any]]:
+        catalog: list[dict[str, Any]] = []
+        known_ids = {item["id"] for item in KNOWN_DEVICE_BODIES}
+        for body in KNOWN_DEVICE_BODIES:
+            entry = dict(body)
+            entry["seen"] = body["id"] in seen_device_ids
+            catalog.append(entry)
+        for device_id in sorted(seen_device_ids):
+            if device_id in known_ids:
+                continue
+            catalog.append(
+                {
+                    "id": device_id,
+                    "label": device_id,
+                    "kind": "custom",
+                    "status": "active",
+                    "description": "Discovered device body",
+                    "seen": True,
+                }
+            )
+        return catalog
+
     def next_dry_run_command(self) -> str:
         if not self.dry_run_sequence:
             return self.dry_run_command
@@ -851,7 +978,9 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
         server_version = "WearabLLMBridge/0.1"
 
         def do_GET(self) -> None:
-            if self.path == "/health":
+            parsed = urllib.parse.urlsplit(self.path)
+            path = parsed.path
+            if path == "/health":
                 self._send_json(
                     {
                         "ok": True,
@@ -859,6 +988,43 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                         "config": state.runtime_config(),
                     }
                 )
+                return
+            if path in {"/v1/conversation", "/v1/devices", "/v1/conversation/sessions"}:
+                if not self._is_authorized():
+                    self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                    return
+                params = urllib.parse.parse_qs(parsed.query)
+                if path == "/v1/devices":
+                    snapshot = state.conversation_snapshot()
+                    self._send_json({"ok": True, "devices": snapshot["devices"]})
+                    return
+                if path == "/v1/conversation/sessions":
+                    snapshot = state.conversation_snapshot()
+                    self._send_json(
+                        {
+                            "ok": True,
+                            "active_session_id": snapshot.get("active_session_id"),
+                            "sessions": snapshot.get("sessions", []),
+                        }
+                    )
+                    return
+                device_id = (params.get("device_id") or [""])[0].strip() or None
+                session_id = (params.get("session_id") or [""])[0].strip() or None
+                limit_raw = (params.get("limit") or ["200"])[0]
+                if not limit_raw.isdecimal():
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid limit")
+                    return
+                try:
+                    snapshot = state.conversation_snapshot(
+                        device_id=device_id,
+                        session_id=session_id,
+                        limit=int(limit_raw),
+                    )
+                except Exception as exc:
+                    print(f"ERROR: conversation snapshot failed: {exc}")
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self._send_json(snapshot)
                 return
             self._send_error_json(HTTPStatus.NOT_FOUND, "Unknown endpoint")
 

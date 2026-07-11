@@ -8,6 +8,28 @@ Health/config check:
 GET /health
 ```
 
+Conversation console (token-protected when `WEARABLLM_DEVICE_TOKEN` is set):
+
+```http
+GET /v1/conversation
+GET /v1/conversation?device_id=wearabllm-esp32&limit=200
+GET /v1/conversation/sessions
+GET /v1/devices
+```
+
+These return the shared principal session turns tagged with `device_id`, so a
+home Waveshare, web console, and future wearable can share one thread while
+still filtering by body. Replies from the local console use:
+
+```http
+POST /v1/query_text
+Content-Type: application/json
+X-WearabLLM-Device-Token: <device token>
+X-WearabLLM-Device-Id: web-console
+
+{"transcript":"continue from the browser"}
+```
+
 The response includes the active bridge mode, model settings, upload cap, and
 latest audio-capture summary so bench tests can confirm dry-run versus live API
 behavior and whether the board has posted audio. When bridge device config is

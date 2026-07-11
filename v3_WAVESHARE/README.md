@@ -129,14 +129,17 @@ Run the full local software preflight:
 ./scripts/preflight.sh
 ```
 
-Open the live transcript viewer at `http://127.0.0.1:8787`:
+Open the multi-device conversation console at `http://127.0.0.1:8787`:
 
 ```bash
 ./scripts/run_transcript_viewer.sh
 ```
 
-It refreshes every 1.5 seconds. The local Python proxy reads the ignored
-firmware config and keeps the Supabase device token out of browser JavaScript.
+It shows the shared principal conversation across home base / web / wearable
+bodies, lets you reply from the browser as `web-console`, and keeps an optional
+Supabase event feed of board interactions. The local Python proxy reads ignored
+firmware config and never exposes device tokens to browser JavaScript. See
+`transcript_viewer/README.md`.
 
 Compile-check optional firmware paths:
 
