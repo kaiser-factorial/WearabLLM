@@ -54,9 +54,10 @@ EDITABLE_FIELDS = (
 @dataclass
 class AgentConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
-    tts_voice: str = "nova"
+    tts_voice: str = "ara"
     tts_instructions: str = DEFAULT_TTS_INSTRUCTIONS
-    tts_model: str = "openai/gpt-4o-mini-tts-2025-12-15"
+    # OpenRouter speech catalog changes; prefer an available speech model.
+    tts_model: str = "x-ai/grok-voice-tts-1.0"
     llm_model: str = "openai/gpt-5.2"
     updated_at: str | None = None
     source: str = "defaults"
@@ -73,14 +74,14 @@ def defaults_from_environment() -> AgentConfig:
     return AgentConfig(
         system_prompt=os.environ.get("WEARABLLM_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT).strip()
         or DEFAULT_SYSTEM_PROMPT,
-        tts_voice=os.environ.get("WEARABLLM_TTS_VOICE", "nova").strip() or "nova",
+        tts_voice=os.environ.get("WEARABLLM_TTS_VOICE", "ara").strip() or "ara",
         tts_instructions=os.environ.get("WEARABLLM_TTS_INSTRUCTIONS", DEFAULT_TTS_INSTRUCTIONS).strip()
         or DEFAULT_TTS_INSTRUCTIONS,
         tts_model=os.environ.get(
             "WEARABLLM_TTS_MODEL",
-            "openai/gpt-4o-mini-tts-2025-12-15",
+            "x-ai/grok-voice-tts-1.0",
         ).strip()
-        or "openai/gpt-4o-mini-tts-2025-12-15",
+        or "x-ai/grok-voice-tts-1.0",
         llm_model=os.environ.get("WEARABLLM_LLM_MODEL", "openai/gpt-5.2").strip() or "openai/gpt-5.2",
         source="environment",
     )

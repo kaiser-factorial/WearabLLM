@@ -714,11 +714,14 @@ class BridgeState:
             "input": text,
             "response_format": response_format,
         }
-        # OpenAI TTS models accept theatrical delivery instructions; OpenRouter
-        # passes provider-specific fields through for openai/* speech models.
+        # OpenAI speech models accept theatrical delivery instructions.
+        # OpenRouter only forwards those via provider options for openai/*.
         model_name = str(tts_model)
         if self.args.provider == "openai" or model_name.startswith("openai/"):
             request_args["instructions"] = tts_instructions
+        # Sample rate for raw PCM differs by provider; OpenAI is 24 kHz.
+        # Grok Voice and most OpenRouter speech models also ship 24 kHz s16le.
+        pcm_rate = OPENAI_TTS_PCM_SAMPLE_RATE
         response = self.openai_client.audio.speech.create(**request_args)
         if hasattr(response, "read"):
             audio_bytes = bytes(response.read())
@@ -727,7 +730,7 @@ class BridgeState:
         else:
             raise RuntimeError("Unexpected TTS response type")
         if response_format == "pcm":
-            return normalize_tts_pcm(audio_bytes, OPENAI_TTS_PCM_SAMPLE_RATE)
+            return normalize_tts_pcm(audio_bytes, pcm_rate)
         return normalize_tts_wav(audio_bytes)
 
     def configure_device_wifi(

@@ -238,8 +238,8 @@ class BridgeStateTest(unittest.TestCase):
         state.args = Namespace(
             provider="openrouter",
             dry_run=False,
-            tts_model="openai/gpt-4o-mini-tts-2025-12-15",
-            tts_voice="nova",
+            tts_model="x-ai/grok-voice-tts-1.0",
+            tts_voice="ara",
             tts_instructions=TTS_INSTRUCTIONS,
         )
         state.openai_client = SimpleNamespace(
@@ -250,8 +250,8 @@ class BridgeStateTest(unittest.TestCase):
 
         self.assertTrue(result.startswith(b"RIFF"))
         self.assertEqual(create.call_args.kwargs["response_format"], "pcm")
-        self.assertEqual(create.call_args.kwargs["voice"], "nova")
-        self.assertEqual(create.call_args.kwargs["instructions"], TTS_INSTRUCTIONS)
+        self.assertEqual(create.call_args.kwargs["voice"], "ara")
+        self.assertNotIn("instructions", create.call_args.kwargs)
         with wave.open(BytesIO(result), "rb") as wav_file:
             self.assertEqual(wav_file.getframerate(), 16000)
             self.assertEqual(wav_file.getnchannels(), 1)

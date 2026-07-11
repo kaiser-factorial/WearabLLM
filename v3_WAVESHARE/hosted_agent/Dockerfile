@@ -19,8 +19,8 @@ ENV PYTHONUNBUFFERED=1 \
     WEARABLLM_STT=openrouter \
     WEARABLLM_LLM_MODEL=openai/gpt-5.2 \
     WEARABLLM_STT_MODEL=openai/whisper-large-v3 \
-    WEARABLLM_TTS_MODEL=openai/gpt-4o-mini-tts-2025-12-15 \
-    WEARABLLM_TTS_VOICE=nova
+    WEARABLLM_TTS_MODEL=x-ai/grok-voice-tts-1.0 \
+    WEARABLLM_TTS_VOICE=ara
 
 EXPOSE 7860
 
