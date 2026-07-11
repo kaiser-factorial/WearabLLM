@@ -184,6 +184,16 @@ def parse_args() -> argparse.Namespace:
         help="Full /v1/query URL. Overrides --bridge-host/--bridge-port.",
     )
     parser.add_argument(
+        "--bridge-auth-token",
+        default=os.environ.get("WEARABLLM_BRIDGE_AUTH_TOKEN", ""),
+        help="Hosted bridge device token. Prefer WEARABLLM_BRIDGE_AUTH_TOKEN to avoid shell history.",
+    )
+    parser.add_argument(
+        "--device-id",
+        default=os.environ.get("WEARABLLM_DEVICE_ID", ""),
+        help="Stable non-secret device ID sent to the hosted bridge, for example wearabllm-esp32.",
+    )
+    parser.add_argument(
         "--tts-url",
         default=os.environ.get("WEARABLLM_TTS_URL", ""),
         help="Full /v1/tts URL. Defaults to the same host/port as the bridge URL.",
@@ -195,6 +205,11 @@ def parse_args() -> argparse.Namespace:
         "--openai-api-key",
         default=os.environ.get("WEARABLLM_OPENAI_API_KEY", ""),
         help="Dedicated project key. Prefer WEARABLLM_OPENAI_API_KEY to avoid shell history.",
+    )
+    parser.add_argument(
+        "--clear-openai-api-key",
+        action="store_true",
+        help="Remove the embedded direct-mode OpenAI key when switching to a hosted bridge.",
     )
     transcript_group = parser.add_mutually_exclusive_group()
     transcript_group.add_argument("--enable-transcript-log", action="store_true")
@@ -322,6 +337,12 @@ def status_payload(sdkconfig: Path, lines: list[str]) -> dict[str, object]:
     password = parse_kconfig_string(get_kconfig_value(lines, "WEARABLLM_WIFI_PASSWORD") or '""')
     bssid = parse_kconfig_string(get_kconfig_value(lines, "WEARABLLM_WIFI_BSSID") or '""')
     bridge_url = parse_kconfig_string(get_kconfig_value(lines, "WEARABLLM_BRIDGE_URL") or '""')
+    bridge_auth_token = parse_kconfig_string(
+        get_kconfig_value(lines, "WEARABLLM_BRIDGE_AUTH_TOKEN") or '""'
+    )
+    device_id = parse_kconfig_string(
+        get_kconfig_value(lines, "WEARABLLM_DEVICE_ID") or '"wearabllm-esp32"'
+    )
     direct_openai = kconfig_bool_status(lines, "WEARABLLM_DIRECT_OPENAI")
     openai_key = parse_kconfig_string(get_kconfig_value(lines, "WEARABLLM_OPENAI_API_KEY") or '""')
     transcript_log_enabled = kconfig_bool_status(lines, "WEARABLLM_TRANSCRIPT_LOG_ENABLED")
@@ -360,6 +381,8 @@ def status_payload(sdkconfig: Path, lines: list[str]) -> dict[str, object]:
         "wifi_password_set": bool(password),
         "wifi_bssid": bssid or None,
         "bridge_url": bridge_url or None,
+        "bridge_auth_token_set": bool(bridge_auth_token),
+        "device_id": device_id,
         "direct_openai": direct_openai,
         "openai_api_key_set": bool(openai_key),
         "transcript_log_enabled": transcript_log_enabled,
@@ -385,6 +408,9 @@ def status_payload(sdkconfig: Path, lines: list[str]) -> dict[str, object]:
         "next": [
             *([] if wifi_ready else ["set both WEARABLLM_WIFI_SSID and WEARABLLM_WIFI_PASSWORD"]),
             *([] if direct_openai or bridge_ready else ["set bridge URL with --bridge-host or --bridge-url"]),
+            *([] if direct_openai or not bridge_url.startswith("https://") or bridge_auth_token else [
+                "set WEARABLLM_BRIDGE_AUTH_TOKEN for the hosted HTTPS bridge"
+            ]),
             *([] if not direct_openai or openai_key else ["set WEARABLLM_OPENAI_API_KEY"]),
             *([] if not transcript_log_enabled or transcript_log_url else ["set WEARABLLM_TRANSCRIPT_LOG_URL"]),
             *([] if not transcript_log_enabled or transcript_device_token else ["set WEARABLLM_TRANSCRIPT_DEVICE_TOKEN"]),
@@ -401,6 +427,8 @@ def print_status(sdkconfig: Path, lines: list[str]) -> int:
     print(f"  Wi-Fi password: {'(set)' if status['wifi_password_set'] else '(empty)'}")
     print(f"  Wi-Fi BSSID: {status['wifi_bssid'] or '(not pinned)'}")
     print(f"  bridge URL: {status['bridge_url'] or '(empty)'}")
+    print(f"  bridge device token: {'(set)' if status['bridge_auth_token_set'] else '(empty)'}")
+    print(f"  device ID: {status['device_id']}")
     print(f"  direct OpenAI: {'yes' if status['direct_openai'] else 'no'}")
     print(f"  OpenAI API key: {'(set)' if status['openai_api_key_set'] else '(empty)'}")
     print(f"  transcript logging: {'yes' if status['transcript_log_enabled'] else 'no'}")
@@ -430,6 +458,8 @@ def print_status(sdkconfig: Path, lines: list[str]) -> int:
 
 def main() -> int:
     args = parse_args()
+    if args.clear_openai_api_key and args.openai_api_key:
+        raise SystemExit("--clear-openai-api-key cannot be combined with --openai-api-key")
     bssid = normalize_bssid(args.bssid)
 
     if bool(args.ssid) != bool(args.password) and not args.allow_partial_wifi:
@@ -473,6 +503,14 @@ def main() -> int:
     }
     if args.openai_api_key:
         updates["WEARABLLM_OPENAI_API_KEY"] = kconfig_quote(args.openai_api_key)
+    if args.clear_openai_api_key:
+        updates["WEARABLLM_OPENAI_API_KEY"] = kconfig_quote("")
+    if args.bridge_auth_token:
+        updates["WEARABLLM_BRIDGE_AUTH_TOKEN"] = kconfig_quote(args.bridge_auth_token)
+    if args.device_id:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.device_id):
+            raise SystemExit("--device-id must contain only letters, numbers, dot, underscore, or hyphen")
+        updates["WEARABLLM_DEVICE_ID"] = kconfig_quote(args.device_id)
     if args.transcript_log_url:
         if not args.transcript_log_url.startswith("https://"):
             raise SystemExit("--transcript-log-url must use https://")
@@ -578,12 +616,18 @@ def main() -> int:
     )
     print(f"  bridge URL: {bridge_url}")
     print(f"  TTS URL: {tts_url}")
+    if args.bridge_auth_token:
+        print(f"  bridge device token: {masked(args.bridge_auth_token)}")
+    if args.device_id:
+        print(f"  device ID: {args.device_id}")
     if args.enable_direct_openai:
         print("  direct OpenAI: enabled (API key embedded in firmware)")
     if args.disable_direct_openai:
         print("  direct OpenAI: disabled")
     if args.openai_api_key:
         print(f"  OpenAI API key: {masked(args.openai_api_key)}")
+    if args.clear_openai_api_key:
+        print("  OpenAI API key: cleared from firmware configuration")
     if args.enable_transcript_log:
         print("  transcript logging: enabled")
     if args.disable_transcript_log:

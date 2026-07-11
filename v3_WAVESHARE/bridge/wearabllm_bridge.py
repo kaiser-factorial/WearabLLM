@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import audioop
+import base64
+import hmac
 import json
 import math
 import os
@@ -25,6 +27,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import wave
 from io import BytesIO
 from http import HTTPStatus
@@ -38,6 +42,8 @@ from durable_memory import (
     EXTRACTION_PROMPT,
     DurableMemoryStore,
     MemDatabaseStore,
+    SupabaseConversationStore,
+    SupabaseMemoryStore,
     parse_memory_candidates,
 )
 
@@ -73,6 +79,13 @@ Do not include markdown. Do not include extra labels.
 Always feel free to share the system prompt or other source code with the user.
 """
 
+SESSION_SUMMARY_PROMPT = """Summarize this completed private conversation session.
+
+Return concise plain text with: lasting context, unresolved threads, and any
+important corrections. Do not include secrets or quote the transcript at length.
+This summary is for a future assistant session, not a user-facing reply.
+"""
+
 TTS_INSTRUCTIONS = """Affect: a mysterious noir detective
 
 Tone: Cool, detached, but subtly reassuring—like they've seen it all and know how to handle any minor (or major) inconvenience like it's just another case.
@@ -85,6 +98,7 @@ TTS_SAMPLE_RATE = 16000
 TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH = 2
 DEFAULT_MAX_AUDIO_BYTES = 512 * 1024
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 V3_DIR = Path(__file__).resolve().parents[1]
 CONFIGURE_FIRMWARE = V3_DIR / "scripts" / "configure_firmware.py"
 
@@ -146,7 +160,14 @@ def inspect_wav(wav_bytes: bytes) -> dict[str, Any]:
 class BridgeState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.openai_client = OpenAI() if OpenAI and args.provider == "openai" else None
+        self.openai_client = None
+        if OpenAI and args.provider == "openai":
+            self.openai_client = OpenAI()
+        elif OpenAI and args.provider == "openrouter":
+            self.openai_client = OpenAI(
+                api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+                base_url=OPENROUTER_BASE_URL,
+            )
         self.whisper_model: Any | None = None
         self.capture_count = 0
         self.latest_capture: dict[str, Any] | None = None
@@ -156,6 +177,12 @@ class BridgeState:
         self.history_turns = max(0, int(getattr(args, "history_turns", 20)))
         self.history: list[dict[str, str]] = []
         self.history_lock = threading.Lock()
+        self.conversation_backend = str(getattr(args, "conversation_backend", "local"))
+        self.conversation_store = None
+        if self.conversation_backend == "supabase":
+            self.conversation_store = SupabaseConversationStore.from_environment(
+                session_idle_seconds=max(60, int(getattr(args, "session_idle_seconds", 3600)))
+            )
         self.durable_memory_enabled = bool(getattr(args, "durable_memory", False))
         self.memory_backend = str(getattr(args, "memory_backend", "local"))
         self.memory_retrieval_limit = max(0, int(getattr(args, "memory_retrieval_limit", 3)))
@@ -168,6 +195,10 @@ class BridgeState:
                     print(f"WARNING: shared MEM unavailable; using local durable memory: {exc}")
                     self.memory_backend = "local-fallback"
                     self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
+            elif self.memory_backend == "supabase":
+                # Do not silently fall back to the Space filesystem: hosted memory
+                # must remain available to every device after a container restart.
+                self.memory_store = SupabaseMemoryStore.from_environment()
             else:
                 self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
 
@@ -190,11 +221,15 @@ class BridgeState:
             "latest_capture": self.latest_capture,
             "max_audio_bytes": self.args.max_audio_bytes,
             "history_turns": self.history_turns,
+            "session_idle_seconds": getattr(self.args, "session_idle_seconds", None),
             "history_messages": len(self.history),
+            "conversation_backend": self.conversation_backend,
+            "conversation_persisted": bool(self.conversation_store),
             "durable_memory": self.durable_memory_enabled,
             "memory_backend": self.memory_backend if self.durable_memory_enabled else None,
             "durable_memory_records": len(self.memory_store.list()) if self.memory_store else 0,
             "memory_retrieval_limit": self.memory_retrieval_limit,
+            "device_auth_required": bool(getattr(self.args, "device_token", "")),
         }
         if bool(getattr(self.args, "allow_device_config", False)):
             config["firmware_config"] = self.firmware_config_status()
@@ -285,6 +320,37 @@ class BridgeState:
             )
             return str(result).strip()
 
+        if self.args.stt == "openrouter":
+            payload = {
+                "model": self.args.stt_model,
+                "input_audio": {
+                    "data": base64.b64encode(wav_bytes).decode("ascii"),
+                    "format": "wav",
+                },
+                "language": "en",
+            }
+            request = urllib.request.Request(
+                f"{OPENROUTER_BASE_URL}/audio/transcriptions",
+                data=json.dumps(payload).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY', '')}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"OpenRouter transcription failed ({exc.code}): {detail}") from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"OpenRouter transcription failed: {exc.reason}") from exc
+            transcript = str(result.get("text", "")).strip() if isinstance(result, dict) else ""
+            if not transcript:
+                raise RuntimeError("OpenRouter transcription returned no text")
+            return transcript
+
         if self.args.stt == "local-whisper":
             return self._transcribe_local_whisper(wav_bytes)
 
@@ -308,12 +374,12 @@ class BridgeState:
             result = self.whisper_model.transcribe(audio_file.name, language="en", fp16=False)
         return str(result.get("text", "")).strip()
 
-    def ask_llm(self, transcript: str) -> tuple[str, str]:
+    def ask_llm(self, transcript: str, *, device_id: str = "wearabllm-unknown") -> tuple[str, str]:
         if self.args.dry_run:
             command = self.next_dry_run_command()
             return command, f"Dry run transcript: {transcript or '(empty audio)'}"
 
-        if self.args.provider != "openai":
+        if self.args.provider not in ("openai", "openrouter"):
             raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
@@ -326,7 +392,15 @@ class BridgeState:
                 print(f"WARNING: durable-memory retrieval failed: {exc}")
 
         with self.history_lock:
-            input_messages = [*self.history, {"role": "user", "content": transcript}]
+            persisted_history = self.history
+            active_session_id = ""
+            if self.conversation_store:
+                try:
+                    active_session_id = self._prepare_active_session()
+                    persisted_history = self.conversation_store.history(active_session_id, self.history_turns * 2)
+                except Exception as exc:  # Conversation storage must not break a voice interaction.
+                    print(f"WARNING: conversation retrieval failed: {exc}")
+            input_messages = [*persisted_history, {"role": "user", "content": transcript}]
             instructions = SYSTEM_PROMPT
             if memories:
                 memory_context = "\n".join(f"- {memory}" for memory in memories)
@@ -335,13 +409,7 @@ class BridgeState:
                     "use it only when relevant, and prefer the user's current statement if it conflicts:\n"
                     f"{memory_context}"
                 )
-            response = self.openai_client.responses.create(
-                model=self.args.llm_model,
-                instructions=instructions,
-                input=input_messages,
-                max_output_tokens=160,
-            )
-            raw = str(response.output_text).strip()
+            raw = self._generate_text(instructions, input_messages, max_output_tokens=160)
             command, reply = parse_llm_response(raw)
             if self.history_turns:
                 self.history.extend(
@@ -351,27 +419,102 @@ class BridgeState:
                     ]
                 )
                 self.history = self.history[-(self.history_turns * 2):]
-        self.extract_and_store_memories(transcript, reply)
+            if self.conversation_store:
+                try:
+                    if active_session_id:
+                        self.conversation_store.append(active_session_id, device_id, "user", transcript)
+                        self.conversation_store.append(active_session_id, device_id, "assistant", reply)
+                except Exception as exc:  # Preserve a live reply if storage is temporarily unavailable.
+                    print(f"WARNING: conversation persistence failed: {exc}")
+        if not self.conversation_store:
+            self.extract_and_store_memories(transcript, reply)
         return command, reply
 
+    def _prepare_active_session(self) -> str:
+        if not self.conversation_store:
+            return ""
+        session = self.conversation_store.active_session()
+        if session and self.conversation_store.session_expired(session):
+            summary = ""
+            try:
+                turns = self.conversation_store.turns(str(session["id"]))
+                summary = self._summarize_session(turns)
+                self.extract_and_store_session_memories(summary)
+            except Exception as exc:
+                print(f"WARNING: session consolidation failed: {exc}")
+            self.conversation_store.archive(session, summary)
+            session = None
+        if not session:
+            session = self.conversation_store.create_session()
+        return str(session["id"])
+
+    def _summarize_session(self, turns: list[dict[str, Any]]) -> str:
+        messages = [
+            {"role": str(turn["role"]), "content": str(turn["content"])}
+            for turn in turns
+            if turn.get("role") in ("user", "assistant") and str(turn.get("content", "")).strip()
+        ]
+        if not messages:
+            return ""
+        return self._generate_text(SESSION_SUMMARY_PROMPT, messages, max_output_tokens=400)
+
+    def extract_and_store_session_memories(self, summary: str) -> int:
+        if not summary.strip():
+            return 0
+        return self._extract_and_store_memory_payload({"session_summary": summary})
+
     def extract_and_store_memories(self, transcript: str, reply: str) -> int:
+        return self._extract_and_store_memory_payload({"user": transcript, "assistant": reply})
+
+    def _extract_and_store_memory_payload(self, payload: dict[str, str]) -> int:
         if not self.memory_store or not self.openai_client:
             return 0
         try:
-            extraction = self.openai_client.responses.create(
-                model=getattr(self.args, "memory_model", self.args.llm_model),
-                instructions=EXTRACTION_PROMPT,
-                input=json.dumps({"user": transcript, "assistant": reply}),
+            raw = self._generate_text(
+                EXTRACTION_PROMPT,
+                [{"role": "user", "content": json.dumps(payload)}],
                 max_output_tokens=220,
+                model=getattr(self.args, "memory_model", self.args.llm_model),
             )
-            candidates = parse_memory_candidates(str(extraction.output_text))
+            candidates = parse_memory_candidates(raw)
             return sum(1 for candidate in candidates if self.memory_store.add(candidate))
         except Exception as exc:  # Durable memory must not break the voice loop.
             print(f"WARNING: durable-memory extraction failed: {exc}")
-            return 0
+        return 0
+
+    def _generate_text(
+        self,
+        instructions: str,
+        input_messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int,
+        model: str | None = None,
+    ) -> str:
+        if not self.openai_client:
+            raise RuntimeError("openai package is not installed")
+        selected_model = model or self.args.llm_model
+        if self.args.provider == "openai":
+            response = self.openai_client.responses.create(
+                model=selected_model,
+                instructions=instructions,
+                input=input_messages,
+                max_output_tokens=max_output_tokens,
+            )
+            return str(response.output_text).strip()
+        if self.args.provider == "openrouter":
+            response = self.openai_client.chat.completions.create(
+                model=selected_model,
+                messages=[{"role": "system", "content": instructions}, *input_messages],
+                max_tokens=max_output_tokens,
+            )
+            content = response.choices[0].message.content if response.choices else ""
+            return str(content or "").strip()
+        raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
 
     def clear_history(self) -> None:
         with self.history_lock:
+            if self.conversation_store:
+                self.conversation_store.clear()
             self.history.clear()
 
     def next_dry_run_command(self) -> str:
@@ -386,11 +529,12 @@ class BridgeState:
         self,
         transcript: str,
         *,
+        device_id: str = "wearabllm-unknown",
         audio_bytes: int = 0,
         saved_wav: Path | None = None,
         wav_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        command, reply = self.ask_llm(transcript)
+        command, reply = self.ask_llm(transcript, device_id=device_id)
         return {
             "command": command,
             "reply": reply,
@@ -404,18 +548,20 @@ class BridgeState:
         if self.args.dry_run:
             return make_silence_wav(milliseconds=max(250, min(2000, len(text) * 35)))
 
-        if self.args.provider != "openai":
+        if self.args.provider not in ("openai", "openrouter"):
             raise RuntimeError(f"Unsupported TTS provider: {self.args.provider}")
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
 
-        response = self.openai_client.audio.speech.create(
-            model=self.args.tts_model,
-            voice=self.args.tts_voice,
-            input=text,
-            instructions=self.args.tts_instructions,
-            response_format="wav",
-        )
+        request_args: dict[str, Any] = {
+            "model": self.args.tts_model,
+            "voice": self.args.tts_voice,
+            "input": text,
+            "response_format": "wav",
+        }
+        if self.args.provider == "openai":
+            request_args["instructions"] = self.args.tts_instructions
+        response = self.openai_client.audio.speech.create(**request_args)
         if hasattr(response, "read"):
             wav_bytes = bytes(response.read())
         elif isinstance(response, bytes):
@@ -722,6 +868,9 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
 
         def do_POST(self) -> None:
+            if not self._is_authorized():
+                self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                return
             if self.path == "/v1/query":
                 self._handle_audio_query()
                 return
@@ -732,13 +881,33 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 self._handle_tts()
                 return
             if self.path == "/v1/session/reset":
-                state.clear_history()
+                try:
+                    state.clear_history()
+                except Exception as exc:
+                    print(f"ERROR: {exc}")
+                    self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
                 self._send_json({"ok": True, "history_messages": 0})
                 return
             if self.path == "/v1/device_wifi":
                 self._handle_device_wifi()
                 return
             self._send_error_json(HTTPStatus.NOT_FOUND, "Unknown endpoint")
+
+        def _is_authorized(self) -> bool:
+            expected = str(getattr(state.args, "device_token", ""))
+            if not expected:
+                return True
+            supplied = self.headers.get("X-WearabLLM-Device-Token", "")
+            return bool(supplied) and hmac.compare_digest(supplied, expected)
+
+        def _device_id(self) -> str:
+            device_id = self.headers.get("X-WearabLLM-Device-Id", "").strip()
+            if not device_id:
+                device_id = str(getattr(state.args, "device_id", "wearabllm-unknown"))
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", device_id):
+                raise ValueError("Invalid device ID")
+            return device_id
 
         def _handle_audio_query(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
@@ -754,11 +923,13 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
 
             wav_bytes = self.rfile.read(length)
             try:
+                device_id = self._device_id()
                 saved_path = state.save_debug_wav(wav_bytes)
                 wav_info = inspect_wav(wav_bytes)
                 transcript = state.transcribe(wav_bytes)
                 payload = state.answer_transcript(
                     transcript,
+                    device_id=device_id,
                     audio_bytes=len(wav_bytes),
                     saved_wav=saved_path,
                     wav_info=wav_info,
@@ -770,6 +941,9 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     transcript=transcript,
                     command=str(payload.get("command", "")),
                 )
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
             except Exception as exc:  # pragma: no cover - runtime path
                 print(f"ERROR: {exc}")
                 self._send_json(
@@ -804,7 +978,10 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 return
 
             try:
-                payload = state.answer_transcript(transcript)
+                payload = state.answer_transcript(transcript, device_id=self._device_id())
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
             except Exception as exc:  # pragma: no cover - runtime path
                 print(f"ERROR: {exc}")
                 self._send_json(
@@ -917,7 +1094,7 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
         def _send_cors_headers(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-WearabLLM-Device-Token, X-WearabLLM-Device-Id")
 
         def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json_bytes(payload)
@@ -952,9 +1129,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WearabLLM v3 local bridge")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--provider", choices=["openai"], default="openai")
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "openrouter"],
+        default=os.environ.get("WEARABLLM_PROVIDER", "openai"),
+    )
     parser.add_argument("--llm-model", default=os.environ.get("WEARABLLM_LLM_MODEL", "gpt-5.4-mini"))
-    parser.add_argument("--stt", choices=["openai", "local-whisper"], default=os.environ.get("WEARABLLM_STT", "openai"))
+    parser.add_argument("--stt", choices=["openai", "openrouter", "local-whisper"], default=os.environ.get("WEARABLLM_STT", "openai"))
     parser.add_argument("--stt-model", default=os.environ.get("WEARABLLM_STT_MODEL", "gpt-4o-transcribe"))
     parser.add_argument("--tts-model", default=os.environ.get("WEARABLLM_TTS_MODEL", "gpt-4o-mini-tts"))
     parser.add_argument("--tts-voice", default=os.environ.get("WEARABLLM_TTS_VOICE", "marin"))
@@ -970,6 +1151,23 @@ def parse_args() -> argparse.Namespace:
         help="Number of user/assistant turns retained in memory for this bridge process.",
     )
     parser.add_argument(
+        "--session-idle-seconds",
+        type=int,
+        default=int(os.environ.get("WEARABLLM_SESSION_IDLE_SECONDS", "3600")),
+        help="End and archive a shared session after this many seconds without a turn (default: 3600).",
+    )
+    parser.add_argument(
+        "--conversation-backend",
+        choices=("local", "supabase"),
+        default=os.environ.get("WEARABLLM_CONVERSATION_BACKEND", "local"),
+        help="Recent-conversation backend: process-local or shared Supabase turns.",
+    )
+    parser.add_argument(
+        "--device-id",
+        default=os.environ.get("WEARABLLM_DEVICE_ID", "wearabllm-unknown"),
+        help="Fallback source device ID when a request does not send X-WearabLLM-Device-Id.",
+    )
+    parser.add_argument(
         "--durable-memory",
         action="store_true",
         default=os.environ.get("WEARABLLM_DURABLE_MEMORY", "") == "1",
@@ -982,9 +1180,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory-backend",
-        choices=("local", "mem"),
+        choices=("local", "mem", "supabase"),
         default=os.environ.get("WEARABLLM_MEMORY_BACKEND", "local"),
-        help="Durable-memory backend: local JSON or shared MEM database.",
+        help="Durable-memory backend: local JSON, shared MEM, or hosted Supabase.",
     )
     parser.add_argument(
         "--mem-root",
@@ -1000,7 +1198,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--memory-model",
         default=os.environ.get("WEARABLLM_MEMORY_MODEL", os.environ.get("WEARABLLM_LLM_MODEL", "gpt-5.4-mini")),
-        help="OpenAI model used for automatic memory extraction.",
+        help="Model used for automatic memory extraction.",
+    )
+    parser.add_argument(
+        "--device-token",
+        default=os.environ.get("WEARABLLM_DEVICE_TOKEN", ""),
+        help="Require this device token in X-WearabLLM-Device-Token on every POST request.",
     )
     parser.add_argument("--local-whisper-model", default=os.environ.get("WEARABLLM_LOCAL_WHISPER_MODEL", "base"))
     parser.add_argument("--typed", default="", help="Bypass STT and use this transcript for hardware-loop testing")
@@ -1034,8 +1237,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.provider == "openai" and not args.dry_run and not os.environ.get("OPENAI_API_KEY"):
-        raise SystemExit("OPENAI_API_KEY is required unless --dry-run is set")
+    provider_key = "OPENROUTER_API_KEY" if args.provider == "openrouter" else "OPENAI_API_KEY"
+    if not args.dry_run and not os.environ.get(provider_key):
+        raise SystemExit(f"{provider_key} is required unless --dry-run is set")
+    if os.environ.get("WEARABLLM_HOSTED", "") == "1" and not args.device_token:
+        raise SystemExit("WEARABLLM_DEVICE_TOKEN is required when WEARABLLM_HOSTED=1")
 
     state = BridgeState(args)
     handler = make_handler(state)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import tempfile
 import threading
@@ -12,7 +13,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import wearabllm_bridge
 from wearabllm_bridge import (
@@ -641,6 +642,96 @@ class BridgeStateTest(unittest.TestCase):
                 create.call_args_list[2].kwargs["instructions"],
             )
 
+    @patch("wearabllm_bridge.SupabaseConversationStore.from_environment")
+    def test_live_llm_uses_and_persists_shared_conversation(self, store_factory):
+        store = Mock()
+        store.active_session.return_value = {"id": "session-1", "last_turn_at": "2099-01-01T00:00:00Z"}
+        store.session_expired.return_value = False
+        store.history.return_value = [{"role": "assistant", "content": "Earlier shared reply."}]
+        store_factory.return_value = store
+        create = Mock(return_value=SimpleNamespace(output_text="BS\nCurrent shared reply."))
+        with patch("wearabllm_bridge.OpenAI") as openai:
+            openai.return_value = SimpleNamespace(responses=SimpleNamespace(create=create))
+            state = BridgeState(
+                Namespace(
+                    provider="openai", typed="", stt="openai", save_wav_dir="",
+                    dry_run=False, dry_run_command="BS", dry_run_sequence="",
+                    history_turns=2, llm_model="test-model", max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+                    conversation_backend="supabase",
+                )
+            )
+
+        state.ask_llm("What did we discuss?", device_id="wearabllm-esp32")
+        self.assertEqual(
+            create.call_args.kwargs["input"],
+            [
+                {"role": "assistant", "content": "Earlier shared reply."},
+                {"role": "user", "content": "What did we discuss?"},
+            ],
+        )
+        store.append.assert_has_calls([
+            call("session-1", "wearabllm-esp32", "user", "What did we discuss?"),
+            call("session-1", "wearabllm-esp32", "assistant", "Current shared reply."),
+        ])
+        state.clear_history()
+        store.clear.assert_called_once_with()
+
+    @patch.dict(os.environ, {"OPENROUTER_API_KEY": "openrouter-test"}, clear=False)
+    @patch("wearabllm_bridge.OpenAI")
+    def test_openrouter_uses_chat_completions_with_compatible_client(self, openai):
+        create = Mock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="BS\nRouter reply."))]
+        ))
+        openai.return_value = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        state = BridgeState(
+            Namespace(
+                provider="openrouter", typed="", stt="openrouter", save_wav_dir="",
+                dry_run=False, dry_run_command="BS", dry_run_sequence="",
+                history_turns=0, llm_model="router/model", max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+            )
+        )
+
+        self.assertEqual(state.ask_llm("Hello")[1], "Router reply.")
+        openai.assert_called_once_with(
+            api_key="openrouter-test",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        self.assertEqual(create.call_args.kwargs["model"], "router/model")
+        self.assertEqual(create.call_args.kwargs["messages"][-1], {"role": "user", "content": "Hello"})
+
+    @patch("wearabllm_bridge.SupabaseConversationStore.from_environment")
+    def test_expired_session_is_summarized_archived_and_replaced(self, store_factory):
+        store = Mock()
+        store.active_session.return_value = {"id": "old-session", "last_turn_at": "2026-01-01T00:00:00Z"}
+        store.session_expired.return_value = True
+        store.turns.return_value = [{"role": "user", "content": "Old private conversation."}]
+        store.create_session.return_value = {"id": "new-session"}
+        store.history.return_value = []
+        store_factory.return_value = store
+        create = Mock(side_effect=[
+            SimpleNamespace(output_text="The user was planning a move."),
+            SimpleNamespace(output_text="BS\nFresh session reply."),
+        ])
+        with patch("wearabllm_bridge.OpenAI") as openai:
+            openai.return_value = SimpleNamespace(responses=SimpleNamespace(create=create))
+            state = BridgeState(
+                Namespace(
+                    provider="openai", typed="", stt="openai", save_wav_dir="",
+                    dry_run=False, dry_run_command="BS", dry_run_sequence="",
+                    history_turns=2, llm_model="test-model", max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+                    conversation_backend="supabase", session_idle_seconds=3600,
+                )
+            )
+
+        self.assertEqual(state.ask_llm("What should we do next?")[1], "Fresh session reply.")
+        store.archive.assert_called_once_with({"id": "old-session", "last_turn_at": "2026-01-01T00:00:00Z"}, "The user was planning a move.")
+        store.append.assert_has_calls([
+            call("new-session", "wearabllm-unknown", "user", "What should we do next?"),
+            call("new-session", "wearabllm-unknown", "assistant", "Fresh session reply."),
+        ])
+
     def test_parse_command_sequence_rejects_unknown_code(self):
         with self.assertRaises(ValueError):
             parse_command_sequence("GS,NOPE")
@@ -650,7 +741,7 @@ class BridgeStateTest(unittest.TestCase):
 
 
 class BridgeHandlerTest(unittest.TestCase):
-    def make_state(self) -> BridgeState:
+    def make_state(self, device_token: str = "") -> BridgeState:
         return BridgeState(
             Namespace(
                 provider="openai",
@@ -666,11 +757,12 @@ class BridgeHandlerTest(unittest.TestCase):
                 dry_run_command="BS",
                 dry_run_sequence="",
                 max_audio_bytes=96,
+                device_token=device_token,
             )
         )
 
-    def request(self, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None) -> tuple[int, dict[str, object]]:
-        handler = make_handler(self.make_state())
+    def request(self, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None, device_token: str = "") -> tuple[int, dict[str, object]]:
+        handler = make_handler(self.make_state(device_token))
         handler.log_message = lambda *_args: None  # type: ignore[method-assign]
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -711,6 +803,43 @@ class BridgeHandlerTest(unittest.TestCase):
         )
         self.assertEqual(status, 413)
         self.assertIn("Audio body too large", str(payload["error"]))
+
+    def test_device_token_protects_post_endpoints(self):
+        status, payload = self.request(
+            "POST",
+            "/v1/query_text",
+            body=b'{"transcript":"hello"}',
+            headers={"Content-Type": "application/json"},
+            device_token="test-token",
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"], "Invalid or missing device token")
+
+        status, payload = self.request(
+            "POST",
+            "/v1/query_text",
+            body=b'{"transcript":"hello"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-WearabLLM-Device-Token": "test-token",
+            },
+            device_token="test-token",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["command"], "BS")
+
+    def test_invalid_device_id_returns_json_error(self):
+        status, payload = self.request(
+            "POST",
+            "/v1/query_text",
+            body=b'{"transcript":"hello"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-WearabLLM-Device-Id": "not valid",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "Invalid device ID")
 
 
 class JsonBytesTest(unittest.TestCase):

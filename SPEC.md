@@ -25,11 +25,13 @@ The project began on an Adafruit Circuit Playground Bluefruit because that board
 - Use the board's 7-pixel RGB ring as the first valence display.
 - Support both BOOT-button push-to-talk and hands-free activation with the on-device `Hi ESP` wake word.
 - Operate from home Wi-Fi without requiring a computer-hosted bridge.
-- Keep short direct-mode conversation context through OpenAI `previous_response_id`.
-- Retain the bridge as an optional development and durable-memory path.
+- Use one protected cloud-hosted conversation agent for the Waveshare base and
+  future wearable bodies; the laptop must not be a runtime dependency.
+- Keep only a bounded active conversation in prompt context, consolidate after
+  one idle hour, and retain private raw archives separately from durable facts.
 - Stream successful transcripts to a private Supabase table without exposing a
   database-admin key to firmware.
-- Use the onboard speaker for OpenAI TTS, with physical volume controls.
+- Use the onboard speaker for OpenRouter-hosted TTS, with physical volume controls.
 - Add authenticated OTA updates after one final USB partition/updater flash.
 - Keep the optional SPI TFT gated off until its perfboard wiring is verified.
 - Preserve the existing semantic response scale, but represent it more richly:
@@ -72,14 +74,15 @@ Current interaction loop:
 say "Hi ESP" or hold BOOT/PTT
 -> dim-white RGB ring while listening
 -> board captures WAV from onboard mic
--> board calls OpenAI transcription over HTTPS
--> board calls the Responses API for command + reply
--> board applies LED valence command and plays the reply through TTS
+-> board posts WAV to the protected Hugging Face agent over HTTPS
+-> hosted agent uses OpenRouter for transcription, reply, and TTS
+-> board applies LED valence command and plays the returned reply
 -> board optionally queues transcript/reply upload to Supabase
 ```
 
-The local bridge implements the same response contract as an optional
-development, local-STT, and durable-memory fallback.
+The currently flashed profile uses this hosted path directly over Wi-Fi. The
+local bridge implements the same response contract for development; the
+direct-OpenAI firmware profile remains an optional fallback.
 
 Current v3 implementation:
 
@@ -106,6 +109,16 @@ Current v3 firmware capabilities:
 - direct `gpt-4o-mini-tts` WAV generation
 - optional background HTTPS transcript upload to a token-gated endpoint;
   failures do not block device interaction
+- prepared private Hugging Face Docker Space scaffold that preserves the bridge
+  API and requires a device token on cloud POST requests
+- prepared private Supabase `wearabllm_memories` migration for cloud durable
+  memory; only the hosted bridge may use the service-role credential
+- deployed protected hosted bridge uses OpenRouter for LLM, transcription, TTS,
+  and automatic memory extraction; direct firmware OpenAI mode remains a
+  separate, optional local profile
+- hosted shared conversation uses one-hour idle sessions: only the active
+  bounded turn window enters prompts, while completed raw sessions archive
+  privately without automatic expiry
 - dependency-free localhost transcript viewer at `http://127.0.0.1:8787`,
   backed by a local Python proxy so the device token never reaches browser code
 - ES7210/I2S microphone WAV capture
@@ -172,16 +185,20 @@ Current v3 app capabilities:
 Verified v3 state:
 
 - firmware builds locally with ESP-IDF v5.5
-- firmware has flashed and booted on the physical Waveshare board
+- the hosted-agent firmware was rebuilt and flashed to the physical Waveshare
+  board on 2026-07-10
 - PSRAM and app boot have been observed in serial logs
-- ES7210 microphone codec initialization has been observed in serial logs
-- board Wi-Fi association and bridge connectivity have been observed on hardware
+- ES7210 microphone and ES8311 speaker-driver initialization have been observed
+  in serial logs
+- the local `Hi ESP` wake-word model is loaded on the physical board
+- the board joined the current home Wi-Fi network and received `192.168.86.38`,
+  confirming laptop-independent runtime network access
 - BOOT/PTT capture and `Hi ESP` wake-word activation both complete the onboard mic -> bridge -> LED/speaker loop
 - captured physical-board microphone audio is non-silent and suitable for live transcription
 - ES8311 speaker tones and bridge TTS playback work on the physical speaker
 - live `verse` TTS returns a valid normalized WAV and plays through the board
 - session-context recall has been exercised through the live bridge
-- bridge unit suite passes with 50 tests; bridge smoke tests, Android protocol tests, app typecheck, protocol consistency checks, and firmware builds also pass locally
+- bridge unit suite passes with 61 tests; bridge smoke tests, Android protocol tests, app typecheck, protocol consistency checks, and firmware builds also pass locally
 - optional firmware variant builds pass locally for display, display boot self-test, audio-out, and TTS paths
 - app-assisted next-flash config covers Wi-Fi, BSSID, PTT, RGB self-test, speaker output, TTS playback, and TFT toggles
 - current firmware image has been built, coherence-verified, flashed, and observed booting with `Hi ESP`, 15-second capture, TTS, and K1/K3 button initialization
@@ -213,7 +230,8 @@ Not yet verified or integrated:
 - correction-aware replacement of stale facts and live bench validation of automatic extraction quality
 - physical confirmation that K1 and K3 produce the expected 10-point volume changes, although expander initialization, firmware build, flash, and boot are verified
 - BLE/SoftAP live provisioning; current device configuration still requires rebuilding and flashing firmware
-- disconnected direct-mode interaction verification after power-only boot
+- a complete hosted physical interaction: wake/PTT, microphone capture,
+  OpenRouter request, LED command, audible TTS, and Supabase transcript row
 - authenticated OTA updater and two-slot OTA partition layout
 
 ### v1 Phone App

@@ -1,10 +1,17 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
-from durable_memory import DurableMemoryStore, MemDatabaseStore, parse_memory_candidates
+from durable_memory import (
+    DurableMemoryStore,
+    MemDatabaseStore,
+    SupabaseConversationStore,
+    SupabaseMemoryStore,
+    parse_memory_candidates,
+)
 
 
 class ParseMemoryCandidatesTest(unittest.TestCase):
@@ -84,6 +91,104 @@ class MemDatabaseStoreTest(unittest.TestCase):
             ["The user prefers green tea."],
         )
         self.assertIn("--source", run.call_args.args[0])
+
+
+class SupabaseMemoryStoreTest(unittest.TestCase):
+    def setUp(self):
+        self.store = SupabaseMemoryStore(
+            "https://example.supabase.co",
+            "service-role-test",
+            principal_id="corina",
+        )
+
+    @staticmethod
+    def response(payload):
+        result = MagicMock()
+        result.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+        return result
+
+    @patch("durable_memory.urllib.request.urlopen")
+    def test_add_posts_private_memory_when_key_is_new(self, urlopen):
+        urlopen.side_effect = [self.response([]), self.response([{"id": "new"}])]
+        self.assertTrue(self.store.add("The user prefers green tea."))
+        request = urlopen.call_args_list[1].args[0]
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Apikey"), "service-role-test")
+        self.assertIn(b'"principal_id": "corina"', request.data)
+
+    @patch("durable_memory.urllib.request.urlopen")
+    def test_retrieve_uses_same_lexical_ranking_as_local_store(self, urlopen):
+        urlopen.return_value = self.response([
+            {"content": "The user builds WearabLLM hardware."},
+            {"content": "The user prefers green tea in the morning."},
+        ])
+        self.assertEqual(
+            self.store.retrieve("What tea does the user prefer?", limit=1),
+            ["The user prefers green tea in the morning."],
+        )
+
+
+class SupabaseConversationStoreTest(unittest.TestCase):
+    def setUp(self):
+        self.store = SupabaseConversationStore(
+            "https://example.supabase.co",
+            "service-role-test",
+            principal_id="corina",
+        )
+
+    @staticmethod
+    def response(payload):
+        result = MagicMock()
+        result.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+        return result
+
+    @patch("durable_memory.urllib.request.urlopen")
+    def test_history_returns_chronological_bounded_messages(self, urlopen):
+        urlopen.return_value = self.response([
+            {"role": "assistant", "content": "The second answer."},
+            {"role": "user", "content": "The first question."},
+        ])
+        self.assertEqual(
+            self.store.history("session-1", 2),
+            [
+                {"role": "user", "content": "The first question."},
+                {"role": "assistant", "content": "The second answer."},
+            ],
+        )
+
+    @patch("durable_memory.urllib.request.urlopen")
+    def test_append_records_device_role_and_content(self, urlopen):
+        urlopen.return_value = self.response([{"id": 1}])
+        urlopen.side_effect = [self.response([{"id": 1}]), self.response([{"id": "session-1"}])]
+        self.store.append("session-1", "wearabllm-esp32", "user", "Please remember this turn.")
+        request = urlopen.call_args_list[0].args[0]
+        self.assertEqual(request.get_method(), "POST")
+        self.assertIn(b'"device_id": "wearabllm-esp32"', request.data)
+        self.assertIn(b'"role": "user"', request.data)
+
+    def test_append_rejects_invalid_device_id(self):
+        with self.assertRaises(ValueError):
+            self.store.append("session-1", "has spaces", "user", "This should not be stored.")
+
+    @patch("durable_memory.urllib.request.urlopen")
+    def test_archive_moves_raw_turns_then_clears_active_rows(self, urlopen):
+        urlopen.side_effect = [
+            self.response([{
+                "id": 42,
+                "device_id": "wearabllm-esp32",
+                "role": "user",
+                "content": "Archive this private turn.",
+                "created_at": "2026-07-10T00:00:00Z",
+            }]),
+            self.response([{"id": 1}]),
+            self.response([{"id": "session-1"}]),
+            self.response([]),
+        ]
+        self.assertEqual(self.store.archive({"id": "session-1"}, "Short summary."), 1)
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertIn("wearabllm_conversation_archive", requests[1].full_url)
+        self.assertIn("wearabllm_conversation_sessions", requests[2].full_url)
+        self.assertIn("wearabllm_conversation_turns", requests[3].full_url)
 
 
 if __name__ == "__main__":
