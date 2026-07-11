@@ -841,6 +841,41 @@ class BridgeHandlerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"], "Invalid device ID")
 
+    def test_conversation_snapshot_endpoint_is_token_protected(self):
+        status, payload = self.request(
+            "GET",
+            "/v1/conversation",
+            device_token="console-token",
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"], "Invalid or missing device token")
+
+        status, payload = self.request(
+            "GET",
+            "/v1/conversation",
+            headers={"X-WearabLLM-Device-Token": "console-token"},
+            device_token="console-token",
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertIn("turns", payload)
+        self.assertIn("devices", payload)
+        device_ids = {item["id"] for item in payload["devices"]}
+        self.assertIn("wearabllm-esp32", device_ids)
+        self.assertIn("web-console", device_ids)
+        self.assertIn("wearabllm-wearable", device_ids)
+
+    def test_devices_endpoint_lists_known_bodies(self):
+        status, payload = self.request(
+            "GET",
+            "/v1/devices",
+            headers={"X-WearabLLM-Device-Token": "console-token"},
+            device_token="console-token",
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertGreaterEqual(len(payload["devices"]), 3)
+
 
 class JsonBytesTest(unittest.TestCase):
     def test_json_bytes_is_ascii_json(self):

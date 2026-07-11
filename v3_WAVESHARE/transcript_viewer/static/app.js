@@ -1,61 +1,332 @@
-const feed = document.querySelector("#feed");
-const status = document.querySelector("#status");
-const summary = document.querySelector("#summary");
-const template = document.querySelector("#entry-template");
-const seen = new Set();
-let newestId = 0;
-let polling = false;
+const els = {
+  status: document.querySelector("#status"),
+  deviceList: document.querySelector("#device-list"),
+  thread: document.querySelector("#thread"),
+  threadTitle: document.querySelector("#thread-title"),
+  sessionActive: document.querySelector("#session-active"),
+  sessionTurns: document.querySelector("#session-turns"),
+  sessionFilter: document.querySelector("#session-filter"),
+  replyAs: document.querySelector("#reply-as"),
+  replyForm: document.querySelector("#reply-form"),
+  replyInput: document.querySelector("#reply-input"),
+  send: document.querySelector("#send"),
+  composerStatus: document.querySelector("#composer-status"),
+  eventFeed: document.querySelector("#event-feed"),
+  refresh: document.querySelector("#refresh"),
+  resetSession: document.querySelector("#reset-session"),
+};
+
+const state = {
+  devices: [],
+  selectedDeviceId: "all",
+  replyAsDeviceId: "web-console",
+  turns: [],
+  session: null,
+  polling: false,
+  sending: false,
+  seenEvents: new Set(),
+};
 
 function setStatus(kind, text) {
-  status.className = `status ${kind}`;
-  status.lastChild.textContent = ` ${text}`;
+  els.status.className = `status ${kind}`;
+  els.status.innerHTML = `<span></span> ${text}`;
 }
 
-function render(row, prepend = true) {
-  if (seen.has(row.id)) return;
-  seen.add(row.id);
-  newestId = Math.max(newestId, Number(row.id));
-  const node = template.content.firstElementChild.cloneNode(true);
-  const created = new Date(row.created_at);
-  const time = node.querySelector("time");
-  time.dateTime = row.created_at;
-  time.textContent = created.toLocaleString();
-  node.querySelector(".command").textContent = row.command;
-  node.querySelector(".device").textContent = row.device_id;
-  node.querySelector(".transcript").textContent = row.transcript;
-  node.querySelector(".reply").textContent = row.reply || "No spoken reply";
-  if (prepend) feed.prepend(node); else feed.append(node);
+function kindFor(deviceId, devices = state.devices) {
+  const found = devices.find((item) => item.id === deviceId);
+  return found?.kind || "custom";
 }
 
-async function update() {
-  if (polling || document.hidden) return;
-  polling = true;
-  const query = newestId ? `?after_id=${newestId}&limit=100` : "?limit=100";
+function labelFor(deviceId, devices = state.devices) {
+  const found = devices.find((item) => item.id === deviceId);
+  return found?.label || deviceId;
+}
+
+function shortId(value) {
+  if (!value) return "—";
+  const text = String(value);
+  return text.length > 12 ? `${text.slice(0, 8)}…` : text;
+}
+
+function formatTime(value) {
+  if (!value) return "—";
   try {
-    const response = await fetch(`/api/transcripts${query}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json();
-    const rows = Array.isArray(payload.transcripts) ? payload.transcripts : [];
-    rows.slice().reverse().forEach((row) => render(row, true));
-    summary.textContent = seen.size
-      ? `${seen.size} interaction${seen.size === 1 ? "" : "s"} on screen`
-      : "Waiting for the first transcript…";
-    setStatus("online", "Live");
-  } catch (error) {
-    console.error(error);
-    setStatus("offline", "Retrying");
-  } finally {
-    polling = false;
+    return new Date(value).toLocaleString();
+  } catch {
+    return String(value);
   }
 }
 
-document.querySelector("#clear").addEventListener("click", () => {
-  feed.replaceChildren();
-  seen.clear();
-  newestId = 0;
-  summary.textContent = "Screen cleared; reloading…";
-  update();
+function mergeDevices(known = [], remote = []) {
+  const byId = new Map();
+  for (const item of [...known, ...remote]) {
+    if (!item?.id) continue;
+    const previous = byId.get(item.id) || {};
+    byId.set(item.id, {
+      ...previous,
+      ...item,
+      seen: Boolean(previous.seen || item.seen),
+    });
+  }
+  // Always offer an "all bodies" virtual filter via UI, not as a device body.
+  return Array.from(byId.values()).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function renderDevices() {
+  const cards = [
+    {
+      id: "all",
+      label: "All bodies",
+      kind: "custom",
+      status: "active",
+      description: "Shared principal conversation across every device",
+      seen: true,
+    },
+    ...state.devices,
+  ];
+
+  els.deviceList.replaceChildren(
+    ...cards.map((device) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `device-card ${device.kind || "custom"}${device.id === state.selectedDeviceId ? " active" : ""}${device.status === "planned" ? " planned" : ""}`;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", device.id === state.selectedDeviceId ? "true" : "false");
+      button.innerHTML = `
+        <span class="device-dot" aria-hidden="true"></span>
+        <span>
+          <strong>${escapeHtml(device.label)}</strong>
+          <small>${escapeHtml(device.description || device.id)}</small>
+        </span>
+        <span class="device-badge">${escapeHtml(device.status || "active")}</span>
+      `;
+      button.addEventListener("click", () => {
+        state.selectedDeviceId = device.id;
+        els.threadTitle.textContent = device.id === "all" ? "All bodies" : device.label;
+        els.sessionFilter.textContent = device.id === "all" ? "All bodies" : device.label;
+        renderDevices();
+        refreshConversation();
+      });
+      return button;
+    })
+  );
+
+  const replyOptions = state.devices.filter((device) => device.status !== "planned" || device.id === "web-console");
+  const preferred = replyOptions.some((device) => device.id === state.replyAsDeviceId)
+    ? state.replyAsDeviceId
+    : "web-console";
+  state.replyAsDeviceId = preferred;
+  els.replyAs.replaceChildren(
+    ...replyOptions.map((device) => {
+      const option = document.createElement("option");
+      option.value = device.id;
+      option.textContent = device.label;
+      option.selected = device.id === preferred;
+      return option;
+    })
+  );
+}
+
+function renderThread() {
+  if (!state.turns.length) {
+    els.thread.innerHTML = `
+      <div class="empty">
+        <strong>Quiet sphere</strong>
+        <p>No turns yet for this view. Speak through the home base, or reply from this console to start the shared thread.</p>
+      </div>
+    `;
+    els.sessionTurns.textContent = "0";
+    return;
+  }
+
+  els.sessionTurns.textContent = String(state.turns.length);
+  els.thread.replaceChildren(
+    ...state.turns.map((turn) => {
+      const role = turn.role === "assistant" ? "assistant" : "user";
+      const deviceId = turn.device_id || "unknown";
+      const kind = kindFor(deviceId);
+      const article = document.createElement("article");
+      article.className = `bubble ${role}`;
+      article.innerHTML = `
+        <div class="bubble-meta">
+          <span class="device-pill ${kind}">${escapeHtml(labelFor(deviceId))}</span>
+          <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
+          <span>${escapeHtml(formatTime(turn.created_at))}</span>
+        </div>
+        <p></p>
+      `;
+      article.querySelector("p").textContent = turn.content || "";
+      return article;
+    })
+  );
+  els.thread.scrollTop = els.thread.scrollHeight;
+}
+
+function renderEvents(rows) {
+  for (const row of rows.slice().reverse()) {
+    if (state.seenEvents.has(row.id)) continue;
+    state.seenEvents.add(row.id);
+    const item = document.createElement("article");
+    item.className = "event-item";
+    item.innerHTML = `
+      <div class="meta">
+        <span class="cmd">${escapeHtml(row.command || "—")}</span>
+        <span>${escapeHtml(row.device_id || "device")}</span>
+      </div>
+      <div>${escapeHtml(row.transcript || "")}</div>
+    `;
+    els.eventFeed.prepend(item);
+  }
+  while (els.eventFeed.children.length > 30) {
+    els.eventFeed.lastElementChild.remove();
+  }
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, { cache: "no-store", ...options });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload.error || `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  return payload;
+}
+
+async function refreshConversation() {
+  if (state.polling) return;
+  state.polling = true;
+  try {
+    const params = new URLSearchParams({ limit: "300" });
+    if (state.selectedDeviceId !== "all") {
+      params.set("device_id", state.selectedDeviceId);
+    }
+    const payload = await fetchJson(`/api/conversation?${params.toString()}`);
+    state.turns = Array.isArray(payload.turns) ? payload.turns : [];
+    state.session = payload.session || null;
+    state.devices = mergeDevices(state.devices, payload.devices || []);
+    els.sessionActive.textContent = shortId(payload.active_session_id || state.session?.id);
+    renderDevices();
+    renderThread();
+    setStatus("online", "Live");
+  } catch (error) {
+    console.error(error);
+    setStatus("offline", error.message || "Retrying");
+  } finally {
+    state.polling = false;
+  }
+}
+
+async function refreshEvents() {
+  try {
+    const payload = await fetchJson("/api/transcripts?limit=20");
+    const rows = Array.isArray(payload.transcripts) ? payload.transcripts : [];
+    renderEvents(rows);
+  } catch (error) {
+    // Optional side panel; conversation remains primary.
+    if (!String(error.message).includes("transcripts_not_configured")) {
+      console.warn("event feed", error);
+    }
+  }
+}
+
+async function bootstrap() {
+  const payload = await fetchJson("/api/bootstrap");
+  state.devices = mergeDevices(payload.known_devices || [], []);
+  state.replyAsDeviceId = payload.default_device_id || "web-console";
+  renderDevices();
+  if (!payload.bridge_configured) {
+    setStatus("offline", "Bridge missing");
+    els.composerStatus.textContent = "Configure WEARABLLM_BRIDGE_URL in firmware sdkconfig.";
+  }
+}
+
+els.replyAs.addEventListener("change", () => {
+  state.replyAsDeviceId = els.replyAs.value;
 });
-document.addEventListener("visibilitychange", update);
-update();
-setInterval(update, 1500);
+
+els.replyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (state.sending) return;
+  const transcript = els.replyInput.value.trim();
+  if (!transcript) return;
+
+  state.sending = true;
+  els.send.disabled = true;
+  els.composerStatus.textContent = "Thinking…";
+  try {
+    const payload = await fetchJson("/api/reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transcript,
+        device_id: state.replyAsDeviceId || "web-console",
+      }),
+    });
+    els.replyInput.value = "";
+    els.composerStatus.textContent = payload.command
+      ? `Got ${payload.command}`
+      : "Reply sent";
+    await refreshConversation();
+  } catch (error) {
+    console.error(error);
+    els.composerStatus.textContent = error.message || "Send failed";
+    setStatus("offline", "Send failed");
+  } finally {
+    state.sending = false;
+    els.send.disabled = false;
+  }
+});
+
+els.refresh.addEventListener("click", () => {
+  refreshConversation();
+  refreshEvents();
+});
+
+els.resetSession.addEventListener("click", async () => {
+  if (!window.confirm("Archive the active shared session and start fresh? Durable memories are kept.")) {
+    return;
+  }
+  try {
+    await fetchJson("/api/session/reset", { method: "POST" });
+    els.composerStatus.textContent = "Session archived";
+    await refreshConversation();
+  } catch (error) {
+    els.composerStatus.textContent = error.message || "Reset failed";
+  }
+});
+
+els.replyInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    els.replyForm.requestSubmit();
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    refreshConversation();
+    refreshEvents();
+  }
+});
+
+bootstrap()
+  .then(() => Promise.all([refreshConversation(), refreshEvents()]))
+  .catch((error) => {
+    console.error(error);
+    setStatus("offline", "Boot failed");
+  });
+
+setInterval(() => {
+  if (!document.hidden) {
+    refreshConversation();
+    refreshEvents();
+  }
+}, 2500);

@@ -622,3 +622,29 @@ class SupabaseConversationStore:
     def clear(self) -> int:
         session = self.active_session()
         return self.archive(session) if session else 0
+
+    def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        principal = urllib.parse.quote(self.principal_id, safe="")
+        payload = self._request(
+            "GET",
+            "/rest/v1/wearabllm_conversation_sessions"
+            f"?principal_id=eq.{principal}"
+            "&select=id,started_at,last_turn_at,ended_at,archived_at,summary"
+            f"&order=last_turn_at.desc.nullslast&limit={limit}",
+        )
+        return [record for record in payload or [] if isinstance(record, dict)]
+
+    def list_device_ids(self, session_id: str | None = None) -> list[str]:
+        target_session_id = session_id
+        if not target_session_id:
+            active = self.active_session()
+            target_session_id = str(active["id"]) if active else ""
+        if not target_session_id:
+            return []
+        devices = {
+            str(record.get("device_id", "")).strip()
+            for record in self.turns(target_session_id)
+            if str(record.get("device_id", "")).strip()
+        }
+        return sorted(devices)
