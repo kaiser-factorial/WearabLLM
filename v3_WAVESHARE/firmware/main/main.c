@@ -96,6 +96,7 @@ static const rgb_t COLOR_IDLE = {0, 0, 36};
 static const rgb_t COLOR_LISTENING = {24, 24, 24};
 static const rgb_t COLOR_THINKING = {80, 80, 80};
 static const rgb_t COLOR_ERROR = {90, 0, 0};
+static const rgb_t COLOR_MUTED = {32, 16, 0};
 static const rgb_t COLOR_GREEN = {0, 80, 0};
 static const rgb_t COLOR_RED = {90, 0, 0};
 
@@ -836,13 +837,39 @@ static void interaction_task(void *arg)
             esp_err_t button_err = wearabllm_audio_read_volume_buttons(&volume_buttons);
             if (button_err == ESP_OK) {
                 uint8_t released = previous_volume_buttons & (uint8_t)~volume_buttons;
-                int volume = wearabllm_audio_get_output_volume();
                 if (released & WEARABLLM_AUDIO_BUTTON_VOLUME_UP) {
-                    volume = volume < 90 ? volume + 10 : 100;
-                    button_err = wearabllm_audio_set_output_volume((uint8_t)volume);
+                    button_err = wearabllm_audio_adjust_output_volume(10);
+                    if (button_err == ESP_OK) {
+                        ESP_LOGI(TAG,
+                                 "volume up -> %u%s",
+                                 (unsigned)wearabllm_audio_get_output_volume(),
+                                 wearabllm_audio_is_muted() ? " (muted)" : "");
+                        (void)wearabllm_audio_play_tone(880, 40);
+                    }
                 } else if (released & WEARABLLM_AUDIO_BUTTON_VOLUME_DOWN) {
-                    volume = volume > 10 ? volume - 10 : 0;
-                    button_err = wearabllm_audio_set_output_volume((uint8_t)volume);
+                    button_err = wearabllm_audio_adjust_output_volume(-10);
+                    if (button_err == ESP_OK) {
+                        ESP_LOGI(TAG,
+                                 "volume down -> %u%s",
+                                 (unsigned)wearabllm_audio_get_output_volume(),
+                                 wearabllm_audio_is_muted() ? " (muted)" : "");
+                        (void)wearabllm_audio_play_tone(440, 40);
+                    }
+                } else if (released & WEARABLLM_AUDIO_BUTTON_MUTE) {
+                    bool muted = false;
+                    button_err = wearabllm_audio_toggle_mute(&muted);
+                    if (button_err == ESP_OK) {
+                        ESP_LOGI(TAG,
+                                 "mute toggle -> %s (volume=%u)",
+                                 muted ? "muted" : "unmuted",
+                                 (unsigned)wearabllm_audio_get_output_volume());
+                        if (muted) {
+                            led_set_all(COLOR_MUTED);
+                        } else {
+                            led_set_all(COLOR_IDLE);
+                            (void)wearabllm_audio_play_tone(660, 50);
+                        }
+                    }
                 }
                 previous_volume_buttons = volume_buttons;
             }
@@ -983,6 +1010,11 @@ void app_main(void)
     err = wearabllm_audio_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio init failed at boot (%s); capture will retry on demand", esp_err_to_name(err));
+    } else {
+        esp_err_t prefs_err = wearabllm_audio_load_prefs();
+        if (prefs_err != ESP_OK) {
+            ESP_LOGW(TAG, "audio prefs load failed: %s", esp_err_to_name(prefs_err));
+        }
     }
     esp_err_t wake_err = wake_word_init();
     if (wake_err != ESP_OK) {

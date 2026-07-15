@@ -1,5 +1,32 @@
 # WearabLLM Session Log
 
+## 2026-07-10 — Volume NVS persistence and K2 mute
+
+### Goal
+
+Close the open control-surface todos for physical volume: persist K1/K3 volume
+across reboot, and give K2 a real job (mute) without touching the audio/bridge
+loop.
+
+### Done
+
+- Speaker volume and mute preference load/save in NVS namespace `wearabllm`.
+- K2 (TCA9555 EXIO10) toggles mute; amber ring while muted.
+- K1/K3 adjust volume by 10 and play short confirmation earcons.
+- Built and flashed to the physical Waveshare board.
+- Boot serial confirms:
+
+```text
+volume prefs default: volume=70 muted=no
+control buttons ready: K1/+ K2/mute K3/-
+Wi-Fi connected: 192.168.86.38
+```
+
+### Still needs human hands
+
+- Press K1/K2/K3 on the desk and confirm earcons / amber mute ring.
+- Reboot after a volume change and confirm `volume prefs loaded: …` matches.
+
 ## 2026-07-10 — Shared conversation continuity
 
 ### Goal

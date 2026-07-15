@@ -15,6 +15,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "wearabllm_audio";
@@ -40,8 +41,13 @@ static const char *TAG = "wearabllm_audio";
 #define TCA9555_CONFIG_PORT_1_REG 0x07
 #define TCA9555_SPEAKER_PA_MASK (1U << 0) /* EXIO8 */
 #define TCA9555_VOLUME_UP_MASK (1U << 1) /* EXIO9 / K1 */
+#define TCA9555_MUTE_MASK (1U << 2) /* EXIO10 / K2 */
 #define TCA9555_VOLUME_DOWN_MASK (1U << 3) /* EXIO11 / K3 */
-#define TCA9555_VOLUME_BUTTON_MASK (TCA9555_VOLUME_UP_MASK | TCA9555_VOLUME_DOWN_MASK)
+#define TCA9555_VOLUME_BUTTON_MASK \
+    (TCA9555_VOLUME_UP_MASK | TCA9555_MUTE_MASK | TCA9555_VOLUME_DOWN_MASK)
+#define NVS_NAMESPACE "wearabllm"
+#define NVS_KEY_VOLUME "spk_vol"
+#define NVS_KEY_MUTE "spk_mute"
 #define I2C_TIMEOUT_MS 100
 #define WAV_HEADER_BYTES 44
 #define I2S_READ_FRAMES 256
@@ -67,6 +73,7 @@ static i2c_master_dev_handle_t s_tca9555_dev;
 static bool s_play_ready;
 static bool s_volume_buttons_ready;
 static uint8_t s_output_volume = CONFIG_WEARABLLM_AUDIO_OUT_VOLUME;
+static bool s_muted;
 #endif
 static bool s_audio_ready;
 static int32_t *s_mono_read_buffer;
@@ -223,8 +230,45 @@ static esp_err_t init_volume_buttons(void)
     ESP_RETURN_ON_ERROR(
         tca9555_write_reg(TCA9555_CONFIG_PORT_1_REG, config), TAG, "TCA9555 button config failed");
     s_volume_buttons_ready = true;
-    ESP_LOGI(TAG, "volume buttons ready: K1/+ and K3/-");
+    ESP_LOGI(TAG, "control buttons ready: K1/+ K2/mute K3/-");
     return ESP_OK;
+}
+
+static uint8_t effective_output_volume(void)
+{
+    return s_muted ? 0 : s_output_volume;
+}
+
+static esp_err_t apply_output_volume_locked(void)
+{
+    if (!s_play_dev) {
+        return ESP_OK;
+    }
+    uint8_t volume = effective_output_volume();
+    ESP_RETURN_ON_ERROR(esp_codec_dev_set_out_vol(s_play_dev, volume), TAG, "playback volume set failed");
+    return ESP_OK;
+}
+
+static esp_err_t save_volume_prefs(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "volume NVS open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_u8(handle, NVS_KEY_VOLUME, s_output_volume);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, NVS_KEY_MUTE, s_muted ? 1 : 0);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "volume NVS save failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 static uint16_t read_le16(const uint8_t *data)
@@ -442,9 +486,7 @@ static esp_err_t init_playback(void)
         .bits_per_sample = PLAYBACK_BITS_PER_SAMPLE,
     };
     ESP_RETURN_ON_ERROR(esp_codec_dev_open(s_play_dev, &fs), TAG, "playback device open failed");
-    ESP_RETURN_ON_ERROR(esp_codec_dev_set_out_vol(s_play_dev, s_output_volume),
-                        TAG,
-                        "playback volume set failed");
+    ESP_RETURN_ON_ERROR(apply_output_volume_locked(), TAG, "playback volume set failed");
     ESP_RETURN_ON_FALSE(esp_codec_dev_set_out_mute(s_play_dev, true) == ESP_CODEC_DEV_OK,
                         ESP_FAIL,
                         TAG,
@@ -633,14 +675,61 @@ esp_err_t wearabllm_audio_play_wav(const uint8_t *wav_data, size_t wav_len)
 #endif
 }
 
+esp_err_t wearabllm_audio_load_prefs(void)
+{
+#if CONFIG_WEARABLLM_AUDIO_OUT_ENABLED
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG,
+                 "volume prefs default: volume=%u muted=no",
+                 (unsigned)s_output_volume);
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "volume NVS open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint8_t volume = s_output_volume;
+    uint8_t muted = 0;
+    esp_err_t vol_err = nvs_get_u8(handle, NVS_KEY_VOLUME, &volume);
+    esp_err_t mute_err = nvs_get_u8(handle, NVS_KEY_MUTE, &muted);
+    nvs_close(handle);
+
+    if (vol_err == ESP_OK && volume <= 100) {
+        s_output_volume = volume;
+    } else if (vol_err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "volume NVS read failed: %s", esp_err_to_name(vol_err));
+    }
+    if (mute_err == ESP_OK) {
+        s_muted = muted != 0;
+    } else if (mute_err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "mute NVS read failed: %s", esp_err_to_name(mute_err));
+    }
+
+    ESP_LOGI(TAG,
+             "volume prefs loaded: volume=%u muted=%s",
+             (unsigned)s_output_volume,
+             s_muted ? "yes" : "no");
+    return ESP_OK;
+#else
+    return ESP_OK;
+#endif
+}
+
 esp_err_t wearabllm_audio_set_output_volume(uint8_t volume)
 {
 #if CONFIG_WEARABLLM_AUDIO_OUT_ENABLED
     ESP_RETURN_ON_FALSE(volume <= 100, ESP_ERR_INVALID_ARG, TAG, "volume must be 0..100");
     ESP_RETURN_ON_ERROR(init_playback(), TAG, "speaker output init failed");
-    ESP_RETURN_ON_ERROR(esp_codec_dev_set_out_vol(s_play_dev, volume), TAG, "playback volume set failed");
     s_output_volume = volume;
-    ESP_LOGI(TAG, "speaker volume=%u", (unsigned)volume);
+    if (volume > 0) {
+        s_muted = false;
+    }
+    ESP_RETURN_ON_ERROR(apply_output_volume_locked(), TAG, "playback volume set failed");
+    (void)save_volume_prefs();
+    ESP_LOGI(TAG, "speaker volume=%u muted=%s", (unsigned)s_output_volume, s_muted ? "yes" : "no");
     return ESP_OK;
 #else
     (void)volume;
@@ -657,6 +746,58 @@ uint8_t wearabllm_audio_get_output_volume(void)
 #endif
 }
 
+bool wearabllm_audio_is_muted(void)
+{
+#if CONFIG_WEARABLLM_AUDIO_OUT_ENABLED
+    return s_muted;
+#else
+    return false;
+#endif
+}
+
+esp_err_t wearabllm_audio_toggle_mute(bool *now_muted)
+{
+#if CONFIG_WEARABLLM_AUDIO_OUT_ENABLED
+    ESP_RETURN_ON_ERROR(init_playback(), TAG, "speaker output init failed");
+    s_muted = !s_muted;
+    if (!s_muted && s_output_volume == 0) {
+        s_output_volume = CONFIG_WEARABLLM_AUDIO_OUT_VOLUME;
+    }
+    ESP_RETURN_ON_ERROR(apply_output_volume_locked(), TAG, "playback volume set failed");
+    (void)save_volume_prefs();
+    ESP_LOGI(TAG,
+             "speaker mute=%s volume=%u",
+             s_muted ? "yes" : "no",
+             (unsigned)s_output_volume);
+    if (now_muted) {
+        *now_muted = s_muted;
+    }
+    return ESP_OK;
+#else
+    (void)now_muted;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t wearabllm_audio_adjust_output_volume(int delta)
+{
+#if CONFIG_WEARABLLM_AUDIO_OUT_ENABLED
+    int volume = (int)s_output_volume + delta;
+    if (volume < 0) {
+        volume = 0;
+    } else if (volume > 100) {
+        volume = 100;
+    }
+    if (s_muted && delta != 0) {
+        s_muted = false;
+    }
+    return wearabllm_audio_set_output_volume((uint8_t)volume);
+#else
+    (void)delta;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 esp_err_t wearabllm_audio_read_volume_buttons(uint8_t *pressed_mask)
 {
 #if CONFIG_WEARABLLM_AUDIO_OUT_ENABLED
@@ -669,6 +810,9 @@ esp_err_t wearabllm_audio_read_volume_buttons(uint8_t *pressed_mask)
     *pressed_mask = 0;
     if ((levels & TCA9555_VOLUME_UP_MASK) == 0) {
         *pressed_mask |= WEARABLLM_AUDIO_BUTTON_VOLUME_UP;
+    }
+    if ((levels & TCA9555_MUTE_MASK) == 0) {
+        *pressed_mask |= WEARABLLM_AUDIO_BUTTON_MUTE;
     }
     if ((levels & TCA9555_VOLUME_DOWN_MASK) == 0) {
         *pressed_mask |= WEARABLLM_AUDIO_BUTTON_VOLUME_DOWN;
