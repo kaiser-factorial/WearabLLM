@@ -141,6 +141,6 @@ transcripts to overwhelm the unified agent's working context.
 - Rebuilt and flashed the Waveshare image with the new local Wi-Fi credentials.
 - Captured a clean boot from the physical board: the ES7210 microphone, ES8311
   speaker driver, `Hi ESP` wake-word model, and hosted-agent URL initialized.
-- The board joined the new Wi-Fi network and received `192.168.86.38`.
+- The board joined the configured Wi-Fi network and received a private LAN address.
 - The remaining physical validation is a spoken request, covering wake/PTT,
   microphone capture, hosted OpenRouter request, LED command, and audible TTS.

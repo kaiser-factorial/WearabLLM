@@ -1,44 +1,86 @@
 const els = {
   status: document.querySelector("#status"),
   deviceList: document.querySelector("#device-list"),
+  conversationList: document.querySelector("#conversation-list"),
+  newConversation: document.querySelector("#new-conversation"),
+  archiveToggle: document.querySelector("#archive-toggle"),
+  archiveCount: document.querySelector("#archive-count"),
   thread: document.querySelector("#thread"),
   threadTitle: document.querySelector("#thread-title"),
-  sessionActive: document.querySelector("#session-active"),
-  sessionTurns: document.querySelector("#session-turns"),
-  sessionFilter: document.querySelector("#session-filter"),
-  replyAs: document.querySelector("#reply-as"),
+  viewEyebrow: document.querySelector("#view-eyebrow"),
+  deliverWaveshare: document.querySelector("#deliver-waveshare"),
   replyForm: document.querySelector("#reply-form"),
   replyInput: document.querySelector("#reply-input"),
   send: document.querySelector("#send"),
   composerStatus: document.querySelector("#composer-status"),
-  eventFeed: document.querySelector("#event-feed"),
-  refresh: document.querySelector("#refresh"),
-  resetSession: document.querySelector("#reset-session"),
+  composerHint: document.querySelector("#composer-hint"),
+  actionDebug: document.querySelector("#action-debug"),
+  chatView: document.querySelector("#chat-view"),
+  commandView: document.querySelector("#command-view"),
+  settingsModal: document.querySelector("#settings-modal"),
+  settingsClose: document.querySelector("#settings-close"),
+  configForm: document.querySelector("#config-form"),
+  configSource: document.querySelector("#config-source"),
+  configStatus: document.querySelector("#config-status"),
+  configReload: document.querySelector("#config-reload"),
+  catalogRefresh: document.querySelector("#catalog-refresh"),
+  catalogStatus: document.querySelector("#catalog-status"),
+  cfgApiKey: document.querySelector("#cfg-api-key"),
+  apiKeySave: document.querySelector("#api-key-save"),
+  cfgSystemPrompt: document.querySelector("#cfg-system-prompt"),
+  cfgLlmModel: document.querySelector("#cfg-llm-model"),
+  cfgTtsModel: document.querySelector("#cfg-tts-model"),
+  cfgTtsVoice: document.querySelector("#cfg-tts-voice"),
+  cfgTtsInstructions: document.querySelector("#cfg-tts-instructions"),
+  cfgUpdated: document.querySelector("#cfg-updated"),
+  deployRepo: document.querySelector("#deploy-repo"),
+  deployBridge: document.querySelector("#deploy-bridge"),
+  deployAvailability: document.querySelector("#deploy-availability"),
+  deployDry: document.querySelector("#deploy-dry"),
+  deployLive: document.querySelector("#deploy-live"),
+  deployLog: document.querySelector("#deploy-log"),
 };
 
 const state = {
   devices: [],
-  selectedDeviceId: "all",
-  replyAsDeviceId: "web-console",
+  sessions: [],
+  selectedSessionId: "",
+  activeSessionId: "",
+  deliverToWaveshare: false,
+  latestActionId: "",
   turns: [],
   session: null,
+  view: "chat",
   polling: false,
   sending: false,
-  seenEvents: new Set(),
+  thinking: false,
+  pausePolling: false,
+  lastStatus: "",
+  devicesSignature: "",
+  sessionsSignature: "",
+  turnsSignature: "",
+  bootstrap: null,
+  agentConfig: null,
+  modelCatalog: null,
+  showArchived: false,
 };
 
 function setStatus(kind, text) {
+  const key = `${kind}:${text}`;
+  if (state.lastStatus === key) return;
+  state.lastStatus = key;
   els.status.className = `status ${kind}`;
-  els.status.innerHTML = `<span></span> ${text}`;
+  const dot = document.createElement("span");
+  els.status.replaceChildren(dot, document.createTextNode(` ${text}`));
 }
 
-function kindFor(deviceId, devices = state.devices) {
-  const found = devices.find((item) => item.id === deviceId);
+function kindFor(deviceId) {
+  const found = state.devices.find((item) => item.id === deviceId);
   return found?.kind || "custom";
 }
 
-function labelFor(deviceId, devices = state.devices) {
-  const found = devices.find((item) => item.id === deviceId);
+function labelFor(deviceId) {
+  const found = state.devices.find((item) => item.id === deviceId);
   return found?.label || deviceId;
 }
 
@@ -48,10 +90,43 @@ function shortId(value) {
   return text.length > 12 ? `${text.slice(0, 8)}…` : text;
 }
 
-function formatTime(value) {
+function formatTime(value, { relative = false } = {}) {
   if (!value) return "—";
   try {
-    return new Date(value).toLocaleString();
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    if (relative) {
+      const seconds = Math.round((Date.now() - date.getTime()) / 1000);
+      if (seconds < 45) return "just now";
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+      if (seconds < 86400 * 7) return `${Math.round(seconds / 86400)}d ago`;
+    }
+    return date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return String(value);
+  }
+}
+
+function formatTimeTitle(value) {
+  if (!value) return "";
+  try {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString(undefined, {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    });
   } catch {
     return String(value);
   }
@@ -61,125 +136,36 @@ function mergeDevices(known = [], remote = []) {
   const byId = new Map();
   for (const item of [...known, ...remote]) {
     if (!item?.id) continue;
+    if (item.id === "local-bridge") continue;
     const previous = byId.get(item.id) || {};
     byId.set(item.id, {
       ...previous,
       ...item,
-      seen: Boolean(previous.seen || item.seen),
+      seen: item.seen == null ? Boolean(previous.seen) : Boolean(item.seen),
     });
   }
-  // Always offer an "all bodies" virtual filter via UI, not as a device body.
-  return Array.from(byId.values()).sort((a, b) => a.label.localeCompare(b.label));
-}
-
-function renderDevices() {
-  const cards = [
-    {
-      id: "all",
-      label: "All bodies",
-      kind: "custom",
-      status: "active",
-      description: "Shared principal conversation across every device",
-      seen: true,
-    },
-    ...state.devices,
-  ];
-
-  els.deviceList.replaceChildren(
-    ...cards.map((device) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `device-card ${device.kind || "custom"}${device.id === state.selectedDeviceId ? " active" : ""}${device.status === "planned" ? " planned" : ""}`;
-      button.setAttribute("role", "option");
-      button.setAttribute("aria-selected", device.id === state.selectedDeviceId ? "true" : "false");
-      button.innerHTML = `
-        <span class="device-dot" aria-hidden="true"></span>
-        <span>
-          <strong>${escapeHtml(device.label)}</strong>
-          <small>${escapeHtml(device.description || device.id)}</small>
-        </span>
-        <span class="device-badge">${escapeHtml(device.status || "active")}</span>
-      `;
-      button.addEventListener("click", () => {
-        state.selectedDeviceId = device.id;
-        els.threadTitle.textContent = device.id === "all" ? "All bodies" : device.label;
-        els.sessionFilter.textContent = device.id === "all" ? "All bodies" : device.label;
-        renderDevices();
-        refreshConversation();
-      });
-      return button;
-    })
-  );
-
-  const replyOptions = state.devices.filter((device) => device.status !== "planned" || device.id === "web-console");
-  const preferred = replyOptions.some((device) => device.id === state.replyAsDeviceId)
-    ? state.replyAsDeviceId
-    : "web-console";
-  state.replyAsDeviceId = preferred;
-  els.replyAs.replaceChildren(
-    ...replyOptions.map((device) => {
-      const option = document.createElement("option");
-      option.value = device.id;
-      option.textContent = device.label;
-      option.selected = device.id === preferred;
-      return option;
-    })
+  const order = {
+    "wearabllm-esp32": 0,
+    "wearabllm-android": 1,
+    "web-console": 2,
+    "wearabllm-wearable": 3,
+  };
+  return Array.from(byId.values()).sort((a, b) =>
+    (order[a.id] ?? 100).toString().localeCompare((order[b.id] ?? 100).toString())
+    || a.label.localeCompare(b.label)
   );
 }
 
-function renderThread() {
-  if (!state.turns.length) {
-    els.thread.innerHTML = `
-      <div class="empty">
-        <strong>Quiet sphere</strong>
-        <p>No turns yet for this view. Speak through the home base, or reply from this console to start the shared thread.</p>
-      </div>
-    `;
-    els.sessionTurns.textContent = "0";
-    return;
-  }
-
-  els.sessionTurns.textContent = String(state.turns.length);
-  els.thread.replaceChildren(
-    ...state.turns.map((turn) => {
-      const role = turn.role === "assistant" ? "assistant" : "user";
-      const deviceId = turn.device_id || "unknown";
-      const kind = kindFor(deviceId);
-      const article = document.createElement("article");
-      article.className = `bubble ${role}`;
-      article.innerHTML = `
-        <div class="bubble-meta">
-          <span class="device-pill ${kind}">${escapeHtml(labelFor(deviceId))}</span>
-          <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
-          <span>${escapeHtml(formatTime(turn.created_at))}</span>
-        </div>
-        <p></p>
-      `;
-      article.querySelector("p").textContent = turn.content || "";
-      return article;
-    })
-  );
-  els.thread.scrollTop = els.thread.scrollHeight;
+function devicesSignature(devices) {
+  return JSON.stringify(devices.map((d) => [d.id, d.label, d.kind, d.status, Boolean(d.seen)]));
 }
 
-function renderEvents(rows) {
-  for (const row of rows.slice().reverse()) {
-    if (state.seenEvents.has(row.id)) continue;
-    state.seenEvents.add(row.id);
-    const item = document.createElement("article");
-    item.className = "event-item";
-    item.innerHTML = `
-      <div class="meta">
-        <span class="cmd">${escapeHtml(row.command || "—")}</span>
-        <span>${escapeHtml(row.device_id || "device")}</span>
-      </div>
-      <div>${escapeHtml(row.transcript || "")}</div>
-    `;
-    els.eventFeed.prepend(item);
-  }
-  while (els.eventFeed.children.length > 30) {
-    els.eventFeed.lastElementChild.remove();
-  }
+function turnsSignature(turns) {
+  return `${turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${t.created_at}`).join("\n")}|thinking:${state.thinking}`;
+}
+
+function nearBottom(el, px = 96) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < px;
 }
 
 function escapeHtml(value) {
@@ -190,31 +176,327 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+function renderDevices({ force = false } = {}) {
+  const signature = devicesSignature(state.devices);
+  if (!force && signature === state.devicesSignature) return;
+  state.devicesSignature = signature;
+
+  els.deviceList.replaceChildren(
+    ...state.devices.map((device) => {
+      const card = document.createElement("article");
+      card.className = [
+        "body-status",
+        device.kind || "custom",
+        device.status === "planned" ? "planned" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const stateLabel = device.status === "planned"
+        ? "Planned"
+        : device.seen ? "Live" : "Idle";
+      card.innerHTML = `
+        <span class="device-dot" aria-hidden="true"></span>
+        <strong>${escapeHtml(device.label)}</strong>
+        <span class="device-badge">${stateLabel}</span>
+      `;
+      return card;
+    })
+  );
+}
+
+function conversationTitle(session) {
+  if (!session) return "Conversation";
+  if (session.title) return String(session.title);
+  if (session.id === state.activeSessionId) return "Current conversation";
+  if (session.summary) {
+    const summary = String(session.summary).replace(/\s+/g, " ").trim();
+    if (summary) return summary.length > 48 ? `${summary.slice(0, 47)}…` : summary;
+  }
+  return formatTime(session.started_at || session.last_turn_at);
+}
+
+function renderConversations({ force = false } = {}) {
+  const archived = state.sessions.filter((item) => Boolean(item.archived_at));
+  const visibleSessions = state.sessions.filter(
+    (item) => Boolean(item.archived_at) === state.showArchived
+  );
+  els.archiveCount.textContent = String(archived.length);
+  els.archiveToggle.firstChild.textContent = state.showArchived ? "← Conversations " : "Archive ";
+  els.archiveToggle.classList.toggle("active", state.showArchived);
+  const signature = JSON.stringify({
+    selected: state.selectedSessionId,
+    active: state.activeSessionId,
+    showArchived: state.showArchived,
+    sessions: visibleSessions.map((item) => [
+      item.id, item.started_at, item.last_turn_at, item.ended_at, item.archived_at, item.summary, item.title,
+    ]),
+  });
+  if (!force && signature === state.sessionsSignature) return;
+  state.sessionsSignature = signature;
+
+  if (!visibleSessions.length) {
+    els.conversationList.innerHTML = `<p class="conversation-empty">${
+      state.showArchived ? "No archived conversations yet." : "No conversations yet. Use + to begin one."
+    }</p>`;
+    return;
+  }
+  els.conversationList.replaceChildren(
+    ...visibleSessions.map((session) => {
+      const row = document.createElement("div");
+      row.className = "conversation-row";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `conversation-item${session.id === state.selectedSessionId ? " active" : ""}`;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", session.id === state.selectedSessionId ? "true" : "false");
+      const current = session.id === state.activeSessionId;
+      button.innerHTML = `
+        <span class="conversation-copy">
+          <strong>${escapeHtml(conversationTitle(session))}</strong>
+          <small>${escapeHtml(formatTime(session.last_turn_at || session.started_at, { relative: true }))}</small>
+        </span>
+        ${current ? '<span class="current-badge">Live</span>' : session.archived_at ? '<span class="archive-badge">Archived</span>' : ""}
+      `;
+      button.addEventListener("click", () => {
+        if (state.selectedSessionId === session.id) return;
+        state.selectedSessionId = session.id;
+        state.turnsSignature = "";
+        renderConversations({ force: true });
+        refreshConversation({ forceRender: true });
+      });
+      row.append(button);
+      const actions = document.createElement("details");
+      actions.className = "conversation-menu";
+      const summary = document.createElement("summary");
+      summary.textContent = "…";
+      summary.title = `Actions for ${conversationTitle(session)}`;
+      summary.setAttribute("aria-label", summary.title);
+      const menuItems = document.createElement("div");
+      menuItems.className = "conversation-menu-items";
+      actions.append(summary, menuItems);
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.className = "conversation-action rename-conversation";
+      rename.textContent = "Rename";
+      rename.title = `Rename ${conversationTitle(session)}`;
+      rename.setAttribute("aria-label", rename.title);
+      rename.addEventListener("click", () => void renameConversation(session));
+      menuItems.append(rename);
+      if (!session.archived_at) {
+        const archive = document.createElement("button");
+        archive.type = "button";
+        archive.className = "conversation-action archive-conversation";
+        archive.textContent = "Archive";
+        archive.title = `Archive ${conversationTitle(session)}`;
+        archive.setAttribute("aria-label", archive.title);
+        archive.addEventListener("click", () => void archiveConversation(session));
+        menuItems.append(archive);
+      }
+      row.append(actions);
+      return row;
+    })
+  );
+}
+
+async function renameConversation(session) {
+  const title = window.prompt("Conversation name", session.title || conversationTitle(session));
+  if (title == null) return;
+  const cleanTitle = title.replace(/\s+/g, " ").trim();
+  if (!cleanTitle) {
+    els.composerStatus.textContent = "Conversation name cannot be empty";
+    return;
+  }
+  try {
+    await fetchJson(`/api/sessions/${encodeURIComponent(session.id)}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: cleanTitle }),
+    });
+    state.sessionsSignature = "";
+    await refreshConversation({ forceRender: true });
+    els.composerStatus.textContent = "Conversation renamed";
+  } catch (error) {
+    els.composerStatus.textContent = `Rename failed: ${error.message || "unknown error"}`;
+  }
+}
+
+function toggleArchiveView() {
+  state.showArchived = !state.showArchived;
+  const candidates = state.sessions.filter(
+    (item) => Boolean(item.archived_at) === state.showArchived
+  );
+  state.selectedSessionId = state.showArchived
+    ? candidates[0]?.id || ""
+    : state.activeSessionId || candidates[0]?.id || "";
+  state.sessionsSignature = "";
+  state.turnsSignature = "";
+  renderConversations({ force: true });
+  refreshConversation({ forceRender: true });
+}
+
+async function archiveConversation(session) {
+  const isCurrent = session.id === state.activeSessionId;
+  const prompt = isCurrent
+    ? "Archive the current conversation and start a new one? The transcript will remain available here."
+    : "Archive this conversation? The transcript will remain available here.";
+  if (!window.confirm(prompt)) return;
+  els.composerStatus.textContent = "Archiving conversation…";
+  try {
+    const payload = await fetchJson(`/api/sessions/${encodeURIComponent(session.id)}/archive`, {
+      method: "POST",
+    });
+    if (state.selectedSessionId === session.id && payload.active_session_id) {
+      state.selectedSessionId = payload.active_session_id;
+    }
+    state.showArchived = false;
+    state.sessionsSignature = "";
+    state.turnsSignature = "";
+    await refreshConversation({ forceRender: true });
+    els.composerStatus.textContent = "Conversation archived";
+  } catch (error) {
+    els.composerStatus.textContent = `Archive failed: ${error.message || "unknown error"}`;
+  }
+}
+
+function renderThread({ force = false } = {}) {
+  const signature = turnsSignature(state.turns);
+  if (!force && signature === state.turnsSignature) return;
+
+  const stick = force || nearBottom(els.thread) || state.turnsSignature === "";
+  const previousScroll = els.thread.scrollTop;
+  state.turnsSignature = signature;
+
+  if (!state.turns.length) {
+    els.thread.innerHTML = `
+      <div class="empty">
+        <strong>Quiet sphere</strong>
+        <p>No turns yet for this view. Speak through Waveshare, or reply from this console to start the shared thread.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const turn of state.turns) {
+    const role = turn.role === "assistant" ? "assistant" : "user";
+    const deviceId = turn.device_id || "unknown";
+    const kind = kindFor(deviceId);
+    const article = document.createElement("article");
+    article.className = `bubble ${role}`;
+    article.dataset.turnId = String(turn.id ?? "");
+    const when = formatTime(turn.created_at);
+    const whenTitle = formatTimeTitle(turn.created_at);
+    article.innerHTML = `
+      <div class="bubble-meta">
+        <span class="device-pill ${kind}">${escapeHtml(labelFor(deviceId))}</span>
+        <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
+        <time class="timestamp" datetime="${escapeHtml(turn.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
+      </div>
+      <p></p>
+    `;
+    article.querySelector("p").textContent = turn.content || "";
+    fragment.append(article);
+  }
+  if (state.thinking) {
+    const article = document.createElement("article");
+    article.className = "bubble assistant thinking-bubble";
+    article.innerHTML = `
+      <div class="bubble-meta">
+        <span class="device-pill custom">Sphere</span>
+        <span>WearabLLM</span>
+      </div>
+      <p>Thinking<span class="thinking-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
+    `;
+    fragment.append(article);
+  }
+  els.thread.replaceChildren(fragment);
+  els.thread.scrollTop = stick ? els.thread.scrollHeight : previousScroll;
+}
+
+function renderEvents(rows) {
+  let added = 0;
+  for (const row of rows.slice().reverse()) {
+    if (state.seenEvents.has(row.id)) continue;
+    state.seenEvents.add(row.id);
+    added += 1;
+    const when = formatTime(row.created_at, { relative: true });
+    const whenTitle = formatTimeTitle(row.created_at);
+    const item = document.createElement("article");
+    item.className = "event-item";
+    item.dataset.createdAt = row.created_at || "";
+    item.innerHTML = `
+      <div class="meta">
+        <span class="cmd">${escapeHtml(row.command || "—")}</span>
+        <time class="timestamp" datetime="${escapeHtml(row.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
+      </div>
+      <div class="event-device">${escapeHtml(labelFor(row.device_id || "device"))}</div>
+      <div class="event-text">${escapeHtml(row.transcript || "")}</div>
+    `;
+    els.eventFeed.prepend(item);
+  }
+  while (els.eventFeed.children.length > 30) {
+    els.eventFeed.lastElementChild.remove();
+  }
+  if (added > 0) refreshEventTimestamps();
+}
+
+function refreshEventTimestamps() {
+  for (const item of els.eventFeed.querySelectorAll(".event-item")) {
+    const createdAt = item.dataset.createdAt;
+    const stamp = item.querySelector("time.timestamp");
+    if (!stamp || !createdAt) continue;
+    const next = formatTime(createdAt, { relative: true });
+    if (stamp.textContent !== next) stamp.textContent = next;
+    stamp.title = formatTimeTitle(createdAt);
+  }
+}
+
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, { cache: "no-store", ...options });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = payload.error || `HTTP ${response.status}`;
-    throw new Error(message);
+    throw new Error(payload.error || `HTTP ${response.status}`);
   }
   return payload;
 }
 
-async function refreshConversation() {
+async function sendHeartbeat() {
+  try {
+    await fetchJson("/api/heartbeat", { method: "POST" });
+  } catch (error) {
+    console.warn("presence heartbeat", error);
+  }
+}
+
+async function refreshConversation({ forceRender = false } = {}) {
   if (state.polling) return;
+  if (state.pausePolling && !forceRender) return;
   state.polling = true;
   try {
     const params = new URLSearchParams({ limit: "300" });
-    if (state.selectedDeviceId !== "all") {
-      params.set("device_id", state.selectedDeviceId);
-    }
+    if (state.selectedSessionId) params.set("session_id", state.selectedSessionId);
     const payload = await fetchJson(`/api/conversation?${params.toString()}`);
     state.turns = Array.isArray(payload.turns) ? payload.turns : [];
     state.session = payload.session || null;
+    state.activeSessionId = payload.active_session_id || "";
+    state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+    if (!state.selectedSessionId && state.activeSessionId) {
+      state.selectedSessionId = state.activeSessionId;
+    }
     state.devices = mergeDevices(state.devices, payload.devices || []);
-    els.sessionActive.textContent = shortId(payload.active_session_id || state.session?.id);
     renderDevices();
-    renderThread();
+    renderConversations();
+    renderThread({ force: forceRender });
+    const selected = state.sessions.find((item) => item.id === state.selectedSessionId) || state.session;
+    const isCurrent = !state.selectedSessionId || state.selectedSessionId === state.activeSessionId;
+    els.threadTitle.textContent = conversationTitle(selected);
+    els.replyInput.disabled = !isCurrent;
+    els.send.disabled = !isCurrent || state.sending;
+    els.deliverWaveshare.disabled = !isCurrent;
+    els.replyInput.placeholder = isCurrent
+      ? "Type to continue the shared conversation…"
+      : "This conversation is archived. Start a new one to reply.";
+    if (!isCurrent) els.composerStatus.textContent = "Archived conversation · read only";
     setStatus("online", "Live");
   } catch (error) {
     console.error(error);
@@ -225,31 +507,291 @@ async function refreshConversation() {
 }
 
 async function refreshEvents() {
+  if (state.pausePolling) return;
   try {
     const payload = await fetchJson("/api/transcripts?limit=20");
-    const rows = Array.isArray(payload.transcripts) ? payload.transcripts : [];
-    renderEvents(rows);
+    renderEvents(Array.isArray(payload.transcripts) ? payload.transcripts : []);
   } catch (error) {
-    // Optional side panel; conversation remains primary.
     if (!String(error.message).includes("transcripts_not_configured")) {
       console.warn("event feed", error);
     }
   }
 }
 
+async function refreshLatestAction() {
+  if (!state.latestActionId) return;
+  try {
+    const payload = await fetchJson(`/api/interactions/${encodeURIComponent(state.latestActionId)}`);
+    if (!payload.action) return;
+    const action = payload.action;
+    renderActionDelivery(action);
+    if (action.status === "played" || action.status === "failed") state.latestActionId = "";
+  } catch (error) {
+    els.composerStatus.textContent = `Could not check Waveshare delivery: ${error.message || "unknown error"}`;
+  }
+}
+
+function renderActionDelivery(action) {
+  const messages = {
+    queued: "Bridge queued this response. Waveshare has not claimed it yet.",
+    dispatched: "Waveshare claimed this response. Render and playback are not confirmed yet.",
+    delivered: "Waveshare acknowledged receipt. Render and playback are unverified by that firmware.",
+    rendered: "Waveshare reported its display/LED update. Audio completion is not confirmed yet.",
+    tts_started: "Waveshare reported TTS playback started.",
+    played: "Waveshare reported TTS playback completed.",
+    failed: `Waveshare reported delivery failure${action.error ? `: ${action.error}` : "."}`,
+  };
+  els.composerStatus.textContent = messages[action.status] || `Waveshare action state: ${action.status || "unknown"}`;
+  const target = action.target_device_id || "unknown";
+  const details = [
+    `action ${action.id || "unknown"} → ${target}`,
+    `created ${formatTimeTitle(action.created_at)} · updated ${formatTimeTitle(action.updated_at)}`,
+    `attempts ${action.attempts ?? 0}${action.error ? ` · error ${action.error}` : ""}`,
+  ];
+  els.actionDebug.textContent = details.join("\n");
+  els.actionDebug.hidden = false;
+}
+
+function setView(view) {
+  state.view = view;
+  const isChat = view === "chat";
+  els.chatView.classList.toggle("active", isChat);
+  els.chatView.hidden = !isChat;
+  els.commandView.classList.toggle("active", !isChat);
+  els.commandView.hidden = isChat;
+  document.querySelectorAll(".tab").forEach((tab) => {
+    const active = tab.dataset.view === view;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  if (isChat) {
+    els.viewEyebrow.textContent = "Conversation";
+    const selected = state.sessions.find((item) => item.id === state.selectedSessionId) || state.session;
+    els.threadTitle.textContent = conversationTitle(selected);
+  } else {
+    els.viewEyebrow.textContent = "Deployment";
+    els.threadTitle.textContent = "Hugging Face Space";
+  }
+}
+
+function openSettings() {
+  if (!els.settingsModal) return;
+  if (!els.settingsModal.open) els.settingsModal.showModal();
+  els.settingsModal.scrollTop = 0;
+  loadAgentConfig().then(() => loadModelCatalog()).catch(() => {});
+  window.requestAnimationFrame(() => {
+    els.settingsModal.scrollTop = 0;
+    els.settingsClose?.focus({ preventScroll: true });
+  });
+}
+
+function closeSettings() {
+  if (els.settingsModal?.open) els.settingsModal.close();
+}
+
+function fillConfigForm(config) {
+  state.agentConfig = config;
+  els.cfgSystemPrompt.value = config.system_prompt || "";
+  fillSelect(els.cfgLlmModel, state.modelCatalog?.assistant_models || [], config.llm_model || "");
+  fillSelect(els.cfgTtsModel, state.modelCatalog?.tts_models || [], config.tts_model || "");
+  fillSelect(els.cfgTtsVoice, voicesForTtsModel(config.tts_model), config.tts_voice || "");
+  els.cfgTtsInstructions.value = config.tts_instructions || "";
+  els.cfgUpdated.value = config.updated_at
+    ? formatTimeTitle(config.updated_at)
+    : "not saved yet";
+  if (els.configSource) els.configSource.textContent = `source: ${config.source || "unknown"}`;
+}
+
+function voicesForTtsModel(model) {
+  return state.modelCatalog?.tts_voices_by_model?.[model]
+    || state.modelCatalog?.tts_voices
+    || [];
+}
+
+function fillSelect(select, values, selected) {
+  const unique = [...new Set((values || []).filter(Boolean))];
+  if (selected && !unique.includes(selected)) unique.unshift(selected);
+  if (!unique.length) {
+    const option = document.createElement("option");
+    option.value = selected || "";
+    option.textContent = selected || "Load models first";
+    select.replaceChildren(option);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.replaceChildren(
+    ...unique.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      option.selected = value === selected;
+      return option;
+    })
+  );
+}
+
+function refreshModelSelects() {
+  if (!state.agentConfig) return;
+  fillSelect(els.cfgLlmModel, state.modelCatalog?.assistant_models || [], state.agentConfig.llm_model || "");
+  fillSelect(els.cfgTtsModel, state.modelCatalog?.tts_models || [], state.agentConfig.tts_model || "");
+  fillSelect(els.cfgTtsVoice, voicesForTtsModel(state.agentConfig.tts_model), state.agentConfig.tts_voice || "");
+}
+
+async function loadAgentConfig() {
+  els.configStatus.textContent = "Loading config…";
+  try {
+    const payload = await fetchJson("/api/admin/config");
+    fillConfigForm(payload.config || {});
+    els.configStatus.textContent = "Loaded live agent config";
+  } catch (error) {
+    els.configStatus.textContent = error.message || "Config load failed";
+  }
+}
+
+async function loadModelCatalog({ quiet = false } = {}) {
+  if (!quiet) els.catalogStatus.textContent = "Fetching models from OpenAI…";
+  try {
+    const payload = await fetchJson("/api/admin/catalog");
+    state.modelCatalog = payload.catalog || null;
+    refreshModelSelects();
+    const assistants = state.modelCatalog?.assistant_models?.length || 0;
+    const tts = state.modelCatalog?.tts_models?.length || 0;
+    els.catalogStatus.textContent = `Live from OpenAI: ${assistants} assistant models · ${tts} TTS models`;
+  } catch (error) {
+    if (!quiet) els.catalogStatus.textContent = error.message || "Model fetch failed";
+    throw error;
+  }
+}
+
+async function saveApiKey() {
+  const apiKey = els.cfgApiKey.value.trim();
+  if (!apiKey) {
+    els.catalogStatus.textContent = "Paste a new API key first.";
+    els.cfgApiKey.focus();
+    return;
+  }
+  els.apiKeySave.disabled = true;
+  els.catalogStatus.textContent = "Validating key with OpenAI…";
+  try {
+    const payload = await fetchJson("/api/admin/api-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    state.modelCatalog = payload.catalog || null;
+    refreshModelSelects();
+    const assistants = state.modelCatalog?.assistant_models?.length || 0;
+    const tts = state.modelCatalog?.tts_models?.length || 0;
+    els.catalogStatus.textContent = `Key saved in Keychain. Live models: ${assistants} assistant · ${tts} TTS`;
+  } catch (error) {
+    els.catalogStatus.textContent = error.message || "Key update failed";
+  } finally {
+    els.cfgApiKey.value = "";
+    els.apiKeySave.disabled = false;
+  }
+}
+
+async function saveAgentConfig(event) {
+  event.preventDefault();
+  els.configStatus.textContent = "Saving…";
+  try {
+    const payload = await fetchJson("/api/admin/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_prompt: els.cfgSystemPrompt.value,
+        llm_model: els.cfgLlmModel.value,
+        tts_model: els.cfgTtsModel.value,
+        tts_voice: els.cfgTtsVoice.value,
+        tts_instructions: els.cfgTtsInstructions.value,
+      }),
+    });
+    fillConfigForm(payload.config || {});
+    els.configStatus.textContent = "Saved to live agent";
+  } catch (error) {
+    els.configStatus.textContent = error.message || "Save failed";
+  }
+}
+
+async function runDeploy({ dryRun }) {
+  if (!dryRun) {
+    const ok = window.confirm(
+      `Deploy bridge code to Hugging Face Space ${state.bootstrap?.hf_space_repo || ""}?\n\nThis uploads source from this laptop. Secrets stay local.`
+    );
+    if (!ok) return;
+  }
+  els.deployLog.textContent = dryRun ? "Packing dry-run…" : "Deploying…";
+  try {
+    const payload = await fetchJson("/api/admin/deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dry_run: Boolean(dryRun),
+        repo_id: state.bootstrap?.hf_space_repo || undefined,
+      }),
+    });
+    els.deployLog.textContent = payload.output || JSON.stringify(payload, null, 2);
+    if (!payload.ok) {
+      els.configStatus.textContent = "Deploy failed — see log";
+    }
+  } catch (error) {
+    els.deployLog.textContent = error.message || "Deploy failed";
+  }
+}
+
 async function bootstrap() {
   const payload = await fetchJson("/api/bootstrap");
+  state.bootstrap = payload;
   state.devices = mergeDevices(payload.known_devices || [], []);
-  state.replyAsDeviceId = payload.default_device_id || "web-console";
-  renderDevices();
+  renderDevices({ force: true });
+  els.deployRepo.textContent = payload.hf_space_repo || "—";
+  els.deployBridge.textContent = payload.bridge_configured ? "configured" : "missing";
+  els.deployAvailability.textContent = payload.deploy_available ? "available" : "disabled";
   if (!payload.bridge_configured) {
     setStatus("offline", "Bridge missing");
     els.composerStatus.textContent = "Configure WEARABLLM_BRIDGE_URL in firmware sdkconfig.";
   }
 }
 
-els.replyAs.addEventListener("change", () => {
-  state.replyAsDeviceId = els.replyAs.value;
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => setView(tab.dataset.view || "chat"));
+});
+document.querySelectorAll("[data-open-settings]").forEach((control) => {
+  control.addEventListener("click", openSettings);
+});
+els.settingsClose?.addEventListener("click", closeSettings);
+
+els.configForm?.addEventListener("submit", saveAgentConfig);
+els.configReload?.addEventListener("click", () => loadAgentConfig());
+els.catalogRefresh?.addEventListener("click", () => loadModelCatalog());
+els.apiKeySave?.addEventListener("click", saveApiKey);
+els.cfgTtsModel?.addEventListener("change", () => {
+  const voices = voicesForTtsModel(els.cfgTtsModel.value);
+  const selected = voices.includes(els.cfgTtsVoice.value) ? els.cfgTtsVoice.value : voices[0] || "";
+  fillSelect(els.cfgTtsVoice, voices, selected);
+});
+els.deployDry?.addEventListener("click", () => runDeploy({ dryRun: true }));
+els.deployLive?.addEventListener("click", () => runDeploy({ dryRun: false }));
+
+els.deliverWaveshare.addEventListener("change", () => {
+  state.deliverToWaveshare = els.deliverWaveshare.checked;
+  els.send.textContent = state.deliverToWaveshare ? "Send + play" : "Send";
+  els.composerHint.textContent = state.deliverToWaveshare
+    ? "The shared reply will also be queued for Waveshare display and speech."
+    : "The conversation is shared with Android and this dashboard automatically.";
+});
+
+els.replyInput.addEventListener("focus", () => {
+  state.pausePolling = true;
+});
+els.replyInput.addEventListener("blur", () => {
+  state.pausePolling = false;
+  refreshConversation();
+});
+els.replyInput.addEventListener("input", () => {
+  // Keep polling paused while the user is composing.
+  state.pausePolling = true;
 });
 
 els.replyForm.addEventListener("submit", async (event) => {
@@ -259,49 +801,68 @@ els.replyForm.addEventListener("submit", async (event) => {
   if (!transcript) return;
 
   state.sending = true;
+  state.thinking = true;
+  state.pausePolling = true;
   els.send.disabled = true;
-  els.composerStatus.textContent = "Thinking…";
+  const optimisticTurn = {
+    id: `optimistic-${Date.now()}`,
+    device_id: "web-console",
+    role: "user",
+    content: transcript,
+    created_at: new Date().toISOString(),
+  };
+  state.turns = [...state.turns, optimisticTurn];
+  els.replyInput.value = "";
+  renderThread({ force: true });
+  els.composerStatus.textContent = "";
   try {
     const payload = await fetchJson("/api/reply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         transcript,
-        device_id: state.replyAsDeviceId || "web-console",
+        device_id: "web-console",
+        target_device_id: state.deliverToWaveshare ? "wearabllm-esp32" : "",
+        idempotency_key: state.deliverToWaveshare ? `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` : "",
       }),
     });
-    els.replyInput.value = "";
-    els.composerStatus.textContent = payload.command
-      ? `Got ${payload.command}`
-      : "Reply sent";
-    await refreshConversation();
+    state.latestActionId = payload.action?.id || "";
+    if (payload.action) renderActionDelivery(payload.action);
+    else els.composerStatus.textContent = payload.command ? `Got ${payload.command}` : "Reply sent";
+    state.thinking = false;
+    await refreshConversation({ forceRender: true });
   } catch (error) {
     console.error(error);
     els.composerStatus.textContent = error.message || "Send failed";
     setStatus("offline", "Send failed");
+    state.thinking = false;
+    await refreshConversation({ forceRender: true });
   } finally {
     state.sending = false;
+    state.pausePolling = document.activeElement === els.replyInput;
     els.send.disabled = false;
+    els.replyInput.focus();
   }
 });
 
-els.refresh.addEventListener("click", () => {
-  refreshConversation();
-  refreshEvents();
-});
-
-els.resetSession.addEventListener("click", async () => {
-  if (!window.confirm("Archive the active shared session and start fresh? Durable memories are kept.")) {
-    return;
-  }
+els.newConversation.addEventListener("click", async () => {
+  els.newConversation.disabled = true;
   try {
-    await fetchJson("/api/session/reset", { method: "POST" });
-    els.composerStatus.textContent = "Session archived";
-    await refreshConversation();
+    const payload = await fetchJson("/api/session/reset", { method: "POST" });
+    state.selectedSessionId = payload.active_session_id || "";
+    state.turnsSignature = "";
+    state.sessionsSignature = "";
+    els.composerStatus.textContent = "New conversation started";
+    await refreshConversation({ forceRender: true });
+    els.replyInput.focus();
   } catch (error) {
-    els.composerStatus.textContent = error.message || "Reset failed";
+    els.composerStatus.textContent = error.message || "Could not start a new conversation";
+  } finally {
+    els.newConversation.disabled = false;
   }
 });
+
+els.archiveToggle.addEventListener("click", toggleArchiveView);
 
 els.replyInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -311,22 +872,29 @@ els.replyInput.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
+  if (!document.hidden && !state.pausePolling) {
     refreshConversation();
-    refreshEvents();
   }
+  if (!document.hidden) refreshLatestAction();
 });
 
 bootstrap()
-  .then(() => Promise.all([refreshConversation(), refreshEvents()]))
+  .then(async () => {
+    await sendHeartbeat();
+    await refreshConversation({ forceRender: true });
+  })
   .catch((error) => {
     console.error(error);
     setStatus("offline", "Boot failed");
   });
 
 setInterval(() => {
-  if (!document.hidden) {
-    refreshConversation();
-    refreshEvents();
-  }
-}, 2500);
+  if (document.hidden) return;
+  refreshLatestAction();
+  if (state.pausePolling) return;
+  refreshConversation();
+}, 4000);
+
+setInterval(() => {
+  if (!document.hidden) sendHeartbeat();
+}, 8000);

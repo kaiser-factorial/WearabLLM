@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 from durable_memory import (
     DurableMemoryStore,
+    LocalConversationStore,
     MemDatabaseStore,
     SupabaseConversationStore,
     SupabaseMemoryStore,
@@ -127,6 +128,51 @@ class SupabaseMemoryStoreTest(unittest.TestCase):
             ["The user prefers green tea in the morning."],
         )
 
+
+class LocalConversationStoreTest(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp_dir.name) / "conversations.json"
+        self.store = LocalConversationStore(self.path, principal_id="corina")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_sessions_turns_and_archive_survive_reload(self):
+        session = self.store.create_session()
+        self.store.append(session["id"], "wearabllm-android", "user", "Hello Sphere.")
+        self.store.append(session["id"], "wearabllm-android", "assistant", "Hello back.")
+        self.assertEqual(len(self.store.turns(session["id"])), 2)
+        self.assertEqual(self.store.clear(), 2)
+
+        reloaded = LocalConversationStore(self.path, principal_id="corina")
+        self.assertIsNone(reloaded.active_session())
+        self.assertEqual(len(reloaded.list_sessions()), 1)
+        self.assertEqual(
+            [turn["content"] for turn in reloaded.turns(session["id"])],
+            ["Hello Sphere.", "Hello back."],
+        )
+
+    def test_new_session_is_independent_from_archive(self):
+        first = self.store.create_session()
+        self.store.append(first["id"], "web-console", "user", "First thread.")
+        self.store.clear()
+        second = self.store.create_session()
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(self.store.turns(second["id"]), [])
+        self.assertEqual(len(self.store.list_sessions()), 2)
+
+    def test_rename_and_archive_are_persistent_and_archive_is_idempotent(self):
+        session = self.store.create_session()
+        renamed = self.store.rename(session["id"], "Dinner plans")
+        self.assertEqual(renamed["title"], "Dinner plans")
+        self.store.append(session["id"], "web-console", "user", "What time is dinner?")
+        current = self.store.list_sessions()[0]
+        self.assertEqual(self.store.archive(current), 1)
+        archived = self.store.list_sessions()[0]
+        self.assertTrue(archived["archived_at"])
+        self.assertEqual(archived["title"], "Dinner plans")
+        self.assertEqual(self.store.archive(archived), 0)
 
 class SupabaseConversationStoreTest(unittest.TestCase):
     def setUp(self):

@@ -17,7 +17,7 @@ Usage: ./scripts/firmware_variant_build.sh [variant ...]
 Variants:
   default        Build the normal local firmware/sdkconfig.
   led-self-test  Compile with RGB ring self-test enabled.
-  display        Compile with optional ST7735 TFT enabled.
+  display        Compile with optional ST7789 TFT200C enabled.
   display-test   Compile with TFT enabled plus boot wiring self-test.
   audio-out      Compile with optional ES8311 speaker output enabled.
   tts            Compile with speaker output plus bridge TTS WAV playback enabled.

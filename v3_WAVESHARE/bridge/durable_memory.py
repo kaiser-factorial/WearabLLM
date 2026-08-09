@@ -20,6 +20,7 @@ from typing import Any
 
 
 DEFAULT_MEMORY_FILE = Path.home() / ".wearabllm" / "memory.json"
+DEFAULT_CONVERSATION_FILE = Path.home() / ".wearabllm" / "conversations.json"
 DEFAULT_MEM_ROOT = Path.home() / "Projects" / "MEMORY"
 WORD_RE = re.compile(r"[a-z0-9']+")
 SENSITIVE_RE = re.compile(
@@ -435,6 +436,216 @@ class SupabaseMemoryStore:
         return len(records)
 
 
+class LocalConversationStore:
+    """Private JSON conversation store used when Supabase is not configured."""
+
+    def __init__(
+        self,
+        path: str | Path = DEFAULT_CONVERSATION_FILE,
+        *,
+        principal_id: str = "primary",
+        session_idle_seconds: int = 3600,
+    ) -> None:
+        self.path = Path(path).expanduser()
+        self.principal_id = principal_id.strip() or "primary"
+        self.session_idle_seconds = max(60, int(session_idle_seconds))
+        self.lock = threading.RLock()
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"version": 1, "next_turn_id": 1, "sessions": []}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"version": 1, "next_turn_id": 1, "sessions": []}
+        if not isinstance(payload, dict):
+            return {"version": 1, "next_turn_id": 1, "sessions": []}
+        payload.setdefault("version", 1)
+        payload.setdefault("next_turn_id", 1)
+        payload["sessions"] = [
+            item for item in payload.get("sessions", []) if isinstance(item, dict)
+        ]
+        return payload
+
+    def _save(self, payload: dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        body = json.dumps(payload, indent=2) + "\n"
+        fd, temp_name = tempfile.mkstemp(
+            prefix="conversations-", suffix=".json", dir=self.path.parent
+        )
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+                temp_file.write(body)
+            os.replace(temp_name, self.path)
+            os.chmod(self.path, 0o600)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    def active_session(self) -> dict[str, Any] | None:
+        with self.lock:
+            sessions = [
+                item
+                for item in self._load()["sessions"]
+                if item.get("principal_id") == self.principal_id and not item.get("ended_at")
+            ]
+            if not sessions:
+                return None
+            return dict(max(sessions, key=lambda item: str(item.get("started_at", ""))))
+
+    def session_expired(self, session: dict[str, Any]) -> bool:
+        raw = str(session.get("last_turn_at") or session.get("started_at") or "")
+        try:
+            last_turn_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return datetime.now(timezone.utc) - last_turn_at > timedelta(seconds=self.session_idle_seconds)
+
+    def create_session(self) -> dict[str, Any]:
+        with self.lock:
+            payload = self._load()
+            now = self._now()
+            session = {
+                "id": str(uuid.uuid4()),
+                "principal_id": self.principal_id,
+                "started_at": now,
+                "last_turn_at": now,
+                "ended_at": None,
+                "archived_at": None,
+                "summary": None,
+                "title": None,
+                "turns": [],
+            }
+            payload["sessions"].append(session)
+            self._save(payload)
+            return {key: value for key, value in session.items() if key != "turns"}
+
+    def history(self, session_id: str, limit: int) -> list[dict[str, str]]:
+        records = self.turns(session_id)
+        return [
+            {"role": str(record["role"]), "content": str(record["content"])}
+            for record in records[-max(0, int(limit)) :]
+            if record.get("role") in ("user", "assistant")
+            and str(record.get("content", "")).strip()
+        ]
+
+    def turns(self, session_id: str) -> list[dict[str, Any]]:
+        with self.lock:
+            session = next(
+                (item for item in self._load()["sessions"] if str(item.get("id")) == session_id),
+                None,
+            )
+            if not session:
+                return []
+            return [dict(record) for record in session.get("turns", []) if isinstance(record, dict)]
+
+    def append(self, session_id: str, device_id: str, role: str, content: str) -> None:
+        normalized_device_id = " ".join(device_id.split()).strip()
+        normalized_content = " ".join(content.split()).strip()
+        if role not in ("user", "assistant"):
+            raise ValueError("Conversation role must be user or assistant")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", normalized_device_id):
+            raise ValueError("Conversation device ID is invalid")
+        if not normalized_content:
+            raise ValueError("Conversation content is required")
+        with self.lock:
+            payload = self._load()
+            session = next(
+                (item for item in payload["sessions"] if str(item.get("id")) == session_id),
+                None,
+            )
+            if not session:
+                raise ValueError("Conversation session does not exist")
+            now = self._now()
+            record = {
+                "id": int(payload.get("next_turn_id", 1)),
+                "device_id": normalized_device_id,
+                "role": role,
+                "content": normalized_content,
+                "created_at": now,
+            }
+            payload["next_turn_id"] = record["id"] + 1
+            session.setdefault("turns", []).append(record)
+            session["last_turn_at"] = now
+            self._save(payload)
+
+    def archive(self, session: dict[str, Any], summary: str | None = None) -> int:
+        session_id = str(session.get("id", "")).strip()
+        if not session_id:
+            raise ValueError("Conversation session is missing an ID")
+        if session.get("archived_at"):
+            return 0
+        with self.lock:
+            payload = self._load()
+            stored = next(
+                (item for item in payload["sessions"] if str(item.get("id")) == session_id),
+                None,
+            )
+            if not stored:
+                return 0
+            now = self._now()
+            stored["ended_at"] = now
+            stored["archived_at"] = now
+            stored["summary"] = summary or None
+            count = len(stored.get("turns", []))
+            self._save(payload)
+            return count
+
+    def clear(self) -> int:
+        session = self.active_session()
+        return self.archive(session) if session else 0
+
+    def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self.lock:
+            sessions = [
+                {key: value for key, value in item.items() if key != "turns"}
+                for item in self._load()["sessions"]
+                if item.get("principal_id") == self.principal_id
+            ]
+        sessions.sort(key=lambda item: str(item.get("last_turn_at", "")), reverse=True)
+        return sessions[:limit]
+
+    def rename(self, session_id: str, title: str) -> dict[str, Any]:
+        clean_title = " ".join(title.split()).strip()
+        if not (1 <= len(clean_title) <= 120):
+            raise ValueError("Conversation title must be 1..120 characters")
+        with self.lock:
+            payload = self._load()
+            session = next(
+                (
+                    item
+                    for item in payload["sessions"]
+                    if str(item.get("id")) == session_id
+                    and item.get("principal_id") == self.principal_id
+                ),
+                None,
+            )
+            if not session:
+                raise LookupError("Conversation session not found")
+            session["title"] = clean_title
+            self._save(payload)
+            return {key: value for key, value in session.items() if key != "turns"}
+
+    def list_device_ids(self, session_id: str | None = None) -> list[str]:
+        target = session_id
+        if not target:
+            active = self.active_session()
+            target = str(active.get("id", "")) if active else ""
+        return sorted(
+            {
+                str(record.get("device_id", "")).strip()
+                for record in self.turns(target or "")
+                if str(record.get("device_id", "")).strip()
+            }
+        )
+
+
 class SupabaseConversationStore:
     """Shared active sessions plus private long-term raw conversation archive."""
 
@@ -510,7 +721,7 @@ class SupabaseConversationStore:
             "GET",
             "/rest/v1/wearabllm_conversation_sessions"
             f"?principal_id=eq.{principal}&ended_at=is.null"
-            "&select=id,started_at,last_turn_at&order=started_at.desc&limit=1",
+            "&select=id,started_at,last_turn_at,title&order=started_at.desc&limit=1",
         )
         return payload[0] if isinstance(payload, list) and payload and isinstance(payload[0], dict) else None
 
@@ -560,7 +771,21 @@ class SupabaseConversationStore:
             f"?session_id=eq.{encoded_session_id}&select=id,device_id,role,content,created_at"
             "&order=created_at.asc,id.asc&limit=10000",
         )
-        return [record for record in payload or [] if isinstance(record, dict)]
+        records = [record for record in payload or [] if isinstance(record, dict)]
+        if records:
+            return records
+        payload = self._request(
+            "GET",
+            "/rest/v1/wearabllm_conversation_archive"
+            f"?session_id=eq.{encoded_session_id}"
+            "&select=original_turn_id,device_id,role,content,created_at"
+            "&order=created_at.asc,id.asc&limit=10000",
+        )
+        return [
+            {**record, "id": record.get("original_turn_id")}
+            for record in payload or []
+            if isinstance(record, dict)
+        ]
 
     def append(self, session_id: str, device_id: str, role: str, content: str) -> None:
         normalized_device_id = " ".join(device_id.split()).strip()
@@ -594,6 +819,8 @@ class SupabaseConversationStore:
         session_id = str(session.get("id", "")).strip()
         if not session_id:
             raise ValueError("Conversation session is missing an ID")
+        if session.get("archived_at"):
+            return 0
         records = self.turns(session_id)
         if records:
             archive_records = [
@@ -630,10 +857,26 @@ class SupabaseConversationStore:
             "GET",
             "/rest/v1/wearabllm_conversation_sessions"
             f"?principal_id=eq.{principal}"
-            "&select=id,started_at,last_turn_at,ended_at,archived_at,summary"
+            "&select=id,started_at,last_turn_at,ended_at,archived_at,summary,title"
             f"&order=last_turn_at.desc.nullslast&limit={limit}",
         )
         return [record for record in payload or [] if isinstance(record, dict)]
+
+    def rename(self, session_id: str, title: str) -> dict[str, Any]:
+        clean_title = " ".join(title.split()).strip()
+        if not (1 <= len(clean_title) <= 120):
+            raise ValueError("Conversation title must be 1..120 characters")
+        encoded_session_id = urllib.parse.quote(session_id, safe="")
+        principal = urllib.parse.quote(self.principal_id, safe="")
+        payload = self._request(
+            "PATCH",
+            "/rest/v1/wearabllm_conversation_sessions"
+            f"?id=eq.{encoded_session_id}&principal_id=eq.{principal}",
+            {"title": clean_title},
+        )
+        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+            raise LookupError("Conversation session not found")
+        return payload[0]
 
     def list_device_ids(self, session_id: str | None = None) -> list[str]:
         target_session_id = session_id

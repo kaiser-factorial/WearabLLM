@@ -32,7 +32,13 @@ def staged_space(destination: Path) -> list[Path]:
     shutil.copy2(SPACE_DIR / "README.md", destination / "README.md")
     bridge_destination = destination / "bridge"
     bridge_destination.mkdir()
-    files = ["durable_memory.py", "wearabllm_bridge.py", "requirements.txt"]
+    files = [
+        "action_queue.py",
+        "agent_config.py",
+        "durable_memory.py",
+        "wearabllm_bridge.py",
+        "requirements.txt",
+    ]
     for name in files:
         shutil.copy2(BRIDGE_DIR / name, bridge_destination / name)
     return [destination / "Dockerfile", destination / "README.md", *(bridge_destination / name for name in files)]

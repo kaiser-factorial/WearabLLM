@@ -16,6 +16,7 @@ phone-app/ios/Pods/
 phone-app/ios/build/
 **/ios/Pods/
 **/ios/build/
+v3_WAVESHARE/app/android/
 *.xcworkspace
 !phone-app/ios/ClaudeWearable.xcworkspace
 
@@ -64,6 +65,7 @@ secrets/
 # Build
 *.orig.*
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key

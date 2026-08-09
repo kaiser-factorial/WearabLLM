@@ -6,6 +6,8 @@ COPY bridge/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bridge/durable_memory.py ./durable_memory.py
+COPY bridge/action_queue.py ./action_queue.py
+COPY bridge/agent_config.py ./agent_config.py
 COPY bridge/wearabllm_bridge.py ./wearabllm_bridge.py
 
 ENV PYTHONUNBUFFERED=1 \
@@ -13,13 +15,15 @@ ENV PYTHONUNBUFFERED=1 \
     WEARABLLM_DURABLE_MEMORY=1 \
     WEARABLLM_MEMORY_BACKEND=supabase \
     WEARABLLM_CONVERSATION_BACKEND=supabase \
+    WEARABLLM_ACTION_BACKEND=supabase \
     WEARABLLM_SESSION_IDLE_SECONDS=3600 \
-    WEARABLLM_PROVIDER=openrouter \
-    WEARABLLM_STT=openrouter \
-    WEARABLLM_LLM_MODEL=openai/gpt-5.2 \
-    WEARABLLM_STT_MODEL=openai/whisper-large-v3 \
-    WEARABLLM_TTS_MODEL=openai/gpt-4o-mini-tts-2025-12-15 \
-    WEARABLLM_TTS_VOICE=nova
+    WEARABLLM_PROVIDER=openai \
+    WEARABLLM_STT=openai \
+    WEARABLLM_LLM_MODEL=gpt-5.4-mini \
+    WEARABLLM_STT_MODEL=gpt-4o-mini-transcribe \
+    WEARABLLM_TTS_MODEL=gpt-4o-mini-tts \
+    WEARABLLM_TTS_VOICE=marin \
+    WEARABLLM_MAX_OUTPUT_TOKENS=1024
 
 EXPOSE 7860
 

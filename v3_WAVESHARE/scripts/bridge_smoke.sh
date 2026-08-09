@@ -20,6 +20,7 @@ print(f"http://127.0.0.1:{port}")
 BASE_URL="${1:-${WEARABLLM_BRIDGE_BASE_URL:-${CONFIGURED_BASE_URL}}}"
 BASE_URL="${BASE_URL%/}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wearabllm-bridge-smoke.XXXXXX")"
+QUEUE_IDEMPOTENCY_KEY="bridge-smoke-queue-$(date +%s)-$$"
 
 cleanup() {
     rm -rf "${TMP_DIR}"
@@ -159,6 +160,63 @@ assert payload.get("transcript") == "bridge smoke test", payload
 assert payload.get("audio_bytes") == 0, payload
 assert payload.get("wav_info") is None, payload
 print("query_text ok:", payload["command"], payload["reply"][:80])
+PY
+
+curl -fsS \
+    -H "Content-Type: application/json" \
+    -d "{\"transcript\":\"queue smoke test\",\"origin_device_id\":\"wearabllm-smoke\",\"target_device_id\":\"wearabllm-esp32\",\"idempotency_key\":\"${QUEUE_IDEMPOTENCY_KEY}\"}" \
+    "${BASE_URL}/v1/interactions" \
+    -o "${TMP_DIR}/interaction.json"
+ACTION_ID="$(python3 - "${TMP_DIR}/interaction.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+action = payload.get("action")
+assert isinstance(action, dict), payload
+assert action.get("target_device_id") == "wearabllm-esp32", action
+assert action.get("status") == "queued", action
+assert isinstance(action.get("id"), str) and action["id"], action
+print(action["id"])
+PY
+)"
+
+curl -fsS \
+    -H "X-WearabLLM-Device-Id: wearabllm-esp32" \
+    "${BASE_URL}/v1/devices/wearabllm-esp32/actions" \
+    -o "${TMP_DIR}/claimed_action.json"
+python3 - "${TMP_DIR}/claimed_action.json" "${ACTION_ID}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+action = payload.get("action")
+assert isinstance(action, dict), payload
+assert action.get("id") == sys.argv[2], action
+assert action.get("status") == "dispatched", action
+assert isinstance(action.get("reply"), str) and action["reply"], action
+print("queued interaction claimed:", action["id"])
+PY
+
+curl -fsS \
+    -H "Content-Type: application/json" \
+    -H "X-WearabLLM-Device-Id: wearabllm-esp32" \
+    -d '{"status":"played"}' \
+    "${BASE_URL}/v1/devices/wearabllm-esp32/actions/${ACTION_ID}/ack" \
+    -o "${TMP_DIR}/acknowledged_action.json"
+python3 - "${TMP_DIR}/acknowledged_action.json" "${ACTION_ID}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+action = payload.get("action")
+assert isinstance(action, dict), payload
+assert action.get("id") == sys.argv[2], action
+assert action.get("status") == "played", action
+print("queued interaction acknowledged:", action["status"])
 PY
 
 curl -fsS \

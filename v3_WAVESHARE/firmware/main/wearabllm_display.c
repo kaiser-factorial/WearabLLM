@@ -11,8 +11,11 @@
 #include "esp_check.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_st7789.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
@@ -20,29 +23,27 @@ static const char *TAG = "wearabllm_display";
 
 #if CONFIG_WEARABLLM_DISPLAY_ENABLED
 
+// TFT200C V1.3: native 240x320 ST7789, presented as a 320x240 landscape UI.
 #define LCD_HOST SPI2_HOST
-#define LCD_CMD_SWRESET 0x01
-#define LCD_CMD_SLPOUT 0x11
-#define LCD_CMD_NORON 0x13
-#define LCD_CMD_INVOFF 0x20
-#define LCD_CMD_INVON 0x21
-#define LCD_CMD_DISPON 0x29
-#define LCD_CMD_CASET 0x2A
-#define LCD_CMD_RASET 0x2B
-#define LCD_CMD_RAMWR 0x2C
-#define LCD_CMD_MADCTL 0x36
-#define LCD_CMD_COLMOD 0x3A
+#define LCD_FILL_ROWS 8
+#define LCD_CHAR_MAX_SCALE 3
+#define LCD_DRAW_TIMEOUT_MS 2000
 
-#define COLOR_BG 0x0000
-#define COLOR_PANEL 0x18E3
+#define COLOR_BG 0x0861
 #define COLOR_TEXT 0xFFFF
+#define COLOR_DARK_TEXT 0x0000
 #define COLOR_MUTED 0xBDF7
-#define COLOR_LISTENING 0xFFFF
+#define COLOR_LISTENING 0x069F
+#define COLOR_SENDING 0x781F
 #define COLOR_THINKING 0xFD20
 #define COLOR_ERROR 0xF800
+#define COLOR_ERROR_BG 0xFFFF
 
 static esp_lcd_panel_io_handle_t s_lcd_io;
-static uint16_t s_line_buf[CONFIG_WEARABLLM_TFT_WIDTH];
+static esp_lcd_panel_handle_t s_lcd_panel;
+static SemaphoreHandle_t s_color_done;
+static uint16_t s_fill_buf[CONFIG_WEARABLLM_TFT_WIDTH * LCD_FILL_ROWS];
+static uint16_t s_char_buf[6 * LCD_CHAR_MAX_SCALE * 8 * LCD_CHAR_MAX_SCALE];
 static bool s_ready;
 
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
@@ -70,22 +71,27 @@ static uint16_t color_for_command(const char *command)
     return rgb565(0, 75, 190);
 }
 
-static esp_err_t lcd_cmd(uint8_t cmd, const void *data, size_t len)
+static bool lcd_color_done_cb(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
-    return esp_lcd_panel_io_tx_param(s_lcd_io, cmd, data, len);
+    (void)panel_io;
+    (void)edata;
+    (void)user_ctx;
+    BaseType_t high_task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_color_done, &high_task_woken);
+    return high_task_woken == pdTRUE;
 }
 
-static esp_err_t lcd_set_window(int x0, int y0, int x1, int y1)
+static esp_err_t lcd_draw_bitmap_sync(int x0, int y0, int x1, int y1, const uint16_t *pixels)
 {
-    uint16_t xs = x0 + CONFIG_WEARABLLM_TFT_X_OFFSET;
-    uint16_t xe = x1 + CONFIG_WEARABLLM_TFT_X_OFFSET;
-    uint16_t ys = y0 + CONFIG_WEARABLLM_TFT_Y_OFFSET;
-    uint16_t ye = y1 + CONFIG_WEARABLLM_TFT_Y_OFFSET;
-    uint8_t cols[] = {xs >> 8, xs & 0xFF, xe >> 8, xe & 0xFF};
-    uint8_t rows[] = {ys >> 8, ys & 0xFF, ye >> 8, ye & 0xFF};
-
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_CASET, cols, sizeof(cols)), TAG, "CASET failed");
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_RASET, rows, sizeof(rows)), TAG, "RASET failed");
+    while (xSemaphoreTake(s_color_done, 0) == pdTRUE) {
+    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(s_lcd_panel, x0, y0, x1, y1, pixels), TAG,
+                        "draw bitmap failed");
+    if (xSemaphoreTake(s_color_done, pdMS_TO_TICKS(LCD_DRAW_TIMEOUT_MS)) != pdTRUE) {
+        s_ready = false;
+        ESP_LOGE(TAG, "display transfer timed out; disabling further screen writes");
+        return ESP_ERR_TIMEOUT;
+    }
     return ESP_OK;
 }
 
@@ -112,15 +118,18 @@ static esp_err_t lcd_fill_rect(int x, int y, int w, int h, uint16_t color)
         return ESP_OK;
     }
 
-    ESP_RETURN_ON_ERROR(lcd_set_window(x, y, x + w - 1, y + h - 1), TAG, "set window failed");
-
-    for (int i = 0; i < w; i++) {
-        s_line_buf[i] = __builtin_bswap16(color);
-    }
-
-    for (int row = 0; row < h; row++) {
-        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_color(s_lcd_io, row == 0 ? LCD_CMD_RAMWR : -1, s_line_buf, w * sizeof(uint16_t)),
-                            TAG, "fill row failed");
+    uint16_t wire_color = __builtin_bswap16(color);
+    for (int offset = 0; offset < h; offset += LCD_FILL_ROWS) {
+        int rows = h - offset;
+        if (rows > LCD_FILL_ROWS) {
+            rows = LCD_FILL_ROWS;
+        }
+        int pixel_count = w * rows;
+        for (int i = 0; i < pixel_count; i++) {
+            s_fill_buf[i] = wire_color;
+        }
+        ESP_RETURN_ON_ERROR(lcd_draw_bitmap_sync(x, y + offset, x + w, y + offset + rows, s_fill_buf), TAG,
+                            "fill chunk failed");
     }
     return ESP_OK;
 }
@@ -180,14 +189,30 @@ static const uint8_t *glyph5x7(char ch)
 
 static void lcd_draw_char(int x, int y, char ch, uint16_t fg, uint16_t bg, int scale)
 {
+    if (!s_ready || scale < 1 || scale > LCD_CHAR_MAX_SCALE) {
+        return;
+    }
+    int width = 6 * scale;
+    int height = 8 * scale;
+    if (x < 0 || y < 0 || x + width > CONFIG_WEARABLLM_TFT_WIDTH ||
+        y + height > CONFIG_WEARABLLM_TFT_HEIGHT) {
+        return;
+    }
+
     ch = (char)toupper((unsigned char)ch);
     const uint8_t *glyph = glyph5x7(ch);
-    for (int col = 0; col < 6; col++) {
-        uint8_t bits = col < 5 ? glyph[col] : 0;
-        for (int row = 0; row < 8; row++) {
-            uint16_t color = (bits & (1 << row)) ? fg : bg;
-            lcd_fill_rect(x + col * scale, y + row * scale, scale, scale, color);
+    uint16_t wire_fg = __builtin_bswap16(fg);
+    uint16_t wire_bg = __builtin_bswap16(bg);
+    for (int py = 0; py < height; py++) {
+        int glyph_row = py / scale;
+        for (int px = 0; px < width; px++) {
+            int glyph_col = px / scale;
+            bool set = glyph_col < 5 && (glyph[glyph_col] & (1U << glyph_row));
+            s_char_buf[py * width + px] = set ? wire_fg : wire_bg;
         }
+    }
+    if (lcd_draw_bitmap_sync(x, y, x + width, y + height, s_char_buf) != ESP_OK) {
+        ESP_LOGE(TAG, "glyph draw failed");
     }
 }
 
@@ -200,42 +225,84 @@ static int lcd_draw_wrapped_text(int x, int y, int max_w, int max_h, const char 
     int line_h = 9 * scale;
     int cx = x;
     int cy = y;
+    bool insert_space = false;
 
-    for (const char *p = text; *p && cy + line_h <= y + max_h; p++) {
-        char ch = *p;
-        if (ch == '\n' || cx + char_w > x + max_w) {
+    for (const char *p = text; *p && cy + line_h <= y + max_h;) {
+        if (*p == '\n') {
             cx = x;
             cy += line_h;
-            if (ch == '\n') {
-                continue;
-            }
+            p++;
+            insert_space = false;
+            continue;
         }
-        lcd_draw_char(cx, cy, ch, fg, bg, scale);
-        cx += char_w;
+        while (*p == ' ') {
+            insert_space = cx != x;
+            p++;
+        }
+        if (!*p || *p == '\n') continue;
+        const char *word = p;
+        while (*p && *p != ' ' && *p != '\n') p++;
+        int word_len = (int)(p - word);
+        int word_w = word_len * char_w;
+        int space_w = insert_space ? char_w : 0;
+        if (cx != x && cx + space_w + word_w > x + max_w) {
+            cx = x;
+            cy += line_h;
+            if (cy + line_h > y + max_h) break;
+        }
+        if (insert_space && cx != x) {
+            lcd_draw_char(cx, cy, ' ', fg, bg, scale);
+            cx += char_w;
+        }
+        for (int i = 0; i < word_len && cy + line_h <= y + max_h; i++) {
+            if (cx + char_w > x + max_w) {
+                cx = x;
+                cy += line_h;
+            }
+            if (cy + line_h > y + max_h) break;
+            lcd_draw_char(cx, cy, word[i], fg, bg, scale);
+            cx += char_w;
+        }
+        insert_space = false;
     }
     return cy + line_h;
-}
-
-static const char *state_name(wearabllm_display_state_t state)
-{
-    switch (state) {
-    case WEARABLLM_DISPLAY_IDLE: return "READY";
-    case WEARABLLM_DISPLAY_LISTENING: return "LISTENING";
-    case WEARABLLM_DISPLAY_THINKING: return "THINKING";
-    case WEARABLLM_DISPLAY_RESPONSE: return "RESPONSE";
-    case WEARABLLM_DISPLAY_ERROR: return "ERROR";
-    default: return "UNKNOWN";
-    }
 }
 
 static uint16_t state_color(wearabllm_display_state_t state)
 {
     switch (state) {
     case WEARABLLM_DISPLAY_LISTENING: return COLOR_LISTENING;
+    case WEARABLLM_DISPLAY_SENDING: return COLOR_SENDING;
     case WEARABLLM_DISPLAY_THINKING: return COLOR_THINKING;
     case WEARABLLM_DISPLAY_ERROR: return COLOR_ERROR;
     default: return rgb565(50, 120, 220);
     }
+}
+
+static esp_err_t lcd_apply_rotation(void)
+{
+    bool swap_xy = false;
+    bool mirror_x = false;
+    bool mirror_y = false;
+    switch (CONFIG_WEARABLLM_TFT_ROTATION) {
+    case 1:
+        swap_xy = true;
+        mirror_x = true;
+        break;
+    case 2:
+        mirror_x = true;
+        mirror_y = true;
+        break;
+    case 3:
+        swap_xy = true;
+        mirror_y = true;
+        break;
+    default:
+        break;
+    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_lcd_panel, swap_xy), TAG, "panel axis swap failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_lcd_panel, mirror_x, mirror_y), TAG, "panel mirror failed");
+    return ESP_OK;
 }
 
 static esp_err_t lcd_init_panel(void)
@@ -246,7 +313,7 @@ static esp_err_t lcd_init_panel(void)
         .sclk_io_num = CONFIG_WEARABLLM_TFT_SCLK_GPIO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = CONFIG_WEARABLLM_TFT_WIDTH * sizeof(uint16_t),
+        .max_transfer_sz = CONFIG_WEARABLLM_TFT_WIDTH * LCD_FILL_ROWS * sizeof(uint16_t),
     };
     ESP_RETURN_ON_ERROR(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO), TAG, "spi bus init failed");
 
@@ -258,37 +325,41 @@ static esp_err_t lcd_init_panel(void)
         .trans_queue_depth = 10,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
+        .on_color_trans_done = lcd_color_done_cb,
     };
+
+    s_color_done = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(s_color_done, ESP_ERR_NO_MEM, TAG, "display semaphore allocation failed");
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &s_lcd_io),
                         TAG, "panel io init failed");
 
     gpio_config_t out_conf = {
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << CONFIG_WEARABLLM_TFT_RST_GPIO) | (1ULL << CONFIG_WEARABLLM_TFT_BL_GPIO),
+        .pin_bit_mask = (1ULL << CONFIG_WEARABLLM_TFT_BL_GPIO),
     };
     ESP_RETURN_ON_ERROR(gpio_config(&out_conf), TAG, "display gpio config failed");
 
     gpio_set_level(CONFIG_WEARABLLM_TFT_BL_GPIO, 0);
-    gpio_set_level(CONFIG_WEARABLLM_TFT_RST_GPIO, 0);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    gpio_set_level(CONFIG_WEARABLLM_TFT_RST_GPIO, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
 
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_SWRESET, NULL, 0), TAG, "SWRESET failed");
-    vTaskDelay(pdMS_TO_TICKS(150));
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_SLPOUT, NULL, 0), TAG, "SLPOUT failed");
-    vTaskDelay(pdMS_TO_TICKS(150));
-    uint8_t color_mode = 0x05;
-    uint8_t madctl = 0x00;
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_COLMOD, &color_mode, 1), TAG, "COLMOD failed");
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_MADCTL, &madctl, 1), TAG, "MADCTL failed");
+    esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = CONFIG_WEARABLLM_TFT_RST_GPIO,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
+        .bits_per_pixel = 16,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(s_lcd_io, &panel_config, &s_lcd_panel), TAG,
+                        "ST7789 panel allocation failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_lcd_panel), TAG, "panel reset failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_lcd_panel), TAG, "panel init failed");
+    ESP_RETURN_ON_ERROR(lcd_apply_rotation(), TAG, "panel rotation failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_lcd_panel, CONFIG_WEARABLLM_TFT_X_OFFSET,
+                                              CONFIG_WEARABLLM_TFT_Y_OFFSET), TAG, "panel gap failed");
 #if CONFIG_WEARABLLM_TFT_INVERT_COLORS
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_INVON, NULL, 0), TAG, "INVON failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_lcd_panel, true), TAG, "color inversion failed");
 #else
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_INVOFF, NULL, 0), TAG, "INVOFF failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_lcd_panel, false), TAG, "color inversion failed");
 #endif
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_NORON, NULL, 0), TAG, "NORON failed");
-    ESP_RETURN_ON_ERROR(lcd_cmd(LCD_CMD_DISPON, NULL, 0), TAG, "DISPON failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_lcd_panel, true), TAG, "display enable failed");
     vTaskDelay(pdMS_TO_TICKS(100));
     gpio_set_level(CONFIG_WEARABLLM_TFT_BL_GPIO, 1);
     return ESP_OK;
@@ -310,16 +381,16 @@ static void lcd_run_self_test(void)
 
     char line[64];
     lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, CONFIG_WEARABLLM_TFT_HEIGHT, COLOR_BG);
-    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 24, rgb565(50, 120, 220));
-    lcd_draw_wrapped_text(6, 7, CONFIG_WEARABLLM_TFT_WIDTH - 12, 18, "TFT SELF TEST", COLOR_BG, rgb565(50, 120, 220), 1);
-    lcd_draw_wrapped_text(8, 34, CONFIG_WEARABLLM_TFT_WIDTH - 16, 18, "IF READABLE", COLOR_TEXT, COLOR_BG, 1);
-    lcd_draw_wrapped_text(8, 50, CONFIG_WEARABLLM_TFT_WIDTH - 16, 18, "SPI IS ALIVE", COLOR_TEXT, COLOR_BG, 1);
+    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 34, rgb565(50, 120, 220));
+    lcd_draw_wrapped_text(10, 8, CONFIG_WEARABLLM_TFT_WIDTH - 20, 18, "TFT SELF TEST", COLOR_BG, rgb565(50, 120, 220), 2);
+    lcd_draw_wrapped_text(10, 48, CONFIG_WEARABLLM_TFT_WIDTH - 20, 18, "IF READABLE", COLOR_TEXT, COLOR_BG, 2);
+    lcd_draw_wrapped_text(10, 78, CONFIG_WEARABLLM_TFT_WIDTH - 20, 18, "SPI IS ALIVE", COLOR_TEXT, COLOR_BG, 2);
     snprintf(line, sizeof(line), "SCLK %d MOSI %d", CONFIG_WEARABLLM_TFT_SCLK_GPIO, CONFIG_WEARABLLM_TFT_MOSI_GPIO);
-    lcd_draw_wrapped_text(8, 76, CONFIG_WEARABLLM_TFT_WIDTH - 16, 18, line, COLOR_MUTED, COLOR_BG, 1);
+    lcd_draw_wrapped_text(10, 120, CONFIG_WEARABLLM_TFT_WIDTH - 20, 18, line, COLOR_MUTED, COLOR_BG, 2);
     snprintf(line, sizeof(line), "CS %d DC %d", CONFIG_WEARABLLM_TFT_CS_GPIO, CONFIG_WEARABLLM_TFT_DC_GPIO);
-    lcd_draw_wrapped_text(8, 92, CONFIG_WEARABLLM_TFT_WIDTH - 16, 18, line, COLOR_MUTED, COLOR_BG, 1);
+    lcd_draw_wrapped_text(10, 150, CONFIG_WEARABLLM_TFT_WIDTH - 20, 18, line, COLOR_MUTED, COLOR_BG, 2);
     snprintf(line, sizeof(line), "RST %d BL %d", CONFIG_WEARABLLM_TFT_RST_GPIO, CONFIG_WEARABLLM_TFT_BL_GPIO);
-    lcd_draw_wrapped_text(8, 108, CONFIG_WEARABLLM_TFT_WIDTH - 16, 18, line, COLOR_MUTED, COLOR_BG, 1);
+    lcd_draw_wrapped_text(10, 180, CONFIG_WEARABLLM_TFT_WIDTH - 20, 18, line, COLOR_MUTED, COLOR_BG, 2);
     vTaskDelay(pdMS_TO_TICKS(1600));
 #endif
 }
@@ -329,7 +400,7 @@ static void lcd_run_self_test(void)
 esp_err_t wearabllm_display_init(void)
 {
 #if CONFIG_WEARABLLM_DISPLAY_ENABLED
-    ESP_LOGI(TAG, "initializing ST7735 display: %dx%d sclk=%d mosi=%d cs=%d dc=%d rst=%d bl=%d",
+    ESP_LOGI(TAG, "initializing ST7789 display: %dx%d sclk=%d mosi=%d cs=%d dc=%d rst=%d bl=%d",
              CONFIG_WEARABLLM_TFT_WIDTH,
              CONFIG_WEARABLLM_TFT_HEIGHT,
              CONFIG_WEARABLLM_TFT_SCLK_GPIO,
@@ -358,12 +429,32 @@ void wearabllm_display_show_state(wearabllm_display_state_t state)
     if (!s_ready) {
         return;
     }
-    uint16_t accent = state_color(state);
-    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, CONFIG_WEARABLLM_TFT_HEIGHT, COLOR_BG);
-    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 24, accent);
-    lcd_draw_wrapped_text(6, 7, CONFIG_WEARABLLM_TFT_WIDTH - 12, 18, state_name(state), COLOR_BG, accent, 1);
-    lcd_draw_wrapped_text(8, 42, CONFIG_WEARABLLM_TFT_WIDTH - 16, 48, "WEARABLLM", COLOR_TEXT, COLOR_BG, 2);
-    lcd_draw_wrapped_text(8, 102, CONFIG_WEARABLLM_TFT_WIDTH - 16, 40, "HOLD BUTTON TO ASK", COLOR_MUTED, COLOR_BG, 1);
+    uint16_t background = state_color(state);
+    uint16_t foreground = COLOR_DARK_TEXT;
+    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, CONFIG_WEARABLLM_TFT_HEIGHT, background);
+    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 10, COLOR_TEXT);
+
+    switch (state) {
+    case WEARABLLM_DISPLAY_LISTENING:
+        lcd_draw_wrapped_text(12, 30, 296, 20, "LISTENING", foreground, background, 2);
+        lcd_draw_wrapped_text(12, 96, 296, 20, "SPEAK NOW", foreground, background, 2);
+        lcd_draw_wrapped_text(12, 184, 296, 20, "RELEASE TO SEND", foreground, background, 2);
+        break;
+    case WEARABLLM_DISPLAY_SENDING:
+        lcd_draw_wrapped_text(12, 52, 296, 20, "SENDING", COLOR_TEXT, background, 2);
+        lcd_draw_wrapped_text(12, 136, 296, 20, "TO SPHERE", COLOR_TEXT, background, 2);
+        break;
+    case WEARABLLM_DISPLAY_THINKING:
+        lcd_draw_wrapped_text(12, 52, 296, 40, "SPHERE IS THINKING", foreground, background, 2);
+        lcd_draw_wrapped_text(12, 136, 296, 20, "PLEASE WAIT...", foreground, background, 2);
+        break;
+    case WEARABLLM_DISPLAY_IDLE:
+    default:
+        lcd_draw_wrapped_text(12, 30, 296, 20, "WEARABLLM SPHERE", COLOR_TEXT, background, 2);
+        lcd_draw_wrapped_text(12, 96, 296, 20, "READY", COLOR_TEXT, background, 2);
+        lcd_draw_wrapped_text(12, 184, 296, 20, "HOLD BUTTON TO ASK", COLOR_MUTED, background, 2);
+        break;
+    }
 #else
     (void)state;
 #endif
@@ -376,21 +467,14 @@ void wearabllm_display_show_response(const char *command, const char *transcript
         return;
     }
     uint16_t accent = color_for_command(command);
-    char title[24];
-    snprintf(title, sizeof(title), "RESPONSE %s", command ? command : "--");
-
     lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, CONFIG_WEARABLLM_TFT_HEIGHT, COLOR_BG);
-    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 24, accent);
-    lcd_draw_wrapped_text(6, 7, CONFIG_WEARABLLM_TFT_WIDTH - 12, 18, title, COLOR_BG, accent, 1);
-    lcd_fill_rect(6, 32, CONFIG_WEARABLLM_TFT_WIDTH - 12, 40, COLOR_PANEL);
-    lcd_draw_wrapped_text(12, 38, CONFIG_WEARABLLM_TFT_WIDTH - 24, 10, "HEARD", COLOR_MUTED, COLOR_PANEL, 1);
-    lcd_draw_wrapped_text(12, 52, CONFIG_WEARABLLM_TFT_WIDTH - 24, 14,
-                          transcript && transcript[0] ? transcript : "NO TRANSCRIPT", COLOR_TEXT, COLOR_PANEL, 1);
-
-    lcd_fill_rect(6, 78, CONFIG_WEARABLLM_TFT_WIDTH - 12, CONFIG_WEARABLLM_TFT_HEIGHT - 84, COLOR_PANEL);
-    lcd_draw_wrapped_text(12, 84, CONFIG_WEARABLLM_TFT_WIDTH - 24, 10, "REPLY", COLOR_MUTED, COLOR_PANEL, 1);
-    lcd_draw_wrapped_text(12, 98, CONFIG_WEARABLLM_TFT_WIDTH - 24, CONFIG_WEARABLLM_TFT_HEIGHT - 106,
-                          reply && reply[0] ? reply : "NO TEXT", COLOR_TEXT, COLOR_PANEL, 1);
+    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 10, accent);
+    lcd_draw_wrapped_text(106, 18, 108, 20, "ASSISTANT", COLOR_MUTED, COLOR_BG, 2);
+    lcd_draw_wrapped_text(10, 52, CONFIG_WEARABLLM_TFT_WIDTH - 20, 152,
+                          reply && reply[0] ? reply : "NO TEXT RESPONSE", COLOR_TEXT, COLOR_BG, 2);
+    (void)transcript;
+    lcd_draw_wrapped_text(106, 220, CONFIG_WEARABLLM_TFT_WIDTH - 116, 10,
+                          "HOLD TO ASK AGAIN", COLOR_MUTED, COLOR_BG, 1);
 #else
     (void)command;
     (void)transcript;
@@ -404,11 +488,13 @@ void wearabllm_display_show_error(const char *message)
     if (!s_ready) {
         return;
     }
-    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, CONFIG_WEARABLLM_TFT_HEIGHT, COLOR_BG);
-    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 24, COLOR_ERROR);
-    lcd_draw_wrapped_text(6, 7, CONFIG_WEARABLLM_TFT_WIDTH - 12, 18, "ERROR", COLOR_BG, COLOR_ERROR, 1);
-    lcd_draw_wrapped_text(10, 42, CONFIG_WEARABLLM_TFT_WIDTH - 20, CONFIG_WEARABLLM_TFT_HEIGHT - 50,
-                          message ? message : "UNKNOWN ERROR", COLOR_TEXT, COLOR_BG, 1);
+    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, CONFIG_WEARABLLM_TFT_HEIGHT, COLOR_ERROR_BG);
+    lcd_fill_rect(0, 0, CONFIG_WEARABLLM_TFT_WIDTH, 12, COLOR_ERROR);
+    lcd_draw_wrapped_text(12, 30, CONFIG_WEARABLLM_TFT_WIDTH - 24, 20, "ERROR", COLOR_DARK_TEXT, COLOR_ERROR_BG, 2);
+    lcd_draw_wrapped_text(12, 78, CONFIG_WEARABLLM_TFT_WIDTH - 24, 94,
+                          message ? message : "UNKNOWN ERROR", COLOR_DARK_TEXT, COLOR_ERROR_BG, 2);
+    lcd_draw_wrapped_text(12, 202, CONFIG_WEARABLLM_TFT_WIDTH - 24, 20,
+                          "CHECK WIFI OR BRIDGE", COLOR_DARK_TEXT, COLOR_ERROR_BG, 2);
 #else
     (void)message;
 #endif

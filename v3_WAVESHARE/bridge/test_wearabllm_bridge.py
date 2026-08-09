@@ -80,6 +80,15 @@ class ParseLLMResponseTest(unittest.TestCase):
 
 
 class BridgeStateTest(unittest.TestCase):
+    def test_device_presence_expires_after_heartbeat_ttl(self):
+        state = BridgeState.__new__(BridgeState)
+        state.device_presence = {}
+        state.device_presence_lock = threading.Lock()
+        with patch("wearabllm_bridge.time.monotonic", side_effect=[100.0, 110.0, 121.0]):
+            state.touch_device("web-console")
+            self.assertTrue(state._presence_for("web-console")[0])
+            self.assertFalse(state._presence_for("web-console")[0])
+
     def test_typed_transcript_bypasses_stt(self):
         state = BridgeState(
             Namespace(
@@ -166,6 +175,49 @@ class BridgeStateTest(unittest.TestCase):
         self.assertIsNone(payload["saved_wav"])
         self.assertIsNone(payload["wav_info"])
         self.assertIn("Dry run transcript", payload["reply"])
+
+    def test_response_body_is_recorded_separately_from_android_origin(self):
+        state = BridgeState(
+            Namespace(
+                provider="openai",
+                typed="",
+                stt="openai",
+                save_wav_dir="",
+                dry_run=True,
+                dry_run_command="BS",
+                dry_run_sequence="",
+                max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+            )
+        )
+        state.answer_transcript(
+            "Show this reply on the dashboard",
+            device_id="wearabllm-android",
+            response_device_id="web-console",
+        )
+        snapshot = state.conversation_snapshot()
+        self.assertEqual(
+            [turn["device_id"] for turn in snapshot["turns"]],
+            ["wearabllm-android", "web-console"],
+        )
+        self.assertNotIn("local-bridge", {body["id"] for body in snapshot["devices"]})
+
+    def test_legacy_local_bridge_history_is_exposed_as_web_console(self):
+        state = BridgeState(
+            Namespace(
+                provider="openai",
+                typed="",
+                stt="openai",
+                save_wav_dir="",
+                dry_run=True,
+                dry_run_command="BS",
+                dry_run_sequence="",
+                max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+            )
+        )
+        state.history = [{"role": "assistant", "content": "legacy", "device_id": "local-bridge"}]
+        snapshot = state.conversation_snapshot()
+        self.assertEqual(snapshot["turns"][0]["device_id"], "web-console")
+        self.assertNotIn("local-bridge", {body["id"] for body in snapshot["devices"]})
 
     def test_answer_transcript_can_include_wav_info(self):
         state = BridgeState(
@@ -273,9 +325,39 @@ class BridgeStateTest(unittest.TestCase):
         self.assertTrue(config["typed_bypass"])
         self.assertEqual(config["save_wav_dir"], "./captures")
         self.assertEqual(config["max_audio_bytes"], 123456)
+        self.assertEqual(config["max_output_tokens"], 512)
         self.assertEqual(config["capture_count"], 0)
         self.assertIsNone(config["latest_capture"])
         self.assertIn("firmware_config", config)
+
+    def test_openai_catalog_filters_live_models_for_the_picker(self):
+        state = BridgeState.__new__(BridgeState)
+        state.args = Namespace(provider="openai")
+        state.openai_client = SimpleNamespace(
+            models=SimpleNamespace(
+                list=Mock(
+                    return_value=SimpleNamespace(
+                        data=[
+                            SimpleNamespace(id="gpt-5.4-mini"),
+                            SimpleNamespace(id="gpt-4o-mini"),
+                            SimpleNamespace(id="gpt-4o-mini-tts"),
+                            SimpleNamespace(id="tts-1-hd"),
+                            SimpleNamespace(id="gpt-realtime-2"),
+                            SimpleNamespace(id="gpt-image-1"),
+                        ]
+                    )
+                )
+            )
+        )
+
+        catalog = state.openai_catalog()
+
+        self.assertEqual(catalog["source"], "live")
+        self.assertEqual(catalog["assistant_models"], ["gpt-4o-mini", "gpt-5.4-mini"])
+        self.assertEqual(catalog["tts_models"], ["gpt-4o-mini-tts", "tts-1-hd"])
+        self.assertIn("marin", catalog["tts_voices"])
+        self.assertIn("marin", catalog["tts_voices_by_model"]["gpt-4o-mini-tts"])
+        self.assertNotIn("marin", catalog["tts_voices_by_model"]["tts-1-hd"])
 
     def test_runtime_config_reports_latest_audio_capture(self):
         state = BridgeState(
@@ -602,6 +684,7 @@ class BridgeStateTest(unittest.TestCase):
 
         state.ask_llm("What is your name?")
         state.ask_llm("Do you remember?")
+        self.assertEqual(create.call_args_list[0].kwargs["max_output_tokens"], 512)
         second_input = create.call_args_list[1].kwargs["input"]
         self.assertEqual([message["role"] for message in second_input], ["user", "assistant", "user"])
         self.assertEqual(len(state.history), 2)
@@ -741,6 +824,12 @@ class BridgeStateTest(unittest.TestCase):
 
 
 class BridgeHandlerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
     def make_state(self, device_token: str = "") -> BridgeState:
         return BridgeState(
             Namespace(
@@ -758,6 +847,8 @@ class BridgeHandlerTest(unittest.TestCase):
                 dry_run_sequence="",
                 max_audio_bytes=96,
                 device_token=device_token,
+                action_queue_file=str(Path(self.temp_dir.name) / "actions.json"),
+                agent_config_file=str(Path(self.temp_dir.name) / "agent_config.json"),
             )
         )
 
@@ -862,6 +953,7 @@ class BridgeHandlerTest(unittest.TestCase):
         self.assertIn("devices", payload)
         device_ids = {item["id"] for item in payload["devices"]}
         self.assertIn("wearabllm-esp32", device_ids)
+        self.assertIn("wearabllm-android", device_ids)
         self.assertIn("web-console", device_ids)
         self.assertIn("wearabllm-wearable", device_ids)
 
@@ -874,7 +966,120 @@ class BridgeHandlerTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
-        self.assertGreaterEqual(len(payload["devices"]), 3)
+        self.assertGreaterEqual(len(payload["devices"]), 4)
+        devices = {item["id"]: item for item in payload["devices"]}
+        self.assertEqual(devices["wearabllm-esp32"]["label"], "Waveshare")
+        self.assertEqual(devices["wearabllm-android"]["label"], "Android")
+        self.assertNotIn("local-bridge", devices)
+
+    def test_invalid_response_device_id_returns_json_error(self):
+        status, payload = self.request(
+            "POST",
+            "/v1/query_text",
+            body=b'{"transcript":"hello","response_device_id":"not valid"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-WearabLLM-Device-Id": "wearabllm-android",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "Invalid device ID")
+
+    def test_targeted_interaction_is_claimed_and_acknowledged_by_board(self):
+        status, created = self.request(
+            "POST",
+            "/v1/interactions",
+            body=json.dumps(
+                {
+                    "transcript": "Tell the roomies dinner is ready.",
+                    "origin_device_id": "wearabllm-android",
+                    "target_device_id": "wearabllm-esp32",
+                    "idempotency_key": "phone-dinner-1",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        action = created["action"]
+        assert isinstance(action, dict)
+        self.assertEqual(action["status"], "queued")
+        action_id = str(action["id"])
+
+        status, claimed = self.request(
+            "GET",
+            "/v1/devices/wearabllm-esp32/actions",
+            headers={"X-WearabLLM-Device-Id": "wearabllm-esp32"},
+        )
+        self.assertEqual(status, 200)
+        claimed_action = claimed["action"]
+        assert isinstance(claimed_action, dict)
+        self.assertEqual(claimed_action["id"], action_id)
+        self.assertEqual(claimed_action["status"], "dispatched")
+
+        status, acknowledged = self.request(
+            "POST",
+            f"/v1/devices/wearabllm-esp32/actions/{action_id}/ack",
+            body=b'{"status":"played"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-WearabLLM-Device-Id": "wearabllm-esp32",
+            },
+        )
+        self.assertEqual(status, 200)
+        final_action = acknowledged["action"]
+        assert isinstance(final_action, dict)
+        self.assertEqual(final_action["status"], "played")
+
+    def test_interaction_requires_matching_board_identity_to_claim(self):
+        status, _created = self.request(
+            "POST",
+            "/v1/interactions",
+            body=b'{"transcript":"hello","origin_device_id":"wearabllm-android","target_device_id":"wearabllm-esp32"}',
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        status, payload = self.request(
+            "GET",
+            "/v1/devices/wearabllm-esp32/actions",
+            headers={"X-WearabLLM-Device-Id": "wearabllm-android"},
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("does not match", str(payload["error"]))
+
+
+class TargetedInteractionStateTest(unittest.TestCase):
+    def test_phone_prompt_creates_persistent_board_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = BridgeState(
+                Namespace(
+                    provider="openai",
+                    typed="",
+                    stt="openai",
+                    save_wav_dir="",
+                    dry_run=True,
+                    dry_run_command="GP",
+                    dry_run_sequence="",
+                    max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
+                    action_queue_file=str(Path(tmpdir) / "actions.json"),
+                    agent_config_file=str(Path(tmpdir) / "agent_config.json"),
+                )
+            )
+            created = state.create_interaction(
+                transcript="Tell the roomies that dinner is ready.",
+                origin_device_id="wearabllm-android",
+                target_device_id="wearabllm-esp32",
+                idempotency_key="dinner-ready-1",
+            )
+            action = created["action"]
+            self.assertTrue(created["action_created"])
+            self.assertEqual(action["command"], "GP")
+            self.assertEqual(action["status"], "queued")
+
+            claimed = state.action_queue.claim_next("wearabllm-esp32")
+            assert claimed is not None
+            self.assertEqual(claimed["id"], action["id"])
+            played = state.action_queue.acknowledge("wearabllm-esp32", str(action["id"]), "played")
+            self.assertEqual(played["status"], "played")
 
 
 class JsonBytesTest(unittest.TestCase):

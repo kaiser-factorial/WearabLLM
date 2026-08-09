@@ -9,7 +9,9 @@
 #include "cJSON.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -19,6 +21,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "led_strip.h"
 #include "nvs_flash.h"
@@ -31,8 +34,11 @@
 static const char *TAG = "wearabllm";
 
 #define WIFI_CONNECTED_BIT BIT0
-#define HTTP_RESPONSE_MAX 1024
-#define TTS_JSON_MAX 384
+#define QUERY_RESPONSE_MAX 1024
+#define ACTION_RESPONSE_MAX (64 * 1024)
+#define TTS_CHUNK_TEXT_MAX 160
+#define ACTION_URL_MAX 384
+#define ACTION_ID_MAX 37
 
 #ifndef CONFIG_WEARABLLM_LED_SELF_TEST_ON_BOOT
 #define CONFIG_WEARABLLM_LED_SELF_TEST_ON_BOOT 0
@@ -48,6 +54,14 @@ static const char *TAG = "wearabllm";
 
 #ifndef CONFIG_WEARABLLM_PTT_DEBOUNCE_MS
 #define CONFIG_WEARABLLM_PTT_DEBOUNCE_MS 35
+#endif
+
+#ifndef CONFIG_WEARABLLM_REMOTE_ACTIONS_ENABLED
+#define CONFIG_WEARABLLM_REMOTE_ACTIONS_ENABLED 0
+#endif
+
+#ifndef CONFIG_WEARABLLM_ACTION_POLL_INTERVAL_MS
+#define CONFIG_WEARABLLM_ACTION_POLL_INTERVAL_MS 2000
 #endif
 
 typedef struct {
@@ -82,6 +96,16 @@ typedef struct {
     int capacity;
     bool overflow;
 } http_binary_response_t;
+
+#if CONFIG_WEARABLLM_REMOTE_ACTIONS_ENABLED
+typedef struct {
+    char text[TTS_CHUNK_TEXT_MAX + 1];
+    uint8_t *wav;
+    size_t wav_len;
+    esp_err_t result;
+    SemaphoreHandle_t done;
+} tts_prefetch_job_t;
+#endif
 #endif
 
 static EventGroupHandle_t s_wifi_events;
@@ -91,6 +115,8 @@ static const esp_wn_iface_t *s_wakenet;
 static model_iface_data_t *s_wakenet_data;
 static int16_t *s_wakenet_samples;
 static int s_wakenet_chunk_frames;
+static SemaphoreHandle_t s_response_lock;
+static bool s_response_active;
 
 static const rgb_t COLOR_IDLE = {0, 0, 36};
 static const rgb_t COLOR_LISTENING = {24, 24, 24};
@@ -130,6 +156,89 @@ static bool wake_word_poll(void)
 static const rgb_t COLOR_YELLOW = {90, 55, 0};
 static const rgb_t COLOR_BLUE = {0, 25, 90};
 static const rgb_t COLOR_PURPLE = {55, 0, 80};
+
+typedef struct {
+    char id[ACTION_ID_MAX];
+    char command[3];
+    char *transcript;
+    char *reply;
+} remote_action_t;
+
+static char *remote_action_strdup(const char *value)
+{
+    const char *source = value ? value : "";
+    size_t length = strlen(source) + 1;
+    char *copy = heap_caps_malloc(length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) copy = malloc(length);
+    if (copy) memcpy(copy, source, length);
+    return copy;
+}
+
+static void remote_action_free(remote_action_t *action)
+{
+    if (!action) return;
+    free(action->transcript);
+    free(action->reply);
+    action->transcript = NULL;
+    action->reply = NULL;
+}
+
+#if CONFIG_WEARABLLM_TTS_ENABLED && CONFIG_WEARABLLM_REMOTE_ACTIONS_ENABLED
+static const char *next_tts_chunk(const char *cursor, char *chunk, size_t capacity)
+{
+    if (!cursor || !chunk || capacity < 2) return NULL;
+    while (*cursor && isspace((unsigned char)*cursor)) cursor++;
+    if (!*cursor) return NULL;
+
+    size_t scan = 0;
+    size_t last_space = 0;
+    size_t chosen = 0;
+    while (cursor[scan] && scan < capacity - 1) {
+        unsigned char current = (unsigned char)cursor[scan];
+        scan++;
+        if (isspace(current)) last_space = scan - 1;
+        if ((current == '.' || current == '!' || current == '?' || current == '\n') && scan >= 24) {
+            chosen = scan;
+            break;
+        }
+    }
+    if (!chosen) {
+        if (!cursor[scan]) {
+            chosen = scan;
+        } else if (last_space) {
+            chosen = last_space;
+        } else {
+            chosen = scan;
+            while (chosen > 0 && (((unsigned char)cursor[chosen] & 0xc0) == 0x80)) chosen--;
+        }
+    }
+    if (!chosen) return NULL;
+
+    memcpy(chunk, cursor, chosen);
+    chunk[chosen] = '\0';
+    while (chosen > 0 && isspace((unsigned char)chunk[chosen - 1])) chunk[--chosen] = '\0';
+    return cursor + (last_space == chosen && cursor[chosen] ? chosen + 1 : chosen);
+}
+#endif
+
+static bool response_try_claim(void)
+{
+    if (!s_response_lock) return false;
+    if (xSemaphoreTake(s_response_lock, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    bool claimed = !s_response_active;
+    if (claimed) s_response_active = true;
+    xSemaphoreGive(s_response_lock);
+    return claimed;
+}
+
+static void response_release(void)
+{
+    if (!s_response_lock) return;
+    if (xSemaphoreTake(s_response_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_response_active = false;
+        xSemaphoreGive(s_response_lock);
+    }
+}
 
 static rgb_t led_scale(rgb_t color, uint8_t numerator, uint8_t denominator)
 {
@@ -502,79 +611,80 @@ static esp_err_t http_binary_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static bool append_json_string(char *buf, size_t capacity, size_t *offset, const char *value)
+static char *make_tts_json(const char *reply)
 {
-    if (*offset >= capacity) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return NULL;
+    if (!cJSON_AddStringToObject(root, "text", reply ? reply : "")) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+#endif
+
+static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *out_len);
+
+#if CONFIG_WEARABLLM_TTS_ENABLED && CONFIG_WEARABLLM_REMOTE_ACTIONS_ENABLED
+static esp_err_t request_tts_wav(const char *text, uint8_t **out_data, size_t *out_len)
+{
+#if CONFIG_WEARABLLM_DIRECT_OPENAI
+    return wearabllm_openai_tts(text, out_data, out_len);
+#else
+    return fetch_tts_wav(text, out_data, out_len);
+#endif
+}
+
+static void tts_prefetch_task(void *arg)
+{
+    tts_prefetch_job_t *job = (tts_prefetch_job_t *)arg;
+    job->result = request_tts_wav(job->text, &job->wav, &job->wav_len);
+    xSemaphoreGive(job->done);
+    vTaskDelete(NULL);
+}
+
+static bool tts_prefetch_start(tts_prefetch_job_t *job, const char *text)
+{
+    if (!job || !text || !text[0]) return false;
+    memset(job, 0, sizeof(*job));
+    snprintf(job->text, sizeof(job->text), "%s", text);
+    job->result = ESP_FAIL;
+    job->done = xSemaphoreCreateBinary();
+    if (!job->done) {
+        ESP_LOGW(TAG, "TTS prefetch semaphore allocation failed");
         return false;
     }
-
-    for (const char *p = value; *p; p++) {
-        const char *escaped = NULL;
-        char escaped_buf[7] = {0};
-        switch (*p) {
-        case '"':
-            escaped = "\\\"";
-            break;
-        case '\\':
-            escaped = "\\\\";
-            break;
-        case '\n':
-            escaped = "\\n";
-            break;
-        case '\r':
-            escaped = "\\r";
-            break;
-        case '\t':
-            escaped = "\\t";
-            break;
-        default:
-            if ((unsigned char)*p < 0x20) {
-                snprintf(escaped_buf, sizeof(escaped_buf), "\\u%04x", (unsigned char)*p);
-                escaped = escaped_buf;
-            }
-            break;
-        }
-
-        if (escaped) {
-            size_t len = strlen(escaped);
-            if (*offset + len >= capacity) {
-                return false;
-            }
-            memcpy(buf + *offset, escaped, len);
-            *offset += len;
-        } else {
-            if (*offset + 1 >= capacity) {
-                return false;
-            }
-            buf[(*offset)++] = *p;
-        }
+    BaseType_t task_result = xTaskCreate(tts_prefetch_task, "tts_prefetch", 8192, job, 4, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "TTS prefetch task creation failed; using sequential fallback");
+        vSemaphoreDelete(job->done);
+        job->done = NULL;
+        return false;
     }
-    buf[*offset] = '\0';
+    ESP_LOGI(TAG, "TTS prefetch started: chars=%u", (unsigned)strlen(job->text));
     return true;
 }
 
-static esp_err_t make_tts_json(const char *reply, char *json, size_t json_len)
+static esp_err_t tts_prefetch_await(tts_prefetch_job_t *job, uint8_t **out_data, size_t *out_len)
 {
-    size_t offset = 0;
-    const char *prefix = "{\"text\":\"";
-    const char *suffix = "\"}";
-    size_t prefix_len = strlen(prefix);
-    size_t suffix_len = strlen(suffix);
-    if (prefix_len + suffix_len + 1 > json_len) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    memcpy(json, prefix, prefix_len);
-    offset = prefix_len;
-    if (!append_json_string(json, json_len, &offset, reply)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (offset + suffix_len >= json_len) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    memcpy(json + offset, suffix, suffix_len);
-    offset += suffix_len;
-    json[offset] = '\0';
-    return ESP_OK;
+    ESP_RETURN_ON_FALSE(job && job->done && out_data && out_len,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "invalid TTS prefetch result");
+    xSemaphoreTake(job->done, portMAX_DELAY);
+    vSemaphoreDelete(job->done);
+    job->done = NULL;
+    *out_data = job->wav;
+    *out_len = job->wav_len;
+    job->wav = NULL;
+    job->wav_len = 0;
+    ESP_LOGI(TAG,
+             "TTS prefetch finished: result=%s bytes=%u",
+             esp_err_to_name(job->result),
+             (unsigned)*out_len);
+    return job->result;
 }
 #endif
 
@@ -588,7 +698,7 @@ static esp_err_t send_audio_to_bridge(
     char *reply_out,
     size_t reply_len)
 {
-    char response_buf[HTTP_RESPONSE_MAX] = {0};
+    char response_buf[QUERY_RESPONSE_MAX] = {0};
     http_response_t response = {
         .data = response_buf,
         .len = 0,
@@ -602,6 +712,7 @@ static esp_err_t send_audio_to_bridge(
         .event_handler = http_event_handler,
         .user_data = &response,
         .timeout_ms = 30000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -676,6 +787,255 @@ static esp_err_t send_audio_to_bridge(
     return ESP_OK;
 }
 
+#if CONFIG_WEARABLLM_REMOTE_ACTIONS_ENABLED
+static bool build_action_url(char *out, size_t capacity, const char *action_id)
+{
+    const char *query_url = CONFIG_WEARABLLM_BRIDGE_URL;
+    const char *suffix = "/v1/query";
+    size_t query_len = strlen(query_url);
+    size_t suffix_len = strlen(suffix);
+    if (query_len <= suffix_len || strcmp(query_url + query_len - suffix_len, suffix) != 0) {
+        ESP_LOGE(TAG, "bridge URL must end with /v1/query for remote actions");
+        return false;
+    }
+    int written = action_id && action_id[0]
+        ? snprintf(out, capacity, "%.*s/v1/devices/%s/actions/%s/ack",
+                   (int)(query_len - suffix_len), query_url, CONFIG_WEARABLLM_DEVICE_ID, action_id)
+        : snprintf(out, capacity, "%.*s/v1/devices/%s/actions",
+                   (int)(query_len - suffix_len), query_url, CONFIG_WEARABLLM_DEVICE_ID);
+    return written > 0 && (size_t)written < capacity;
+}
+
+static void action_request_headers(esp_http_client_handle_t client)
+{
+    if (CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN[0] != '\0') {
+        esp_http_client_set_header(client, "X-WearabLLM-Device-Token", CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN);
+    }
+    esp_http_client_set_header(client, "X-WearabLLM-Device-Id", CONFIG_WEARABLLM_DEVICE_ID);
+}
+
+static esp_err_t fetch_remote_action(remote_action_t *out_action)
+{
+    char url[ACTION_URL_MAX] = {0};
+    if (!build_action_url(url, sizeof(url), NULL)) return ESP_ERR_INVALID_ARG;
+
+    char *response_buf = heap_caps_calloc(1, ACTION_RESPONSE_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!response_buf) response_buf = calloc(1, ACTION_RESPONSE_MAX);
+    ESP_RETURN_ON_FALSE(response_buf, ESP_ERR_NO_MEM, TAG, "remote action response allocation failed");
+    http_response_t response = {
+        .data = response_buf,
+        .len = 0,
+        .capacity = ACTION_RESPONSE_MAX,
+        .overflow = false,
+    };
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .event_handler = http_event_handler,
+        .user_data = &response,
+        .timeout_ms = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        free(response_buf);
+        return ESP_FAIL;
+    }
+    action_request_headers(client);
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK || status < 200 || status >= 300 || response.overflow) {
+        ESP_LOGW(TAG, "remote action poll failed: err=%s status=%d", esp_err_to_name(err), status);
+        free(response_buf);
+        return err == ESP_OK ? ESP_FAIL : err;
+    }
+
+    cJSON *root = cJSON_Parse(response_buf);
+    free(response_buf);
+    cJSON *action = root ? cJSON_GetObjectItemCaseSensitive(root, "action") : NULL;
+    if (!action || cJSON_IsNull(action)) {
+        cJSON_Delete(root);
+        return ESP_ERR_NOT_FOUND;
+    }
+    cJSON *id = cJSON_GetObjectItemCaseSensitive(action, "id");
+    cJSON *command = cJSON_GetObjectItemCaseSensitive(action, "command");
+    cJSON *transcript = cJSON_GetObjectItemCaseSensitive(action, "transcript");
+    cJSON *reply = cJSON_GetObjectItemCaseSensitive(action, "reply");
+    if (!cJSON_IsString(id) || strlen(id->valuestring) != ACTION_ID_MAX - 1 ||
+        !cJSON_IsString(command) || strlen(command->valuestring) != 2 ||
+        !cJSON_IsString(reply)) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    char normalized_command[3] = {
+        (char)toupper((unsigned char)command->valuestring[0]),
+        (char)toupper((unsigned char)command->valuestring[1]),
+        '\0',
+    };
+    if (!is_valid_led_command(normalized_command)) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    snprintf(out_action->id, sizeof(out_action->id), "%s", id->valuestring);
+    snprintf(out_action->command, sizeof(out_action->command), "%s", normalized_command);
+    out_action->transcript = remote_action_strdup(cJSON_IsString(transcript) ? transcript->valuestring : "");
+    out_action->reply = remote_action_strdup(reply->valuestring);
+    if (!out_action->transcript || !out_action->reply) {
+        remote_action_free(out_action);
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t acknowledge_remote_action(const remote_action_t *action, const char *status, const char *error)
+{
+    char url[ACTION_URL_MAX] = {0};
+    if (!build_action_url(url, sizeof(url), action->id)) return ESP_ERR_INVALID_ARG;
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return ESP_ERR_NO_MEM;
+    cJSON_AddStringToObject(root, "status", status);
+    if (error && error[0]) cJSON_AddStringToObject(root, "error", error);
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!body) return ESP_ERR_NO_MEM;
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        free(body);
+        return ESP_FAIL;
+    }
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    action_request_headers(client);
+    esp_http_client_set_post_field(client, body, strlen(body));
+    esp_err_t err = esp_http_client_perform(client);
+    int http_status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    free(body);
+    return (err == ESP_OK && http_status >= 200 && http_status < 300) ? ESP_OK : ESP_FAIL;
+}
+
+static void remote_action_task(void *arg)
+{
+    while (true) {
+        if (wait_for_wifi_ready() == ESP_OK && response_try_claim()) {
+            remote_action_t action = {0};
+            esp_err_t err = fetch_remote_action(&action);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "remote action %s command=%s", action.id, action.command);
+                led_set_all(COLOR_THINKING);
+                ESP_LOGI(TAG, "remote action display: thinking start");
+                wearabllm_display_show_state(WEARABLLM_DISPLAY_THINKING);
+                ESP_LOGI(TAG, "remote action display: thinking done");
+                led_apply_command(action.command);
+
+                bool tts_started = false;
+#if CONFIG_WEARABLLM_TTS_ENABLED
+                esp_err_t tts_err = ESP_OK;
+                bool response_rendered = false;
+                char current_chunk[TTS_CHUNK_TEXT_MAX + 1] = {0};
+                const char *tts_cursor = next_tts_chunk(action.reply, current_chunk, sizeof(current_chunk));
+                uint8_t *tts_wav = NULL;
+                size_t tts_wav_len = 0;
+                if (tts_cursor) {
+                    ESP_LOGI(TAG,
+                             "remote action first TTS chunk: chars=%u",
+                             (unsigned)strlen(current_chunk));
+                    tts_err = request_tts_wav(current_chunk, &tts_wav, &tts_wav_len);
+                }
+                while (tts_cursor && tts_err == ESP_OK) {
+                    char next_chunk[TTS_CHUNK_TEXT_MAX + 1] = {0};
+                    const char *next_cursor = next_tts_chunk(tts_cursor, next_chunk, sizeof(next_chunk));
+                    tts_prefetch_job_t prefetch = {0};
+                    bool prefetch_started = next_cursor && tts_prefetch_start(&prefetch, next_chunk);
+
+                    // Do not put a sentence on screen while its TTS request is still pending.
+                    // Once ready, show only that sentence while its audio plays. The following
+                    // sentence is fetched concurrently but remains hidden until its own turn.
+                    ESP_LOGI(TAG,
+                             "remote action TTS playback: chars=%u bytes=%u next_prefetch=%d",
+                             (unsigned)strlen(current_chunk),
+                             (unsigned)tts_wav_len,
+                             prefetch_started);
+                    if (!response_rendered) {
+                        err = acknowledge_remote_action(&action, "rendered", NULL);
+                        if (err != ESP_OK) ESP_LOGW(TAG, "remote action render acknowledgement failed");
+                        response_rendered = true;
+                    }
+                    if (tts_err == ESP_OK && !tts_started) {
+                        err = acknowledge_remote_action(&action, "tts_started", NULL);
+                        if (err != ESP_OK) ESP_LOGW(TAG, "remote action TTS-start acknowledgement failed");
+                        tts_started = true;
+                    }
+                    // Finish first-card queue acknowledgements before switching the display.
+                    // Once the sentence appears, playback begins without another network wait.
+                    wearabllm_display_show_response(action.command, action.transcript, current_chunk);
+                    tts_err = wearabllm_audio_play_wav(tts_wav, tts_wav_len);
+                    free(tts_wav);
+                    tts_wav = NULL;
+                    tts_wav_len = 0;
+
+                    if (prefetch_started) {
+                        esp_err_t prefetch_err = tts_prefetch_await(&prefetch, &tts_wav, &tts_wav_len);
+                        if (tts_err == ESP_OK) tts_err = prefetch_err;
+                        if (tts_err != ESP_OK) {
+                            free(tts_wav);
+                            tts_wav = NULL;
+                            break;
+                        }
+                    } else if (tts_err == ESP_OK && next_cursor) {
+                        // Low-memory/task-creation failures retain the old sequential behavior.
+                        tts_err = request_tts_wav(next_chunk, &tts_wav, &tts_wav_len);
+                    }
+                    if (tts_err != ESP_OK || !next_cursor) break;
+                    snprintf(current_chunk, sizeof(current_chunk), "%s", next_chunk);
+                    tts_cursor = next_cursor;
+                }
+#else
+                esp_err_t tts_err = ESP_ERR_NOT_SUPPORTED;
+                ESP_LOGI(TAG, "remote action display: response start");
+                wearabllm_display_show_response(action.command, action.transcript, action.reply);
+                ESP_LOGI(TAG, "remote action display: response done");
+                err = acknowledge_remote_action(&action, "rendered", NULL);
+                if (err != ESP_OK) ESP_LOGW(TAG, "remote action render acknowledgement failed");
+#endif
+                if (tts_err == ESP_OK && tts_started) {
+                    wearabllm_display_show_response(action.command, action.transcript, action.reply);
+                    err = acknowledge_remote_action(&action, "played", NULL);
+                    if (err != ESP_OK) ESP_LOGW(TAG, "remote action playback acknowledgement failed");
+                } else if (tts_err == ESP_ERR_NOT_SUPPORTED) {
+                    ESP_LOGI(TAG, "remote action audio is disabled; render completion is the final verified state");
+                } else if (tts_err != ESP_OK) {
+                    ESP_LOGW(TAG, "remote action TTS failed: %s", esp_err_to_name(tts_err));
+                    char error[80];
+                    snprintf(error, sizeof(error), "TTS/playback failed: %s", esp_err_to_name(tts_err));
+                    err = acknowledge_remote_action(&action, "failed", error);
+                    if (err != ESP_OK) ESP_LOGW(TAG, "remote action failure acknowledgement failed");
+                    wearabllm_display_show_error("AUDIO FAILED");
+                } else {
+                    ESP_LOGW(TAG, "remote action contained no playable TTS text");
+                    err = acknowledge_remote_action(&action, "failed", "No playable TTS text");
+                    if (err != ESP_OK) ESP_LOGW(TAG, "remote action failure acknowledgement failed");
+                }
+            } else if (err != ESP_ERR_NOT_FOUND) {
+                ESP_LOGW(TAG, "remote action fetch error: %s", esp_err_to_name(err));
+            }
+            remote_action_free(&action);
+            response_release();
+        }
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_WEARABLLM_ACTION_POLL_INTERVAL_MS));
+    }
+}
+#endif
+
 static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *out_len)
 {
 #if CONFIG_WEARABLLM_TTS_ENABLED
@@ -683,11 +1043,19 @@ static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *ou
         return ESP_ERR_INVALID_ARG;
     }
 
-    char request_json[TTS_JSON_MAX] = {0};
-    ESP_RETURN_ON_ERROR(make_tts_json(reply, request_json, sizeof(request_json)), TAG, "tts json too large");
+    char *request_json = make_tts_json(reply);
+    ESP_RETURN_ON_FALSE(request_json, ESP_ERR_NO_MEM, TAG, "tts json allocation failed");
 
-    uint8_t *response_buf = calloc(1, CONFIG_WEARABLLM_TTS_MAX_BYTES);
-    ESP_RETURN_ON_FALSE(response_buf, ESP_ERR_NO_MEM, TAG, "tts response allocation failed");
+    uint8_t *response_buf = heap_caps_calloc(
+        1,
+        CONFIG_WEARABLLM_TTS_MAX_BYTES,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!response_buf) response_buf = calloc(1, CONFIG_WEARABLLM_TTS_MAX_BYTES);
+    if (!response_buf) {
+        free(request_json);
+        ESP_LOGE(TAG, "tts response allocation failed");
+        return ESP_ERR_NO_MEM;
+    }
 
     http_binary_response_t response = {
         .data = response_buf,
@@ -702,10 +1070,12 @@ static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *ou
         .event_handler = http_binary_event_handler,
         .user_data = &response,
         .timeout_ms = 30000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
+        free(request_json);
         free(response_buf);
         return ESP_FAIL;
     }
@@ -720,6 +1090,7 @@ static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *ou
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    free(request_json);
 
     if (err != ESP_OK || status < 200 || status >= 300 || response.overflow || response.len <= 0) {
         ESP_LOGE(TAG,
@@ -854,7 +1225,7 @@ static void interaction_task(void *arg)
 
         bool held = ptt_is_held_debounced();
         bool wake_detected = !held && !was_held && wake_word_poll();
-        if ((held && !was_held) || wake_detected) {
+        if (((held && !was_held) || wake_detected) && response_try_claim()) {
             interaction_id++;
             int64_t interaction_start_us = esp_timer_get_time();
             ESP_LOGI(TAG, "interaction #%" PRIu32 " started", interaction_id);
@@ -876,14 +1247,19 @@ static void interaction_task(void *arg)
                      capture_elapsed_ms,
                      (unsigned)wav_len);
 
-            led_set_all(COLOR_THINKING);
-            wearabllm_display_show_state(WEARABLLM_DISPLAY_THINKING);
             if (err == ESP_OK) {
                 char command[3] = "BS";
                 char transcript[192] = {0};
                 char reply[256] = {0};
+                led_set_all(COLOR_PURPLE);
+                wearabllm_display_show_state(WEARABLLM_DISPLAY_SENDING);
                 err = wait_for_wifi_ready();
                 if (err == ESP_OK) {
+                    // Give the sending state a visible flash before the
+                    // request blocks while the assistant generates a reply.
+                    vTaskDelay(pdMS_TO_TICKS(180));
+                    led_set_all(COLOR_THINKING);
+                    wearabllm_display_show_state(WEARABLLM_DISPLAY_THINKING);
 #if CONFIG_WEARABLLM_DIRECT_OPENAI
                     err = wearabllm_openai_query(
 #else
@@ -963,6 +1339,7 @@ static void interaction_task(void *arg)
                          esp_err_to_name(err),
                          used_silent_fallback ? "silent-fallback" : "onboard-mic");
             }
+            response_release();
         }
         was_held = held && !ptt_is_released_debounced();
         vTaskDelay(pdMS_TO_TICKS(25));
@@ -989,6 +1366,8 @@ void app_main(void)
         ESP_LOGE(TAG, "wake word disabled (%s); BOOT push-to-talk remains available", esp_err_to_name(wake_err));
     }
     wifi_init();
+    s_response_lock = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(s_response_lock ? ESP_OK : ESP_ERR_NO_MEM);
 #if CONFIG_WEARABLLM_TRANSCRIPT_LOG_ENABLED
     ESP_ERROR_CHECK(wearabllm_transcript_log_init());
 #endif
@@ -1008,4 +1387,8 @@ void app_main(void)
 
     BaseType_t task_result = xTaskCreate(interaction_task, "interaction", 8192, NULL, 5, NULL);
     ESP_ERROR_CHECK(task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+#if CONFIG_WEARABLLM_REMOTE_ACTIONS_ENABLED
+    task_result = xTaskCreate(remote_action_task, "remote_action", 8192, NULL, 4, NULL);
+    ESP_ERROR_CHECK(task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+#endif
 }

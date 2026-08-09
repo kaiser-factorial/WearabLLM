@@ -64,22 +64,48 @@ Better later options:
 The speaker amplifier mapping is taken from the vendor demo's
 `Audio_ES8311.cpp`, where `Audio_PA_EN()` drives TCA9555 `EXIO8` high.
 
-## SPI TFT Adapter
+## TFT200C 240x320 SPI Display
 
-For the separate SPI TFT breakout on the perfboard adapter, use the mapping already discussed:
+The current display is the 2.0-inch `TFT200C 240*320 V1.3` module with the
+physical header order `BLK | RES | SDA | CLK | CS | DC | VCC | GND`. The
+firmware uses the ST7789 driver: that is the strongest match for this size,
+resolution, and eight-pin interface, but the bare `TFT200C` marking does not
+uniquely identify the controller. If the self-test remains blank or garbled,
+verify the controller printed on the seller listing before changing wiring.
 
 | TFT pin | Waveshare header signal | GPIO |
 |---|---|---:|
 | `VCC` | `3V3` | power |
 | `GND` | `GND` | ground |
-| `SCL` / `SCK` | `IO4` | `GPIO4` |
-| `SDA` / `MOSI` | `IO9` | `GPIO9` |
-| `CS` | `IO3` | `GPIO3` |
-| `DC` | `IO7` | `GPIO7` |
-| `RES` / `RST` | `IO6` | `GPIO6` |
-| `BLK` / `BL` | `3V3` first, optionally `IO5` later | `GPIO5` if PWM |
+| `CLK` / `SCLK` | `IO6` | `GPIO6` |
+| `SDA` / `MOSI` | `IO7` | `GPIO7` |
+| `CS` | `IO9` | `GPIO9` |
+| `DC` | `IO4` | `GPIO4` |
+| `RES` / `RST` | `IO3` | `GPIO3` |
+| `BLK` / `BL` | `IO5` | `GPIO5` |
 
 Important: the TFT's `SCL`/`SDA` labels are SPI clock/data labels. Do not wire them to the Waveshare header's `SCL`/`SDA` I2C pins.
+
+### Position-for-position harness remap
+
+Compared with the removed module's old
+`BLK | CS | DC | RES | SDA | SCL | VCC | GND` order, reusing the harness in
+the same physical positions produces this software pin remap:
+
+| New TFT signal | Existing harness GPIO |
+|---|---:|
+| `BLK` | `GPIO5` |
+| `RES` | `GPIO3` |
+| `SDA` / `MOSI` | `GPIO7` |
+| `CLK` / `SCLK` | `GPIO6` |
+| `CS` | `GPIO9` |
+| `DC` | `GPIO4` |
+| `VCC` | `3V3` |
+| `GND` | `GND` |
+
+All six signals are ESP32 outputs and the ESP32-S3 routes SPI through its GPIO
+matrix. `VCC` remains 3.3 V and `GND` remains ground; never compensate for a
+power-pin mismatch in firmware.
 
 ## FPC Display Connector
 

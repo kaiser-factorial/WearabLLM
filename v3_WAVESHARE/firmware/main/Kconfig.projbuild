@@ -40,6 +40,23 @@ config WEARABLLM_DEVICE_ID
         lets the shared agent identify the source body in recent conversation
         records. Give future wearables distinct IDs.
 
+config WEARABLLM_REMOTE_ACTIONS_ENABLED
+    bool "Fetch remote phone/dashboard actions"
+    default y
+    help
+        Poll the configured bridge for a queued response targeted at this
+        device. This is outbound-only: no port forwarding or inbound listener
+        is needed on the ESP32.
+
+config WEARABLLM_ACTION_POLL_INTERVAL_MS
+    int "Remote action poll interval ms"
+    range 500 60000
+    default 2000
+    depends on WEARABLLM_REMOTE_ACTIONS_ENABLED
+    help
+        Delay between outbound action checks while the board is idle. The
+        bridge derives the action URL from the configured /v1/query URL.
+
 config WEARABLLM_DIRECT_OPENAI
     bool "Call OpenAI directly from firmware (API key is extractable)"
     default n
@@ -227,7 +244,7 @@ config WEARABLLM_TTS_MAX_BYTES
         Maximum audio/wav response to buffer in RAM for phase-2 playback.
 
 config WEARABLLM_DISPLAY_ENABLED
-    bool "Enable SPI TFT display"
+    bool "Enable TFT200C SPI display"
     default n
     help
         Keep disabled until the LED/mic/bridge loop is verified and the
@@ -243,23 +260,23 @@ config WEARABLLM_DISPLAY_SELF_TEST_ON_BOOT
 
 config WEARABLLM_TFT_SCLK_GPIO
     int "TFT SCLK GPIO"
-    default 4
+    default 6
 
 config WEARABLLM_TFT_MOSI_GPIO
     int "TFT MOSI GPIO"
-    default 9
+    default 7
 
 config WEARABLLM_TFT_CS_GPIO
     int "TFT CS GPIO"
-    default 3
+    default 9
 
 config WEARABLLM_TFT_DC_GPIO
     int "TFT DC GPIO"
-    default 7
+    default 4
 
 config WEARABLLM_TFT_RST_GPIO
     int "TFT RST GPIO"
-    default 6
+    default 3
 
 config WEARABLLM_TFT_BL_GPIO
     int "TFT backlight GPIO"
@@ -269,29 +286,46 @@ config WEARABLLM_TFT_BL_GPIO
         ignore this value in the eventual driver.
 
 config WEARABLLM_TFT_WIDTH
-    int "TFT width"
-    default 128
+    int "Logical TFT width"
+    default 320
 
 config WEARABLLM_TFT_HEIGHT
-    int "TFT height"
-    default 160
+    int "Logical TFT height"
+    default 240
+
+config WEARABLLM_TFT_ROTATION
+    int "TFT rotation (clockwise quarter turns)"
+    range 0 3
+    default 3
+    help
+        0 keeps the TFT200C panel's native 240x320 portrait orientation. 1 and
+        3 produce 320x240 landscape orientations, while 2 is inverted
+        portrait. Rotation 3 is the current counter-clockwise landscape view.
+
+config WEARABLLM_TFT_SAFE_LEFT_PERCENT
+    int "Reserved TFT strip on the left (percent)"
+    range 0 90
+    default 0
+    help
+        Reserve this left-hand portion of the logical display. Keep this at 0
+        to use the complete 320x240 logical display.
 
 config WEARABLLM_TFT_X_OFFSET
     int "TFT X offset"
     default 0
     help
-        Some ST7735 breakout variants need a 1 or 2 pixel column offset.
+        Some ST7789 breakout variants need a small column offset.
 
 config WEARABLLM_TFT_Y_OFFSET
     int "TFT Y offset"
     default 0
     help
-        Some ST7735 breakout variants need a row offset, often 0, 1, or 24.
+        Some ST7789 breakout variants need a small row offset.
 
 config WEARABLLM_TFT_INVERT_COLORS
     bool "Invert TFT colors"
     default y
     help
-        Many ST7735 modules look correct with display inversion enabled.
+        Many ST7789 modules look correct with display inversion enabled.
 
 endmenu

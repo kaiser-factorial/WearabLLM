@@ -3,1154 +3,737 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
 
 import {
-  configureDeviceWifi,
-  fetchBridgeHealth,
-  normalizeDeviceWifiBssid,
-  normalizeBridgeBaseUrl,
-  normalizeAudioOutVolume,
-  normalizePttActiveLevel,
-  normalizePttDebounceMs,
-  normalizePttGpio,
-  normalizePttPull,
-  normalizeTtsMaxBytes,
-  queryBridgeText,
-  summarizeBridgeBenchStatus,
+  BridgeAction,
+  BridgeConversationSession,
+  BridgeConversationTurn,
+  BridgeDevice,
   BridgeHealth,
-  BridgeResponse,
+  BridgeInteractionResponse,
+  archiveBridgeSession,
+  createBridgeInteraction,
+  fetchBridgeAction,
+  fetchBridgeConversation,
+  fetchBridgeHealth,
+  normalizeBridgeBaseUrl,
+  queryBridgeText,
+  renameBridgeSession,
+  resetBridgeSession,
+  sendBridgeHeartbeat,
 } from './protocol/bridgeClient';
-import { COMMAND_COLORS, COMMAND_DESCRIPTIONS } from './protocol/commands';
 import {
+  loadAppDeviceId,
+  loadBridgeToken,
   loadBridgeUrl,
-  loadDeviceWifiSettings,
+  saveBridgeToken,
   saveBridgeUrl,
-  saveDeviceWifiSettings,
 } from './storage/settings';
-import { VoiceListener } from './audio/VoiceListener';
 
-type HistoryEntry = BridgeResponse & {
-  time: string;
-};
+const ANDROID_BODY_ID = 'wearabllm-android';
+const WAVESHARE_BODY_ID = 'wearabllm-esp32';
 
-function formatBytes(bytes?: number): string {
-  if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) {
-    return 'unknown';
+const CANONICAL_BODIES: BridgeDevice[] = [
+  { id: WAVESHARE_BODY_ID, label: 'Waveshare', kind: 'home', status: 'active', description: 'ESP32-S3 room body', seen: false },
+  { id: ANDROID_BODY_ID, label: 'Android', kind: 'phone', status: 'active', description: 'This phone', seen: true },
+  { id: 'web-console', label: 'Web console', kind: 'web', status: 'active', description: 'Browser dashboard', seen: false },
+  { id: 'wearabllm-wearable', label: 'Wearable', kind: 'wearable', status: 'planned', description: 'Planned portable body', seen: false },
+];
+
+function mergeBodies(remote: BridgeDevice[]): BridgeDevice[] {
+  const merged = new Map(CANONICAL_BODIES.map((body) => [body.id, body]));
+  for (const body of remote) {
+    if (!body.id || body.id === 'local-bridge') continue;
+    merged.set(body.id, { ...(merged.get(body.id) ?? body), ...body });
   }
-  if (bytes >= 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  if (bytes >= 1024) {
-    return `${Math.round(bytes / 1024)} KiB`;
-  }
-  return `${bytes} B`;
+  const order = new Map(CANONICAL_BODIES.map((body, index) => [body.id, index]));
+  return [...merged.values()].sort(
+    (left, right) => (order.get(left.id) ?? 100) - (order.get(right.id) ?? 100),
+  );
+}
+
+function bodyColor(kind: string): string {
+  if (kind === 'home') return '#6ee7b7';
+  if (kind === 'phone') return '#facc15';
+  if (kind === 'web') return '#93c5fd';
+  if (kind === 'wearable') return '#c084fc';
+  return '#818cf8';
+}
+
+function formatTurnTime(value: string | null): string {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatSessionTime(value: string | null): string {
+  if (!value) return 'New conversation';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? 'Conversation'
+    : date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+function sessionTitle(session: BridgeConversationSession | null | undefined, activeId: string): string {
+  if (!session) return 'Current conversation';
+  if (session.title) return session.title;
+  if (session.id === activeId) return 'Current conversation';
+  const summary = (session.summary ?? '').replace(/\s+/g, ' ').trim();
+  if (summary) return summary.length > 42 ? `${summary.slice(0, 41)}…` : summary;
+  return formatSessionTime(session.started_at ?? session.last_turn_at);
 }
 
 export default function App() {
-  const [bridgeUrl, setBridgeUrl] = useState('http://192.168.1.10:8765');
-  const [deviceWifiSsid, setDeviceWifiSsid] = useState('');
-  const [deviceWifiPassword, setDeviceWifiPassword] = useState('');
-  const [deviceWifiBssid, setDeviceWifiBssid] = useState('');
-  const [devicePttGpio, setDevicePttGpio] = useState('0');
-  const [devicePttActiveLevel, setDevicePttActiveLevel] = useState('0');
-  const [devicePttDebounceMs, setDevicePttDebounceMs] = useState('35');
-  const [devicePttPull, setDevicePttPull] = useState('up');
-  const [deviceAudioOutEnabled, setDeviceAudioOutEnabled] = useState(false);
-  const [deviceAudioOutVolume, setDeviceAudioOutVolume] = useState('45');
-  const [deviceTtsEnabled, setDeviceTtsEnabled] = useState(false);
-  const [deviceTtsMaxBytes, setDeviceTtsMaxBytes] = useState('131072');
-  const [deviceLedSelfTest, setDeviceLedSelfTest] = useState(false);
-  const [deviceDisplayEnabled, setDeviceDisplayEnabled] = useState(false);
-  const [deviceDisplaySelfTest, setDeviceDisplaySelfTest] = useState(false);
-  const [transcript, setTranscript] = useState('');
+  const [bridgeUrl, setBridgeUrl] = useState('https://brick-factorial-wearabllm-agent.hf.space');
+  const [bridgeToken, setBridgeToken] = useState('');
+  const [appDeviceId, setAppDeviceId] = useState(ANDROID_BODY_ID);
+  const [settingsReady, setSettingsReady] = useState(false);
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealth | null>(null);
-  const [lastResponse, setLastResponse] = useState<BridgeResponse | null>(null);
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [bodies, setBodies] = useState<BridgeDevice[]>(CANONICAL_BODIES);
+  const [turns, setTurns] = useState<BridgeConversationTurn[]>([]);
+  const [sessions, setSessions] = useState<BridgeConversationSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState('');
+  const [selectedSessionId, setSelectedSessionId] = useState('');
+  const [transcript, setTranscript] = useState('');
+  const [lastAction, setLastAction] = useState<BridgeAction | null>(null);
+  const [deliverToWaveshare, setDeliverToWaveshare] = useState(false);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
-  const [isConfiguringWifi, setIsConfiguringWifi] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [status, setStatus] = useState('Bridge idle');
-  const voiceListenerRef = useRef<VoiceListener | null>(null);
+  const [isRefreshingThread, setIsRefreshingThread] = useState(false);
+  const [renamingSessionId, setRenamingSessionId] = useState('');
+  const [renameDraft, setRenameDraft] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [menuSessionId, setMenuSessionId] = useState('');
+  const [status, setStatus] = useState('Sphere idle');
+
   const bridgeUrlRef = useRef(bridgeUrl);
+  const bridgeTokenRef = useRef(bridgeToken);
+  const selectedSessionIdRef = useRef(selectedSessionId);
   const healthRequestIdRef = useRef(0);
+  const isSendingRef = useRef(false);
+  const messageScrollRef = useRef<ScrollView | null>(null);
+
+  const selectedSession = useMemo(
+    () => sessions.find((session) => session.id === selectedSessionId),
+    [sessions, selectedSessionId],
+  );
+  const archivedCount = useMemo(() => sessions.filter((session) => Boolean(session.archived_at)).length, [sessions]);
+  const visibleSessions = useMemo(
+    () => sessions.filter((session) => Boolean(session.archived_at) === showArchived),
+    [sessions, showArchived],
+  );
+  const isCurrentConversation = !selectedSessionId || selectedSessionId === activeSessionId;
 
   useEffect(() => {
-    loadBridgeUrl().then(setBridgeUrl).catch(() => undefined);
-    loadDeviceWifiSettings()
-      .then((settings) => {
-        setDeviceWifiSsid(settings.ssid);
-        setDeviceWifiPassword(settings.password);
-        setDeviceWifiBssid(settings.bssid);
-        setDevicePttGpio(settings.pttGpio);
-        setDevicePttActiveLevel(settings.pttActiveLevel);
-        setDevicePttDebounceMs(settings.pttDebounceMs);
-        setDevicePttPull(settings.pttPull);
-        setDeviceAudioOutEnabled(settings.audioOutEnabled);
-        setDeviceAudioOutVolume(settings.audioOutVolume);
-        setDeviceTtsEnabled(settings.ttsEnabled);
-        setDeviceTtsMaxBytes(settings.ttsMaxBytes);
-        setDeviceLedSelfTest(settings.ledSelfTest);
-        setDeviceDisplayEnabled(settings.displayEnabled);
-        setDeviceDisplaySelfTest(settings.displaySelfTest);
+    Promise.all([loadBridgeUrl(), loadBridgeToken(), loadAppDeviceId()])
+      .then(([url, token, deviceId]) => {
+        bridgeUrlRef.current = url;
+        bridgeTokenRef.current = token;
+        setBridgeUrl(url);
+        setBridgeToken(token);
+        setAppDeviceId(deviceId);
       })
-      .catch(() => undefined);
+      .finally(() => setSettingsReady(true));
   }, []);
 
-  useEffect(() => {
-    bridgeUrlRef.current = bridgeUrl;
-  }, [bridgeUrl]);
+  useEffect(() => { bridgeUrlRef.current = bridgeUrl; }, [bridgeUrl]);
+  useEffect(() => { bridgeTokenRef.current = bridgeToken; }, [bridgeToken]);
+  useEffect(() => { selectedSessionIdRef.current = selectedSessionId; }, [selectedSessionId]);
 
-  useEffect(() => {
-    const listener = new VoiceListener();
-    listener.onPartial = (partial) => {
-      setTranscript(partial);
-      setStatus('Listening');
-    };
-    listener.onResult = (result) => {
-      setTranscript(result);
-      setIsListening(false);
-      void submitTranscript(result);
-    };
-    listener.onError = (message) => {
-      setIsListening(false);
-      setStatus('Speech recognition failed');
-      Alert.alert('Speech recognition failed', message);
-    };
-    voiceListenerRef.current = listener;
-
-    return () => {
-      listener.destroy();
-      voiceListenerRef.current = null;
-    };
-  }, []);
-
-  const commandColor = useMemo(
-    () => (lastResponse ? COMMAND_COLORS[lastResponse.command] : '#64748b'),
-    [lastResponse],
-  );
-  const bridgeBenchSummary = useMemo(
-    () => (bridgeHealth ? summarizeBridgeBenchStatus(bridgeHealth, bridgeUrl) : null),
-    [bridgeHealth, bridgeUrl],
-  );
-
-  async function handleSaveBridgeUrl() {
-    const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrl);
-    bridgeUrlRef.current = normalizedUrl;
-    healthRequestIdRef.current += 1;
-    setBridgeUrl(normalizedUrl);
-    setBridgeHealth(null);
-    await saveBridgeUrl(normalizedUrl);
-    setStatus('Bridge URL saved; check connection');
-  }
-
-  function handleBridgeUrlChange(value: string) {
-    bridgeUrlRef.current = value;
-    healthRequestIdRef.current += 1;
-    setBridgeUrl(value);
-    setBridgeHealth(null);
-    setStatus('Bridge URL changed; check connection');
-  }
-
-  async function refreshBridgeHealth(normalizedUrl: string): Promise<BridgeHealth | null> {
-    const requestId = healthRequestIdRef.current + 1;
-    healthRequestIdRef.current = requestId;
-    bridgeUrlRef.current = normalizedUrl;
-    setBridgeUrl(normalizedUrl);
-    await saveBridgeUrl(normalizedUrl);
-    let health: BridgeHealth;
+  async function refreshConversation(showError = false) {
+    if (isSendingRef.current) return;
+    const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
+    if (!normalizedUrl) return;
+    setIsRefreshingThread(true);
     try {
-      health = await fetchBridgeHealth(normalizedUrl);
-    } catch (error) {
-      if (
-        requestId !== healthRequestIdRef.current ||
-        normalizeBridgeBaseUrl(bridgeUrlRef.current) !== normalizedUrl
-      ) {
-        return null;
+      const snapshot = await fetchBridgeConversation(
+        normalizedUrl,
+        '',
+        bridgeTokenRef.current,
+        selectedSessionIdRef.current,
+      );
+      setTurns(snapshot.turns);
+      setBodies(mergeBodies(snapshot.devices));
+      setSessions(snapshot.sessions);
+      const nextActiveId = snapshot.active_session_id ?? '';
+      setActiveSessionId(nextActiveId);
+      if (!selectedSessionIdRef.current && nextActiveId) {
+        selectedSessionIdRef.current = nextActiveId;
+        setSelectedSessionId(nextActiveId);
       }
-      throw error;
+    } catch (error) {
+      if (showError) {
+        Alert.alert('Could not load conversation', error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      setIsRefreshingThread(false);
     }
-    if (
-      requestId !== healthRequestIdRef.current ||
-      normalizeBridgeBaseUrl(bridgeUrlRef.current) !== normalizedUrl
-    ) {
-      return null;
+  }
+
+  useEffect(() => {
+    if (!settingsReady) return;
+    void refreshConversation();
+    const timer = setInterval(() => void refreshConversation(), 4000);
+    return () => clearInterval(timer);
+  }, [settingsReady, selectedSessionId]);
+
+  useEffect(() => {
+    if (!settingsReady) return;
+    const heartbeat = () => {
+      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
+      if (!normalizedUrl) return;
+      void sendBridgeHeartbeat(normalizedUrl, appDeviceId, bridgeTokenRef.current).catch(() => undefined);
+    };
+    heartbeat();
+    const timer = setInterval(heartbeat, 8000);
+    return () => clearInterval(timer);
+  }, [settingsReady, appDeviceId]);
+
+  useEffect(() => {
+    if (!lastAction || lastAction.status === 'played' || lastAction.status === 'failed') return;
+    const timer = setInterval(() => {
+      void fetchBridgeAction(bridgeUrlRef.current, lastAction.id, bridgeTokenRef.current)
+        .then((action) => {
+          setLastAction(action);
+          setStatus(`Waveshare ${action.status}`);
+        })
+        .catch((error) => setStatus(`Delivery check failed: ${error instanceof Error ? error.message : String(error)}`));
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [lastAction]);
+
+  async function submitTranscript() {
+    const cleanTranscript = transcript.trim();
+    if (!cleanTranscript) return;
+    if (!isCurrentConversation) {
+      Alert.alert('Archived conversation', 'Start a new conversation before sending another message.');
+      return;
     }
-    setBridgeHealth(health);
-    return health;
+    setIsSending(true);
+    isSendingRef.current = true;
+    setIsThinking(true);
+    setTurns((current) => [
+      ...current,
+      {
+        id: `optimistic-${Date.now()}`,
+        device_id: appDeviceId,
+        role: 'user',
+        content: cleanTranscript,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+    setTranscript('');
+    setStatus(deliverToWaveshare ? 'Queueing for Waveshare' : 'Sphere is thinking');
+    try {
+      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
+      if (!normalizedUrl) throw new Error('Enter the Sphere bridge URL in Connection first.');
+      bridgeUrlRef.current = normalizedUrl;
+      setBridgeUrl(normalizedUrl);
+      await saveBridgeUrl(normalizedUrl);
+
+      const response = deliverToWaveshare
+        ? await createBridgeInteraction(
+            normalizedUrl,
+            cleanTranscript,
+            appDeviceId,
+            WAVESHARE_BODY_ID,
+            `android-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            bridgeTokenRef.current,
+            WAVESHARE_BODY_ID,
+          )
+        : await queryBridgeText(
+            normalizedUrl,
+            cleanTranscript,
+            bridgeTokenRef.current,
+            appDeviceId,
+            ANDROID_BODY_ID,
+          );
+
+      const action = deliverToWaveshare ? (response as BridgeInteractionResponse).action : null;
+      setLastAction(action);
+      setStatus(action ? `Waveshare ${action.status}` : 'Reply shared');
+      setIsThinking(false);
+      isSendingRef.current = false;
+      await refreshConversation();
+    } catch (error) {
+      setStatus('Sphere request failed');
+      setIsThinking(false);
+      isSendingRef.current = false;
+      await refreshConversation();
+      Alert.alert('Sphere request failed', error instanceof Error ? error.message : String(error));
+    } finally {
+      isSendingRef.current = false;
+      setIsSending(false);
+    }
   }
 
   async function handleCheckBridge() {
     setIsCheckingHealth(true);
-    setStatus('Checking bridge health');
+    setStatus('Checking Sphere connection');
     try {
       const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrl);
-      const health = await refreshBridgeHealth(normalizedUrl);
-      if (health) {
-        setStatus(health.config.dry_run ? 'Bridge reachable in dry-run mode' : 'Bridge reachable in live mode');
-      }
+      if (!normalizedUrl) throw new Error('Enter a bridge URL first.');
+      const requestId = healthRequestIdRef.current + 1;
+      healthRequestIdRef.current = requestId;
+      bridgeUrlRef.current = normalizedUrl;
+      setBridgeUrl(normalizedUrl);
+      await Promise.all([saveBridgeUrl(normalizedUrl), saveBridgeToken(bridgeTokenRef.current)]);
+      const health = await fetchBridgeHealth(normalizedUrl, bridgeTokenRef.current);
+      if (requestId !== healthRequestIdRef.current) return;
+      setBridgeHealth(health);
+      setStatus(health.config.dry_run ? 'Sphere connected · dry run' : 'Sphere connected');
+      await refreshConversation();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       setBridgeHealth(null);
-      setStatus('Bridge health check failed');
-      Alert.alert('Bridge health check failed', message);
+      setStatus('Sphere connection failed');
+      Alert.alert('Sphere connection failed', error instanceof Error ? error.message : String(error));
     } finally {
       setIsCheckingHealth(false);
     }
   }
 
-  async function handleUseFirmwareBridgeUrl() {
-    const firmwareUrl = bridgeHealth?.config.firmware_config?.bridge_url;
-    if (!firmwareUrl) {
+  async function startNewConversation() {
+    const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
+    if (!normalizedUrl) {
+      Alert.alert('Connection needed', 'Configure the Sphere bridge first.');
       return;
     }
-    const normalizedUrl = normalizeBridgeBaseUrl(firmwareUrl);
-    healthRequestIdRef.current += 1;
-    bridgeUrlRef.current = normalizedUrl;
-    setBridgeUrl(normalizedUrl);
-    setBridgeHealth(null);
-    await saveBridgeUrl(normalizedUrl);
-    setStatus('Firmware bridge URL selected; check connection');
-  }
-
-  async function handleSaveDeviceWifi() {
-    let normalizedBssid = '';
-    let normalizedPttGpio: number | null = null;
-    let normalizedPttActiveLevel: number | null = null;
-    let normalizedPttDebounceMs: number | null = null;
-    let normalizedPttPull = '';
-    let normalizedAudioOutVolume: number | null = null;
-    let normalizedTtsMaxBytes: number | null = null;
     try {
-      normalizedBssid = normalizeDeviceWifiBssid(deviceWifiBssid);
-      normalizedPttGpio = normalizePttGpio(devicePttGpio);
-      normalizedPttActiveLevel = normalizePttActiveLevel(devicePttActiveLevel);
-      normalizedPttDebounceMs = normalizePttDebounceMs(devicePttDebounceMs);
-      normalizedPttPull = normalizePttPull(devicePttPull);
-      normalizedAudioOutVolume = normalizeAudioOutVolume(deviceAudioOutVolume);
-      normalizedTtsMaxBytes = normalizeTtsMaxBytes(deviceTtsMaxBytes);
+      const payload = await resetBridgeSession(normalizedUrl, bridgeTokenRef.current);
+      const nextId = payload.active_session_id ?? '';
+      selectedSessionIdRef.current = nextId;
+      setSelectedSessionId(nextId);
+      setTurns([]);
+      setStatus('New conversation started');
+      setIsDrawerOpen(false);
+      await refreshConversation();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      Alert.alert('Invalid device config', message);
-      setStatus('Device config invalid');
-      return;
+      Alert.alert('Could not start conversation', error instanceof Error ? error.message : String(error));
     }
-
-    await saveDeviceWifiSettings({
-      ssid: deviceWifiSsid.trim(),
-      password: deviceWifiPassword,
-      bssid: normalizedBssid,
-      pttGpio: normalizedPttGpio == null ? '' : String(normalizedPttGpio),
-      pttActiveLevel: normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel),
-      pttDebounceMs: normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs),
-      pttPull: normalizedPttPull,
-      audioOutEnabled: deviceAudioOutEnabled || deviceTtsEnabled,
-      audioOutVolume: normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume),
-      ttsEnabled: deviceTtsEnabled,
-      ttsMaxBytes: normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes),
-      ledSelfTest: deviceLedSelfTest,
-      displayEnabled: deviceDisplayEnabled || deviceDisplaySelfTest,
-      displaySelfTest: deviceDisplaySelfTest,
-    });
-    setDeviceDisplayEnabled(deviceDisplayEnabled || deviceDisplaySelfTest);
-    setDeviceWifiBssid(normalizedBssid);
-    setDevicePttGpio(normalizedPttGpio == null ? '' : String(normalizedPttGpio));
-    setDevicePttActiveLevel(normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel));
-    setDevicePttDebounceMs(normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs));
-    setDevicePttPull(normalizedPttPull);
-    setDeviceAudioOutEnabled(deviceAudioOutEnabled || deviceTtsEnabled);
-    setDeviceAudioOutVolume(normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume));
-    setDeviceTtsMaxBytes(normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes));
-    setStatus('Device config saved locally');
   }
 
-  async function handleConfigureDeviceWifi() {
-    const ssid = deviceWifiSsid.trim();
-    if (!ssid || !deviceWifiPassword) {
-      Alert.alert('Missing Wi-Fi credentials', 'Enter both the device Wi-Fi name and password.');
+  function chooseConversation(sessionId: string) {
+    selectedSessionIdRef.current = sessionId;
+    setSelectedSessionId(sessionId);
+    setMenuSessionId('');
+    setIsDrawerOpen(false);
+  }
+
+  function toggleArchiveView() {
+    const nextArchived = !showArchived;
+    const candidates = sessions.filter((session) => Boolean(session.archived_at) === nextArchived);
+    const nextId = nextArchived ? (candidates[0]?.id ?? '') : (activeSessionId || candidates[0]?.id || '');
+    setShowArchived(nextArchived);
+    setMenuSessionId('');
+    selectedSessionIdRef.current = nextId;
+    setSelectedSessionId(nextId);
+  }
+
+  function confirmArchiveConversation(session: BridgeConversationSession) {
+    const isCurrent = session.id === activeSessionId;
+    Alert.alert(
+      'Archive conversation?',
+      isCurrent
+        ? 'The transcript will remain available, and Sphere will start a new conversation.'
+        : 'The transcript will remain available in the conversation list.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Archive',
+          style: 'destructive',
+          onPress: () => {
+            setMenuSessionId('');
+            void archiveBridgeSession(bridgeUrlRef.current, session.id, bridgeTokenRef.current)
+              .then(async (payload) => {
+                if (selectedSessionIdRef.current === session.id && payload.active_session_id) {
+                  selectedSessionIdRef.current = payload.active_session_id;
+                  setSelectedSessionId(payload.active_session_id);
+                }
+                setShowArchived(false);
+                setStatus('Conversation archived');
+                await refreshConversation();
+              })
+              .catch((error) => Alert.alert('Could not archive conversation', error instanceof Error ? error.message : String(error)));
+          },
+        },
+      ],
+    );
+  }
+
+  async function saveConversationName(session: BridgeConversationSession) {
+    const title = renameDraft.replace(/\s+/g, ' ').trim();
+    if (!title) {
+      Alert.alert('Name required', 'Enter a conversation name first.');
       return;
     }
-
-    setIsConfiguringWifi(true);
-    setStatus('Sending device config to bridge');
     try {
-      const normalizedBssid = normalizeDeviceWifiBssid(deviceWifiBssid);
-      const normalizedPttGpio = normalizePttGpio(devicePttGpio);
-      const normalizedPttActiveLevel = normalizePttActiveLevel(devicePttActiveLevel);
-      const normalizedPttDebounceMs = normalizePttDebounceMs(devicePttDebounceMs);
-      const normalizedPttPull = normalizePttPull(devicePttPull);
-      const normalizedAudioOutVolume = normalizeAudioOutVolume(deviceAudioOutVolume);
-      const normalizedTtsMaxBytes = normalizeTtsMaxBytes(deviceTtsMaxBytes);
-      await saveDeviceWifiSettings({
-        ssid,
-        password: deviceWifiPassword,
-        bssid: normalizedBssid,
-        pttGpio: normalizedPttGpio == null ? '' : String(normalizedPttGpio),
-        pttActiveLevel: normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel),
-        pttDebounceMs: normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs),
-        pttPull: normalizedPttPull,
-        audioOutEnabled: deviceAudioOutEnabled || deviceTtsEnabled,
-        audioOutVolume: normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume),
-        ttsEnabled: deviceTtsEnabled,
-        ttsMaxBytes: normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes),
-        ledSelfTest: deviceLedSelfTest,
-        displayEnabled: deviceDisplayEnabled || deviceDisplaySelfTest,
-        displaySelfTest: deviceDisplaySelfTest,
-      });
-      setDeviceDisplayEnabled(deviceDisplayEnabled || deviceDisplaySelfTest);
-      setDeviceWifiBssid(normalizedBssid);
-      setDevicePttGpio(normalizedPttGpio == null ? '' : String(normalizedPttGpio));
-      setDevicePttActiveLevel(normalizedPttActiveLevel == null ? '' : String(normalizedPttActiveLevel));
-      setDevicePttDebounceMs(normalizedPttDebounceMs == null ? '' : String(normalizedPttDebounceMs));
-      setDevicePttPull(normalizedPttPull);
-      setDeviceAudioOutEnabled(deviceAudioOutEnabled || deviceTtsEnabled);
-      setDeviceAudioOutVolume(normalizedAudioOutVolume == null ? '' : String(normalizedAudioOutVolume));
-      setDeviceTtsMaxBytes(normalizedTtsMaxBytes == null ? '' : String(normalizedTtsMaxBytes));
-      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
-      const response = await configureDeviceWifi(normalizedUrl, {
-        ssid,
-        password: deviceWifiPassword,
-        bssid: normalizedBssid,
-        ptt_gpio: normalizedPttGpio,
-        ptt_active_level: normalizedPttActiveLevel,
-        ptt_debounce_ms: normalizedPttDebounceMs,
-        ptt_pull: normalizedPttPull,
-        audio_out_enabled: deviceAudioOutEnabled || deviceTtsEnabled,
-        audio_out_volume: normalizedAudioOutVolume,
-        tts_enabled: deviceTtsEnabled,
-        tts_max_bytes: normalizedTtsMaxBytes,
-        led_self_test: deviceLedSelfTest,
-        display_enabled: deviceDisplayEnabled || deviceDisplaySelfTest,
-        display_self_test: deviceDisplaySelfTest,
-      });
-      await refreshBridgeHealth(normalizedUrl);
-      setStatus('Device config saved for next flash');
-      Alert.alert('Device config updated', response.message || 'Rebuild and flash firmware for changes to take effect.');
+      await renameBridgeSession(bridgeUrlRef.current, session.id, title, bridgeTokenRef.current);
+      setRenamingSessionId('');
+      setRenameDraft('');
+      setStatus('Conversation renamed');
+      await refreshConversation();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus('Device config failed');
-      Alert.alert('Device config failed', message);
-    } finally {
-      setIsConfiguringWifi(false);
-    }
-  }
-
-  async function submitTranscript(value: string) {
-    const cleanTranscript = value.trim();
-    if (!cleanTranscript) {
-      Alert.alert('Missing transcript', 'Type a test phrase before sending.');
-      return;
-    }
-
-    setIsSending(true);
-    setStatus('Sending transcript to bridge');
-    try {
-      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
-      setBridgeUrl(normalizedUrl);
-      await saveBridgeUrl(normalizedUrl);
-      const response = await queryBridgeText(normalizedUrl, cleanTranscript);
-      setLastResponse(response);
-      setHistory((current) => [
-        { ...response, time: new Date().toLocaleTimeString() },
-        ...current.slice(0, 9),
-      ]);
-      setStatus('Bridge response received');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus('Bridge request failed');
-      Alert.alert('Bridge request failed', message);
-    } finally {
-      setIsSending(false);
-    }
-  }
-
-  async function handleSend() {
-    await submitTranscript(transcript);
-  }
-
-  async function handleListenStart() {
-    if (isSending || isListening) {
-      return;
-    }
-    setTranscript('');
-    setIsListening(true);
-    setStatus('Listening');
-    await voiceListenerRef.current?.start();
-  }
-
-  async function handleListenStop() {
-    if (!isListening) {
-      return;
-    }
-    setStatus('Processing speech');
-    await voiceListenerRef.current?.stop();
-  }
-
-  function setDisplayEnabled(value: boolean) {
-    setDeviceDisplayEnabled(value);
-    if (!value) {
-      setDeviceDisplaySelfTest(false);
-    }
-  }
-
-  function setDisplaySelfTest(value: boolean) {
-    setDeviceDisplaySelfTest(value);
-    if (value) {
-      setDeviceDisplayEnabled(true);
-    }
-  }
-
-  function setTtsEnabled(value: boolean) {
-    setDeviceTtsEnabled(value);
-    if (value) {
-      setDeviceAudioOutEnabled(true);
-    }
-  }
-
-  function setAudioOutEnabled(value: boolean) {
-    setDeviceAudioOutEnabled(value);
-    if (!value) {
-      setDeviceTtsEnabled(false);
+      Alert.alert('Could not rename conversation', error instanceof Error ? error.message : String(error));
     }
   }
 
   return (
     <SafeAreaView style={styles.root}>
       <StatusBar style="light" />
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <View style={styles.header}>
-          <Text style={styles.title}>WearabLLM v3</Text>
-          <Text style={styles.subtitle}>Android bridge test console</Text>
+      <KeyboardAvoidingView style={styles.keyboardView} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={styles.headerRow}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open conversations"
+            style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+            onPress={() => setIsDrawerOpen(true)}
+          >
+            <Text style={styles.menuGlyph}>☰</Text>
+          </Pressable>
+          <View style={styles.headerCopy}>
+            <Text style={styles.eyebrow}>WEARABLLM</Text>
+            <Text style={styles.title}>Sphere</Text>
+            <Text style={styles.subtitle} numberOfLines={1}>{sessionTitle(selectedSession, activeSessionId)}</Text>
+          </View>
+          {isRefreshingThread ? <ActivityIndicator color="#94a3b8" size="small" /> : null}
         </View>
 
-        <View style={styles.section}>
-          <Text style={styles.label}>Bridge URL</Text>
-          <View style={styles.row}>
-            <TextInput
-              value={bridgeUrl}
-              onChangeText={handleBridgeUrlChange}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              placeholder="http://192.168.1.23:8765"
-              placeholderTextColor="#64748b"
-              style={[styles.input, styles.urlInput]}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.bodyStripScroll}
+          contentContainerStyle={styles.bodyStrip}
+        >
+          {bodies.map((body) => (
+            <View key={body.id} style={[styles.bodyChip, body.status === 'planned' && styles.planned]}>
+              <View style={[styles.bodyDot, { backgroundColor: bodyColor(body.kind) }]} />
+              <Text style={styles.bodyChipLabel}>{body.label}</Text>
+              <Text style={styles.bodyChipState}>{body.status === 'planned' ? 'Planned' : body.seen ? 'Live' : 'Idle'}</Text>
+            </View>
+          ))}
+        </ScrollView>
+
+        <ScrollView
+          ref={messageScrollRef}
+          style={styles.messages}
+          contentContainerStyle={styles.messageContent}
+          keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() => messageScrollRef.current?.scrollToEnd({ animated: true })}
+        >
+          {turns.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyTitle}>Quiet sphere</Text>
+              <Text style={styles.emptyText}>Send a message here or speak through Waveshare to begin.</Text>
+            </View>
+          ) : turns.map((turn, index) => {
+            const body = bodies.find((item) => item.id === turn.device_id);
+            const assistant = turn.role === 'assistant';
+            return (
+              <View key={`${turn.id}-${index}`} style={[styles.bubble, assistant ? styles.assistantBubble : styles.userBubble]}>
+                <View style={styles.bubbleMeta}>
+                  <View style={[styles.bodyDot, { backgroundColor: bodyColor(body?.kind ?? 'custom') }]} />
+                  <Text style={styles.bubbleDevice}>{body?.label ?? turn.device_id}</Text>
+                  <Text style={styles.bubbleRole}>{assistant ? 'WearabLLM' : 'You'}</Text>
+                  <Text style={styles.bubbleTime}>{formatTurnTime(turn.created_at)}</Text>
+                </View>
+                <Text style={styles.bubbleText}>{turn.content}</Text>
+              </View>
+            );
+          })}
+          {isThinking ? (
+            <View style={[styles.bubble, styles.assistantBubble, styles.thinkingBubble]}>
+              <View style={styles.bubbleMeta}>
+                <View style={[styles.bodyDot, { backgroundColor: '#7cf0c2' }]} />
+                <Text style={styles.bubbleDevice}>Sphere</Text>
+                <Text style={styles.bubbleRole}>WearabLLM</Text>
+              </View>
+              <Text style={styles.thinkingText}>Thinking…</Text>
+            </View>
+          ) : null}
+        </ScrollView>
+
+        <View style={styles.composer}>
+          <View style={styles.deliveryRow}>
+            <Switch
+              value={deliverToWaveshare}
+              onValueChange={setDeliverToWaveshare}
+              trackColor={{ false: '#334155', true: '#287b63' }}
+              thumbColor={deliverToWaveshare ? '#7cf0c2' : '#94a3b8'}
             />
-            <Pressable style={styles.secondaryButton} onPress={handleSaveBridgeUrl}>
-              <Text style={styles.secondaryButtonText}>Save</Text>
-            </Pressable>
+            <Text style={styles.deliveryLabel}>Also play on Waveshare</Text>
+            <Text style={styles.statusText} numberOfLines={1}>{status}</Text>
+          </View>
+          <View style={styles.inputRow}>
+            <TextInput
+              value={transcript}
+              onChangeText={setTranscript}
+              multiline
+              editable={isCurrentConversation && !isSending}
+              placeholder={isCurrentConversation ? 'Message Sphere…' : 'Archived conversation'}
+              placeholderTextColor="#64748b"
+              style={styles.messageInput}
+            />
             <Pressable
-              style={[styles.secondaryButton, isCheckingHealth && styles.disabledButton]}
-              onPress={handleCheckBridge}
-              disabled={isCheckingHealth}
+              accessibilityRole="button"
+              accessibilityLabel={deliverToWaveshare ? 'Send and play on Waveshare' : 'Send message'}
+              style={({ pressed }) => [styles.sendButton, (pressed || isSending) && styles.pressed, (!transcript.trim() || !isCurrentConversation) && styles.disabled]}
+              onPress={() => void submitTranscript()}
+              disabled={isSending || !transcript.trim() || !isCurrentConversation}
             >
-              <Text style={styles.secondaryButtonText}>{isCheckingHealth ? 'Checking' : 'Check'}</Text>
+              {isSending ? <ActivityIndicator color="#07110e" size="small" /> : <Text style={styles.sendText}>↑</Text>}
             </Pressable>
           </View>
-          {bridgeHealth ? (
-            <View style={styles.healthPanel}>
-              <View style={styles.healthHeader}>
-                <Text style={styles.healthTitle}>
-                  {bridgeHealth.config.dry_run ? `Dry Run ${bridgeHealth.config.dry_run_command ?? ''}` : 'Live API'}
-                </Text>
-                <Text style={styles.healthService}>{bridgeHealth.service || 'wearabllm-bridge'}</Text>
-              </View>
-              {bridgeBenchSummary ? (
-                <View style={styles.benchSummaryRow}>
-                  <View
-                    style={[
-                      styles.benchSummaryDot,
-                      {
-                        backgroundColor: bridgeBenchSummary.latestAudioAudible
-                          ? '#22c55e'
-                          : bridgeBenchSummary.readyForDryRun
-                            ? '#f59e0b'
-                            : '#ef4444',
-                      },
-                    ]}
-                  />
-                  <Text style={styles.benchSummaryText}>{bridgeBenchSummary.message}</Text>
-                </View>
-              ) : null}
-              <Text style={styles.healthLine}>STT: {bridgeHealth.config.stt ?? 'unknown'} / {bridgeHealth.config.stt_model ?? 'unknown'}</Text>
-              <Text style={styles.healthLine}>LLM: {bridgeHealth.config.llm_model ?? 'unknown'}</Text>
-              <Text style={styles.healthLine}>TTS: {bridgeHealth.config.tts_model ?? 'unknown'} / {bridgeHealth.config.tts_voice ?? 'unknown'}</Text>
-              <Text style={styles.healthLine}>Audio cap: {formatBytes(bridgeHealth.config.max_audio_bytes)}</Text>
-              {bridgeHealth.config.dry_run_sequence?.length ? (
-                <Text style={styles.healthLine}>Sequence: {bridgeHealth.config.dry_run_sequence.join(' -> ')}</Text>
-              ) : null}
-              <Text style={styles.healthLine}>
-                Device config: {bridgeHealth.config.device_config ? 'enabled' : 'disabled'}
-              </Text>
-              {bridgeHealth.config.firmware_config ? (
-                bridgeHealth.config.firmware_config.available ? (
-                  <>
-                    <Text style={styles.healthLine}>
-                      Firmware ready: {bridgeHealth.config.firmware_config.ready ? 'yes' : 'no'}
-                    </Text>
-                    <Text style={styles.healthLine}>
-                      Device Wi-Fi: {bridgeHealth.config.firmware_config.wifi_ssid_set ? 'SSID set' : 'SSID empty'} / {bridgeHealth.config.firmware_config.wifi_password_set ? 'password set' : 'password empty'}
-                    </Text>
-                    <Text style={styles.healthLine}>
-                      Firmware bridge: {bridgeHealth.config.firmware_config.bridge_url ?? 'empty'}
-                    </Text>
-                    <Text style={styles.healthLine}>
-                      Bridge target match: {bridgeBenchSummary?.bridgeTargetMatches == null ? 'unknown' : bridgeBenchSummary.bridgeTargetMatches ? 'yes' : 'no'}
-                    </Text>
-                    {bridgeBenchSummary?.bridgeTargetMatches === false && bridgeHealth.config.firmware_config.bridge_url ? (
-                      <Pressable style={styles.inlineButton} onPress={handleUseFirmwareBridgeUrl}>
-                        <Text style={styles.inlineButtonText}>Use Firmware URL</Text>
-                      </Pressable>
-                    ) : null}
-                    <Text style={styles.healthLine}>
-                      PTT: GPIO {bridgeHealth.config.firmware_config.ptt_gpio ?? 'default'} / active {bridgeHealth.config.firmware_config.ptt_active_level ?? 'default'} / debounce {bridgeHealth.config.firmware_config.ptt_debounce_ms ?? 'default'} ms / pull {bridgeHealth.config.firmware_config.ptt_pull ?? 'default'}
-                    </Text>
-                    <Text style={styles.healthLine}>
-                      RGB ring boot test: {bridgeHealth.config.firmware_config.led_self_test ? 'on' : 'off'}
-                    </Text>
-                    <Text style={styles.healthLine}>
-                      Speaker: {bridgeHealth.config.firmware_config.audio_out_enabled ? 'on' : 'off'} / volume {bridgeHealth.config.firmware_config.audio_out_volume ?? 'default'}
-                    </Text>
-                    <Text style={styles.healthLine}>
-                      TTS playback: {bridgeHealth.config.firmware_config.tts_enabled ? 'on' : 'off'} / max {formatBytes(bridgeHealth.config.firmware_config.tts_max_bytes ?? undefined)}
-                    </Text>
-                    <Text style={styles.healthLine}>
-                      TFT: {bridgeHealth.config.firmware_config.display_enabled ? 'on' : 'off'} / boot test {bridgeHealth.config.firmware_config.display_self_test ? 'on' : 'off'}
-                    </Text>
-                  </>
-                ) : (
-                  <Text style={styles.healthLine}>
-                    Firmware config: {bridgeHealth.config.firmware_config.error ?? 'unavailable'}
-                  </Text>
-                )
-              ) : null}
-              {bridgeHealth.config.save_wav_dir ? (
-                <Text style={styles.healthLine}>WAV capture: {bridgeHealth.config.save_wav_dir}</Text>
-              ) : null}
-              <Text style={styles.healthLine}>Audio uploads: {bridgeHealth.config.capture_count ?? 0}</Text>
-              {bridgeHealth.config.latest_capture ? (
-                <Text style={styles.healthLine}>
-                  Last audio: {formatBytes(bridgeHealth.config.latest_capture.audio_bytes)}
-                  {bridgeHealth.config.latest_capture.command ? ` / ${bridgeHealth.config.latest_capture.command}` : ''}
-                  {bridgeHealth.config.latest_capture.wav_info?.duration_ms ? ` / ${bridgeHealth.config.latest_capture.wav_info.duration_ms} ms` : ''}
-                  {bridgeHealth.config.latest_capture.wav_info?.appears_silent ? ' / silent' : ' / not silent'}
-                </Text>
-              ) : null}
-            </View>
-          ) : null}
+          {lastAction ? <Text style={styles.actionText}>Waveshare {lastAction.status}{lastAction.error ? ` · ${lastAction.error}` : ''}</Text> : null}
         </View>
+      </KeyboardAvoidingView>
 
-        <View style={styles.section}>
-          <Text style={styles.label}>Device Config</Text>
-          <TextInput
-            value={deviceWifiSsid}
-            onChangeText={setDeviceWifiSsid}
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholder="Wi-Fi name"
-            placeholderTextColor="#64748b"
-            style={styles.input}
-          />
-          <TextInput
-            value={deviceWifiPassword}
-            onChangeText={setDeviceWifiPassword}
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry
-            placeholder="Wi-Fi password"
-            placeholderTextColor="#64748b"
-            style={styles.input}
-          />
-          <TextInput
-            value={deviceWifiBssid}
-            onChangeText={setDeviceWifiBssid}
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholder="AP MAC optional, e.g. 02:00:00:00:00:01"
-            placeholderTextColor="#64748b"
-            style={styles.input}
-          />
-          <View style={styles.pttGrid}>
-            <View style={styles.pttInputBlock}>
-              <Text style={styles.fieldLabel}>PTT GPIO</Text>
-              <TextInput
-                value={devicePttGpio}
-                onChangeText={setDevicePttGpio}
-                keyboardType="number-pad"
-                placeholder="0"
-                placeholderTextColor="#64748b"
-                style={styles.input}
-              />
-            </View>
-            <View style={styles.pttInputBlock}>
-              <Text style={styles.fieldLabel}>Active Level</Text>
-              <View style={styles.segmentRow}>
-                {['0', '1'].map((level) => (
-                  <Pressable
-                    key={level}
-                    style={[styles.segmentButton, devicePttActiveLevel === level && styles.segmentButtonActive]}
-                    onPress={() => setDevicePttActiveLevel(level)}
-                  >
-                    <Text style={[styles.segmentText, devicePttActiveLevel === level && styles.segmentTextActive]}>
-                      {level}
-                    </Text>
-                  </Pressable>
-                ))}
+      {isDrawerOpen ? (
+        <View style={styles.drawerLayer}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Close conversations" style={styles.drawerBackdrop} onPress={() => setIsDrawerOpen(false)} />
+          <SafeAreaView style={styles.drawer}>
+            <View style={styles.drawerHeader}>
+              <View>
+                <Text style={styles.eyebrow}>SPHERE</Text>
+                <Text style={styles.drawerTitle}>{showArchived ? 'Archive' : 'Conversations'}</Text>
               </View>
-            </View>
-            <View style={styles.pttInputBlock}>
-              <Text style={styles.fieldLabel}>Debounce MS</Text>
-              <TextInput
-                value={devicePttDebounceMs}
-                onChangeText={setDevicePttDebounceMs}
-                keyboardType="number-pad"
-                placeholder="35"
-                placeholderTextColor="#64748b"
-                style={styles.input}
-              />
-            </View>
-          </View>
-          <View>
-            <Text style={styles.fieldLabel}>PTT Pull</Text>
-            <View style={styles.segmentRow}>
-              {['up', 'down', 'none'].map((pull) => (
-                <Pressable
-                  key={pull}
-                  style={[styles.segmentButton, devicePttPull === pull && styles.segmentButtonActive]}
-                  onPress={() => setDevicePttPull(pull)}
-                >
-                  <Text style={[styles.segmentText, devicePttPull === pull && styles.segmentTextActive]}>
-                    {pull}
-                  </Text>
+              <View style={styles.drawerActions}>
+                <Pressable style={styles.newButton} onPress={() => void startNewConversation()} accessibilityLabel="New conversation">
+                  <Text style={styles.newButtonText}>+</Text>
                 </Pressable>
-              ))}
-            </View>
-          </View>
-          <View style={styles.toggleGrid}>
-            <View style={styles.pttGrid}>
-              <View style={styles.pttInputBlock}>
-                <Text style={styles.fieldLabel}>Speaker Volume</Text>
-                <TextInput
-                  value={deviceAudioOutVolume}
-                  onChangeText={setDeviceAudioOutVolume}
-                  keyboardType="number-pad"
-                  placeholder="45"
-                  placeholderTextColor="#64748b"
-                  style={styles.input}
-                />
-              </View>
-              <View style={styles.pttInputBlock}>
-                <Text style={styles.fieldLabel}>TTS Max Bytes</Text>
-                <TextInput
-                  value={deviceTtsMaxBytes}
-                  onChangeText={setDeviceTtsMaxBytes}
-                  keyboardType="number-pad"
-                  placeholder="131072"
-                  placeholderTextColor="#64748b"
-                  style={styles.input}
-                />
+                <Pressable style={styles.drawerClose} onPress={() => setIsDrawerOpen(false)} accessibilityLabel="Close">
+                  <Text style={styles.drawerCloseText}>×</Text>
+                </Pressable>
               </View>
             </View>
-            <Pressable style={styles.toggleRow} onPress={() => setAudioOutEnabled(!deviceAudioOutEnabled)}>
-              <View style={[styles.checkbox, deviceAudioOutEnabled && styles.checkboxChecked]}>
-                <Text style={[styles.checkboxMark, deviceAudioOutEnabled && styles.checkboxMarkChecked]}>x</Text>
-              </View>
-              <View style={styles.toggleTextBlock}>
-                <Text style={styles.toggleLabel}>Speaker Output</Text>
-                <Text style={styles.toggleMeta}>ES8311 earcon after bridge replies</Text>
-              </View>
-            </Pressable>
-            <Pressable style={styles.toggleRow} onPress={() => setTtsEnabled(!deviceTtsEnabled)}>
-              <View style={[styles.checkbox, deviceTtsEnabled && styles.checkboxChecked]}>
-                <Text style={[styles.checkboxMark, deviceTtsEnabled && styles.checkboxMarkChecked]}>x</Text>
-              </View>
-              <View style={styles.toggleTextBlock}>
-                <Text style={styles.toggleLabel}>TTS Playback</Text>
-                <Text style={styles.toggleMeta}>Fetch bridge WAV after replies</Text>
-              </View>
-            </Pressable>
-            <Pressable style={styles.toggleRow} onPress={() => setDeviceLedSelfTest(!deviceLedSelfTest)}>
-              <View style={[styles.checkbox, deviceLedSelfTest && styles.checkboxChecked]}>
-                <Text style={[styles.checkboxMark, deviceLedSelfTest && styles.checkboxMarkChecked]}>x</Text>
-              </View>
-              <View style={styles.toggleTextBlock}>
-                <Text style={styles.toggleLabel}>RGB Boot Test</Text>
-                <Text style={styles.toggleMeta}>Cycle the 9 ring commands on reset</Text>
-              </View>
-            </Pressable>
-            <Pressable style={styles.toggleRow} onPress={() => setDisplayEnabled(!deviceDisplayEnabled)}>
-              <View style={[styles.checkbox, deviceDisplayEnabled && styles.checkboxChecked]}>
-                <Text style={[styles.checkboxMark, deviceDisplayEnabled && styles.checkboxMarkChecked]}>x</Text>
-              </View>
-              <View style={styles.toggleTextBlock}>
-                <Text style={styles.toggleLabel}>TFT Display</Text>
-                <Text style={styles.toggleMeta}>Normal status and reply screen</Text>
-              </View>
-            </Pressable>
-            <Pressable style={styles.toggleRow} onPress={() => setDisplaySelfTest(!deviceDisplaySelfTest)}>
-              <View style={[styles.checkbox, deviceDisplaySelfTest && styles.checkboxChecked]}>
-                <Text style={[styles.checkboxMark, deviceDisplaySelfTest && styles.checkboxMarkChecked]}>x</Text>
-              </View>
-              <View style={styles.toggleTextBlock}>
-                <Text style={styles.toggleLabel}>TFT Boot Test</Text>
-                <Text style={styles.toggleMeta}>Color bands and pin-map text</Text>
-              </View>
-            </Pressable>
-          </View>
-          <View style={styles.row}>
-            <Pressable style={styles.secondaryButton} onPress={handleSaveDeviceWifi}>
-              <Text style={styles.secondaryButtonText}>Save Local</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.secondaryButton, isConfiguringWifi && styles.disabledButton]}
-              onPress={handleConfigureDeviceWifi}
-              disabled={isConfiguringWifi}
-            >
-              <Text style={styles.secondaryButtonText}>{isConfiguringWifi ? 'Sending' : 'Send To Bridge'}</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.helperText}>
-            Sends Wi-Fi, PTT, speaker, TTS, and TFT settings to the local bridge only when device config is enabled; rebuild and flash afterward.
-          </Text>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.label}>Test transcript</Text>
-          <Pressable
-            style={[
-              styles.listenButton,
-              isListening && styles.listenButtonActive,
-              (isSending || isListening) && styles.wideDisabledButton,
-            ]}
-            onPressIn={handleListenStart}
-            onPressOut={handleListenStop}
-            disabled={isSending}
-          >
-            <Text style={[styles.listenButtonText, isListening && styles.listenButtonTextActive]}>
-              {isListening ? 'Listening' : 'Hold To Speak'}
-            </Text>
-          </Pressable>
-          <TextInput
-            value={transcript}
-            onChangeText={setTranscript}
-            multiline
-            placeholder="Should I keep wiring the display this way?"
-            placeholderTextColor="#64748b"
-            style={[styles.input, styles.transcriptInput]}
-          />
-          <Pressable
-            style={[styles.primaryButton, isSending && styles.disabledButton]}
-            onPress={handleSend}
-            disabled={isSending}
-          >
-            {isSending ? <ActivityIndicator color="#020617" /> : <Text style={styles.primaryButtonText}>Ask Bridge</Text>}
-          </Pressable>
-        </View>
-
-        <View style={styles.statusBar}>
-          <View style={[styles.statusDot, { backgroundColor: commandColor }]} />
-          <Text style={styles.statusText}>{status}</Text>
-        </View>
-
-        <View style={styles.responsePanel}>
-          <Text style={styles.responseCode}>{lastResponse?.command ?? '--'}</Text>
-          <Text style={styles.responseMeaning}>
-            {lastResponse ? COMMAND_DESCRIPTIONS[lastResponse.command] : 'No response yet'}
-          </Text>
-          <Text style={styles.responseText}>{lastResponse?.reply ?? 'Send a transcript to see the same valence code the ring receives.'}</Text>
-          {lastResponse?.wav_info ? (
-            <Text style={styles.audioMetaText}>
-              WAV: {lastResponse.wav_info.valid ? 'valid' : 'invalid'}
-              {lastResponse.wav_info.sample_rate ? ` / ${lastResponse.wav_info.sample_rate} Hz` : ''}
-              {lastResponse.wav_info.channels ? ` / ${lastResponse.wav_info.channels} ch` : ''}
-              {lastResponse.wav_info.duration_ms ? ` / ${lastResponse.wav_info.duration_ms} ms` : ''}
-              {lastResponse.wav_info.rms_dbfs ? ` / ${lastResponse.wav_info.rms_dbfs} dBFS RMS` : ''}
-              {lastResponse.wav_info.appears_silent ? ' / silent' : ''}
-            </Text>
-          ) : null}
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.label}>Recent responses</Text>
-          {history.length === 0 ? (
-            <Text style={styles.emptyText}>No bridge responses yet.</Text>
-          ) : (
-            history.map((entry, index) => (
-              <View key={`${entry.time}-${index}`} style={styles.historyRow}>
-                <Text style={[styles.historyCode, { color: COMMAND_COLORS[entry.command] }]}>{entry.command}</Text>
-                <View style={styles.historyTextBlock}>
-                  <Text style={styles.historyTranscript} numberOfLines={1}>
-                    {entry.transcript}
-                  </Text>
-                  <Text style={styles.historyReply} numberOfLines={2}>
-                    {entry.reply}
-                  </Text>
+            <ScrollView style={styles.conversationScroll} contentContainerStyle={styles.conversationList}>
+              {visibleSessions.length === 0 ? (
+                <Text style={styles.drawerEmpty}>{showArchived ? 'No archived conversations yet.' : 'No conversations yet. Tap + to begin.'}</Text>
+              ) : visibleSessions.map((session) => (
+                <View key={session.id} style={styles.conversationRowWrap}>
+                  {renamingSessionId === session.id ? (
+                    <View style={[styles.conversationItem, styles.renameEditor]}>
+                      <TextInput
+                        value={renameDraft}
+                        onChangeText={setRenameDraft}
+                        autoFocus
+                        maxLength={120}
+                        placeholder="Conversation name"
+                        placeholderTextColor="#64748b"
+                        style={styles.renameInput}
+                      />
+                      <Pressable style={styles.conversationMenuAction} onPress={() => void saveConversationName(session)}>
+                        <Text style={styles.conversationActionText}>Save</Text>
+                      </Pressable>
+                      <Pressable style={styles.conversationMenuAction} onPress={() => setRenamingSessionId('')}>
+                        <Text style={styles.conversationActionText}>Cancel</Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <View style={[styles.conversationItem, session.id === selectedSessionId && styles.conversationItemActive]}>
+                      <Pressable style={styles.conversationCopy} onPress={() => chooseConversation(session.id)}>
+                        <Text style={styles.conversationTitle} numberOfLines={1}>{sessionTitle(session, activeSessionId)}</Text>
+                        <Text style={styles.conversationTime}>{formatSessionTime(session.last_turn_at ?? session.started_at)}</Text>
+                      </Pressable>
+                      {session.id === activeSessionId ? <Text style={styles.liveBadge}>LIVE</Text> : session.archived_at ? <Text style={styles.archivedBadge}>ARCHIVED</Text> : null}
+                      <Pressable
+                        style={styles.moreButton}
+                        accessibilityLabel={`Actions for ${sessionTitle(session, activeSessionId)}`}
+                        onPress={() => setMenuSessionId((current) => current === session.id ? '' : session.id)}
+                      >
+                        <Text style={styles.moreButtonText}>…</Text>
+                      </Pressable>
+                    </View>
+                  )}
+                  {menuSessionId === session.id && renamingSessionId !== session.id ? (
+                    <View style={styles.conversationMenu}>
+                      <Pressable
+                        style={styles.conversationMenuAction}
+                        onPress={() => {
+                          setMenuSessionId('');
+                          setRenamingSessionId(session.id);
+                          setRenameDraft(session.title || sessionTitle(session, activeSessionId));
+                        }}
+                      >
+                        <Text style={styles.conversationActionText}>Rename</Text>
+                      </Pressable>
+                      {!session.archived_at ? (
+                        <Pressable style={styles.conversationMenuAction} onPress={() => confirmArchiveConversation(session)}>
+                          <Text style={styles.archiveActionText}>Archive</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  ) : null}
                 </View>
-                <Text style={styles.historyTime}>{entry.time}</Text>
-              </View>
-            ))
-          )}
+              ))}
+            </ScrollView>
+
+            <Pressable style={[styles.archiveToggle, showArchived && styles.archiveToggleActive]} onPress={toggleArchiveView}>
+              <Text style={styles.archiveToggleText}>{showArchived ? '← Conversations' : 'Archive'}</Text>
+              <Text style={styles.archiveCount}>{archivedCount}</Text>
+            </Pressable>
+
+            <View style={styles.configPanel}>
+              <Pressable style={styles.configToggle} onPress={() => setIsConfigOpen((current) => !current)}>
+                <View style={styles.configToggleCopy}>
+                  <Text style={styles.configToggleTitle}>Connection</Text>
+                  <Text style={styles.configToggleMeta} numberOfLines={1}>{normalizeBridgeBaseUrl(bridgeUrl) || 'Not configured'}</Text>
+                </View>
+                <Text style={styles.configChevron}>{isConfigOpen ? '▲' : '▼'}</Text>
+              </Pressable>
+              {isConfigOpen ? (
+                <ScrollView style={styles.configBodyScroll} keyboardShouldPersistTaps="handled">
+                  <View style={styles.configBody}>
+                    <Text style={styles.label}>Sphere bridge URL</Text>
+                    <TextInput
+                      value={bridgeUrl}
+                      onChangeText={(value) => {
+                        bridgeUrlRef.current = value;
+                        healthRequestIdRef.current += 1;
+                        setBridgeUrl(value);
+                        setBridgeHealth(null);
+                      }}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType="url"
+                      placeholder="https://brick-factorial-wearabllm-agent.hf.space"
+                      placeholderTextColor="#64748b"
+                      style={styles.configInput}
+                    />
+                    <Text style={styles.label}>Bridge token</Text>
+                    <TextInput
+                      value={bridgeToken}
+                      onChangeText={(value) => {
+                        bridgeTokenRef.current = value;
+                        healthRequestIdRef.current += 1;
+                        setBridgeToken(value);
+                        setBridgeHealth(null);
+                      }}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      secureTextEntry
+                      placeholder="Only if bridge auth is enabled"
+                      placeholderTextColor="#64748b"
+                      style={styles.configInput}
+                    />
+                    <Pressable style={[styles.testButton, isCheckingHealth && styles.disabled]} onPress={() => void handleCheckBridge()} disabled={isCheckingHealth}>
+                      {isCheckingHealth ? <ActivityIndicator color="#e2e8f0" size="small" /> : <Text style={styles.testButtonText}>Save & test</Text>}
+                    </Pressable>
+                    <Text style={bridgeHealth ? styles.connectedText : styles.helperText}>
+                      {bridgeHealth ? '● Connected to Sphere' : `Body ID: ${appDeviceId}`}
+                    </Text>
+                  </View>
+                </ScrollView>
+              ) : null}
+            </View>
+          </SafeAreaView>
         </View>
-      </ScrollView>
+      ) : null}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#0b1020',
-  },
-  content: {
-    padding: 18,
-    gap: 18,
-  },
-  header: {
-    paddingTop: 10,
-    paddingBottom: 2,
-  },
-  title: {
-    color: '#f8fafc',
-    fontSize: 30,
-    fontWeight: '700',
-  },
-  subtitle: {
-    color: '#94a3b8',
-    fontSize: 15,
-    marginTop: 4,
-  },
-  section: {
-    gap: 10,
-  },
-  label: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  fieldLabel: {
-    color: '#94a3b8',
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: 6,
-    textTransform: 'uppercase',
-  },
-  row: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  input: {
-    backgroundColor: '#111827',
-    borderColor: '#334155',
-    borderRadius: 8,
-    borderWidth: 1,
-    color: '#f8fafc',
-    fontSize: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-  },
-  urlInput: {
-    flex: 1,
-    minWidth: 210,
-  },
-  transcriptInput: {
-    minHeight: 120,
-    textAlignVertical: 'top',
-  },
-  pttGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  pttInputBlock: {
-    flex: 1,
-    minWidth: 140,
-  },
-  segmentRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  segmentButton: {
-    alignItems: 'center',
-    backgroundColor: '#111827',
-    borderColor: '#334155',
-    borderRadius: 8,
-    borderWidth: 1,
-    flex: 1,
-    justifyContent: 'center',
-    minHeight: 46,
-  },
-  segmentButtonActive: {
-    backgroundColor: '#e2e8f0',
-    borderColor: '#f8fafc',
-  },
-  segmentText: {
-    color: '#cbd5e1',
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
-  segmentTextActive: {
-    color: '#020617',
-  },
-  toggleGrid: {
-    gap: 8,
-  },
-  toggleRow: {
-    alignItems: 'center',
-    backgroundColor: '#111827',
-    borderColor: '#334155',
-    borderRadius: 8,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 10,
-    minHeight: 58,
-    padding: 10,
-  },
-  checkbox: {
-    alignItems: 'center',
-    borderColor: '#64748b',
-    borderRadius: 4,
-    borderWidth: 1,
-    height: 22,
-    justifyContent: 'center',
-    width: 22,
-  },
-  checkboxChecked: {
-    backgroundColor: '#e2e8f0',
-    borderColor: '#f8fafc',
-  },
-  checkboxMark: {
-    color: 'transparent',
-    fontSize: 13,
-    fontWeight: '900',
-    lineHeight: 16,
-  },
-  checkboxMarkChecked: {
-    color: '#020617',
-  },
-  toggleTextBlock: {
-    flex: 1,
-    gap: 2,
-  },
-  toggleLabel: {
-    color: '#f8fafc',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  toggleMeta: {
-    color: '#94a3b8',
-    fontSize: 12,
-  },
-  primaryButton: {
-    alignItems: 'center',
-    backgroundColor: '#f8fafc',
-    borderRadius: 8,
-    minHeight: 48,
-    justifyContent: 'center',
-  },
-  primaryButtonText: {
-    color: '#020617',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  secondaryButton: {
-    alignItems: 'center',
-    backgroundColor: '#1e293b',
-    borderColor: '#475569',
-    borderRadius: 8,
-    borderWidth: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-  },
-  secondaryButtonText: {
-    color: '#e2e8f0',
-    fontWeight: '700',
-  },
-  inlineButton: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#1f2937',
-    borderColor: '#475569',
-    borderRadius: 8,
-    borderWidth: 1,
-    minHeight: 38,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  inlineButtonText: {
-    color: '#f8fafc',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  healthPanel: {
-    backgroundColor: '#111827',
-    borderColor: '#334155',
-    borderRadius: 8,
-    borderWidth: 1,
-    gap: 4,
-    padding: 12,
-  },
-  healthHeader: {
-    alignItems: 'baseline',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 2,
-  },
-  healthTitle: {
-    color: '#f8fafc',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  healthService: {
-    color: '#64748b',
-    fontSize: 12,
-  },
-  healthLine: {
-    color: '#cbd5e1',
-    fontSize: 13,
-  },
-  benchSummaryRow: {
-    alignItems: 'center',
-    backgroundColor: '#0f172a',
-    borderColor: '#334155',
-    borderRadius: 8,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 4,
-    padding: 10,
-  },
-  benchSummaryDot: {
-    borderRadius: 5,
-    height: 10,
-    width: 10,
-  },
-  benchSummaryText: {
-    color: '#e2e8f0',
-    flex: 1,
-    fontSize: 13,
-    fontWeight: '700',
-    lineHeight: 18,
-  },
-  helperText: {
-    color: '#94a3b8',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  disabledButton: {
-    opacity: 0.7,
-  },
-  wideDisabledButton: {
-    opacity: 0.8,
-  },
-  listenButton: {
-    alignItems: 'center',
-    backgroundColor: '#1e293b',
-    borderColor: '#475569',
-    borderRadius: 8,
-    borderWidth: 1,
-    minHeight: 56,
-    justifyContent: 'center',
-  },
-  listenButtonActive: {
-    backgroundColor: '#f8fafc',
-    borderColor: '#f8fafc',
-  },
-  listenButtonText: {
-    color: '#e2e8f0',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  listenButtonTextActive: {
-    color: '#020617',
-  },
-  statusBar: {
-    alignItems: 'center',
-    backgroundColor: '#111827',
-    borderColor: '#334155',
-    borderRadius: 8,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 10,
-    padding: 12,
-  },
-  statusDot: {
-    borderRadius: 7,
-    height: 14,
-    width: 14,
-  },
-  statusText: {
-    color: '#cbd5e1',
-    fontSize: 14,
-  },
-  responsePanel: {
-    backgroundColor: '#111827',
-    borderColor: '#334155',
-    borderRadius: 8,
-    borderWidth: 1,
-    padding: 16,
-  },
-  responseCode: {
-    color: '#f8fafc',
-    fontSize: 44,
-    fontWeight: '800',
-  },
-  responseMeaning: {
-    color: '#cbd5e1',
-    fontSize: 16,
-    marginTop: 2,
-  },
-  responseText: {
-    color: '#f8fafc',
-    fontSize: 18,
-    lineHeight: 25,
-    marginTop: 14,
-  },
-  audioMetaText: {
-    color: '#94a3b8',
-    fontSize: 13,
-    marginTop: 10,
-  },
-  emptyText: {
-    color: '#64748b',
-  },
-  historyRow: {
-    alignItems: 'center',
-    backgroundColor: '#111827',
-    borderColor: '#1f2937',
-    borderRadius: 8,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 12,
-    padding: 12,
-  },
-  historyCode: {
-    fontSize: 18,
-    fontWeight: '800',
-    width: 34,
-  },
-  historyTextBlock: {
-    flex: 1,
-    gap: 3,
-  },
-  historyTranscript: {
-    color: '#e2e8f0',
-    fontSize: 14,
-  },
-  historyReply: {
-    color: '#94a3b8',
-    fontSize: 13,
-  },
-  historyTime: {
-    color: '#64748b',
-    fontSize: 12,
-  },
+  root: { flex: 1, backgroundColor: '#0b1020' },
+  keyboardView: { flex: 1 },
+  headerRow: { alignItems: 'center', flexDirection: 'row', gap: 10, paddingHorizontal: 14, paddingBottom: 8, paddingTop: 8 },
+  headerCopy: { flex: 1 },
+  eyebrow: { color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 1.5 },
+  title: { color: '#f8fafc', fontSize: 27, fontWeight: '800', lineHeight: 30 },
+  subtitle: { color: '#94a3b8', fontSize: 12, marginTop: 1 },
+  iconButton: { alignItems: 'center', backgroundColor: '#111827', borderColor: '#334155', borderRadius: 9, borderWidth: 1, height: 36, justifyContent: 'center', width: 36 },
+  menuGlyph: { color: '#f8fafc', fontSize: 18 },
+  pressed: { opacity: 0.68, transform: [{ scale: 0.97 }] },
+  bodyStripScroll: { flexGrow: 0, height: 45 },
+  bodyStrip: { alignItems: 'center', gap: 7, paddingHorizontal: 14, paddingVertical: 5 },
+  bodyChip: { alignItems: 'center', backgroundColor: '#111827', borderColor: '#273449', borderRadius: 999, borderWidth: 1, flexDirection: 'row', gap: 6, paddingHorizontal: 9, paddingVertical: 6 },
+  bodyDot: { borderRadius: 4, height: 8, width: 8 },
+  bodyChipLabel: { color: '#e2e8f0', fontSize: 11, fontWeight: '800' },
+  bodyChipState: { color: '#64748b', fontSize: 9, textTransform: 'uppercase' },
+  planned: { opacity: 0.5 },
+  messages: { borderTopColor: '#1e293b', borderTopWidth: 1, flex: 1 },
+  messageContent: { flexGrow: 1, gap: 9, padding: 14 },
+  emptyState: { alignItems: 'center', flex: 1, justifyContent: 'center', padding: 28 },
+  emptyTitle: { color: '#f8fafc', fontSize: 20, fontWeight: '800' },
+  emptyText: { color: '#64748b', lineHeight: 19, marginTop: 6, textAlign: 'center' },
+  bubble: { borderRadius: 13, borderWidth: 1, gap: 7, maxWidth: '91%', paddingHorizontal: 12, paddingVertical: 10 },
+  userBubble: { alignSelf: 'flex-end', backgroundColor: '#182236', borderBottomRightRadius: 4, borderColor: '#334155' },
+  assistantBubble: { alignSelf: 'flex-start', backgroundColor: '#101827', borderBottomLeftRadius: 4, borderColor: '#273449' },
+  thinkingBubble: { borderColor: '#287b63', minWidth: 132 },
+  thinkingText: { color: '#7cf0c2', fontSize: 15, fontWeight: '800' },
+  bubbleMeta: { alignItems: 'center', flexDirection: 'row', gap: 5 },
+  bubbleDevice: { color: '#cbd5e1', fontSize: 10, fontWeight: '800' },
+  bubbleRole: { color: '#64748b', fontSize: 10 },
+  bubbleTime: { color: '#64748b', flex: 1, fontSize: 9, textAlign: 'right' },
+  bubbleText: { color: '#f8fafc', fontSize: 15, lineHeight: 21 },
+  composer: { borderTopColor: '#273449', borderTopWidth: 1, gap: 7, paddingHorizontal: 12, paddingBottom: 10, paddingTop: 8 },
+  deliveryRow: { alignItems: 'center', flexDirection: 'row', gap: 5, minHeight: 28 },
+  deliveryLabel: { color: '#cbd5e1', fontSize: 11, fontWeight: '700' },
+  statusText: { color: '#64748b', flex: 1, fontSize: 10, textAlign: 'right' },
+  inputRow: { alignItems: 'flex-end', flexDirection: 'row', gap: 8 },
+  messageInput: { backgroundColor: '#111827', borderColor: '#334155', borderRadius: 14, borderWidth: 1, color: '#f8fafc', flex: 1, fontSize: 15, maxHeight: 112, minHeight: 42, paddingHorizontal: 12, paddingVertical: 9, textAlignVertical: 'top' },
+  sendButton: { alignItems: 'center', backgroundColor: '#7cf0c2', borderRadius: 21, height: 42, justifyContent: 'center', width: 42 },
+  sendText: { color: '#07110e', fontSize: 23, fontWeight: '900', lineHeight: 25 },
+  disabled: { opacity: 0.42 },
+  actionText: { color: '#94a3b8', fontSize: 10 },
+  drawerLayer: { ...StyleSheet.absoluteFillObject, flexDirection: 'row', zIndex: 20 },
+  drawerBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(2, 6, 23, 0.72)' },
+  drawer: { backgroundColor: '#0f1624', borderRightColor: '#334155', borderRightWidth: 1, elevation: 12, maxWidth: 360, width: '88%' },
+  drawerHeader: { alignItems: 'center', borderBottomColor: '#273449', borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', padding: 15 },
+  drawerTitle: { color: '#f8fafc', fontSize: 23, fontWeight: '800' },
+  drawerActions: { flexDirection: 'row', gap: 7 },
+  newButton: { alignItems: 'center', backgroundColor: '#16342d', borderColor: '#4f9d83', borderRadius: 17, borderWidth: 1, height: 34, justifyContent: 'center', width: 34 },
+  newButtonText: { color: '#7cf0c2', fontSize: 23, lineHeight: 25 },
+  drawerClose: { alignItems: 'center', height: 34, justifyContent: 'center', width: 34 },
+  drawerCloseText: { color: '#cbd5e1', fontSize: 27, fontWeight: '300' },
+  conversationScroll: { flex: 1 },
+  conversationList: { gap: 6, padding: 12 },
+  drawerEmpty: { color: '#64748b', padding: 20, textAlign: 'center' },
+  conversationItem: { alignItems: 'center', backgroundColor: '#111827', borderColor: '#273449', borderRadius: 11, borderWidth: 1, flexDirection: 'row', gap: 8, padding: 10 },
+  conversationRowWrap: { gap: 5 },
+  conversationItemActive: { backgroundColor: '#17272d', borderColor: '#4f9d83' },
+  conversationCopy: { flex: 1 },
+  conversationTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
+  conversationTime: { color: '#64748b', fontSize: 10, marginTop: 2 },
+  liveBadge: { color: '#7cf0c2', fontSize: 9, fontWeight: '900', letterSpacing: 0.8 },
+  archivedBadge: { color: '#64748b', fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
+  conversationActionText: { color: '#93c5fd', fontSize: 9, fontWeight: '800' },
+  archiveActionText: { color: '#f0b27a', fontSize: 9, fontWeight: '800' },
+  renameEditor: { gap: 5 },
+  renameInput: { backgroundColor: '#0b1020', borderColor: '#4f9d83', borderRadius: 7, borderWidth: 1, color: '#f8fafc', flex: 1, fontSize: 12, paddingHorizontal: 8, paddingVertical: 6 },
+  moreButton: { alignItems: 'center', borderColor: '#334155', borderRadius: 8, borderWidth: 1, height: 30, justifyContent: 'center', width: 30 },
+  moreButtonText: { color: '#94a3b8', fontSize: 18, lineHeight: 18 },
+  conversationMenu: { alignSelf: 'flex-end', backgroundColor: '#0b1020', borderColor: '#334155', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 4, padding: 4 },
+  conversationMenuAction: { paddingHorizontal: 9, paddingVertical: 6 },
+  archiveToggle: { alignItems: 'center', borderColor: '#273449', borderRadius: 9, borderWidth: 1, flexDirection: 'row', justifyContent: 'center', marginHorizontal: 12, marginBottom: 8, padding: 8 },
+  archiveToggleActive: { borderColor: '#93c5fd' },
+  archiveToggleText: { color: '#94a3b8', fontSize: 11, fontWeight: '800' },
+  archiveCount: { backgroundColor: '#1e293b', borderRadius: 10, color: '#cbd5e1', fontSize: 9, marginLeft: 6, minWidth: 20, paddingHorizontal: 5, paddingVertical: 3, textAlign: 'center' },
+  configPanel: { borderTopColor: '#334155', borderTopWidth: 1, flexShrink: 0 },
+  configToggle: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 54, paddingHorizontal: 14, paddingVertical: 9 },
+  configToggleCopy: { flex: 1, gap: 2 },
+  configToggleTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
+  configToggleMeta: { color: '#94a3b8', fontSize: 10, maxWidth: '92%' },
+  configChevron: { color: '#facc15', fontSize: 11, fontWeight: '900' },
+  configBodyScroll: { maxHeight: 310 },
+  configBody: { borderTopColor: '#273449', borderTopWidth: 1, gap: 8, padding: 13 },
+  label: { color: '#cbd5e1', fontSize: 10, fontWeight: '800', letterSpacing: 0.7, textTransform: 'uppercase' },
+  configInput: { backgroundColor: '#111827', borderColor: '#334155', borderRadius: 8, borderWidth: 1, color: '#f8fafc', fontSize: 14, paddingHorizontal: 11, paddingVertical: 9 },
+  testButton: { alignItems: 'center', backgroundColor: '#1e293b', borderColor: '#475569', borderRadius: 8, borderWidth: 1, justifyContent: 'center', minHeight: 40, paddingHorizontal: 12 },
+  testButtonText: { color: '#e2e8f0', fontSize: 13, fontWeight: '800' },
+  helperText: { color: '#94a3b8', fontSize: 11 },
+  connectedText: { color: '#6ee7b7', fontSize: 11, fontWeight: '700' },
 });

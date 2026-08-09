@@ -3,6 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 import { normalizeBridgeBaseUrl } from '../protocol/bridgeClient';
 
 const BRIDGE_URL_KEY = 'wearabllm_v3_bridge_url';
+const BRIDGE_TOKEN_KEY = 'wearabllm_v3_bridge_token';
 const DEVICE_WIFI_SSID_KEY = 'wearabllm_v3_device_wifi_ssid';
 const DEVICE_WIFI_PASSWORD_KEY = 'wearabllm_v3_device_wifi_password';
 const DEVICE_WIFI_BSSID_KEY = 'wearabllm_v3_device_wifi_bssid';
@@ -17,7 +18,18 @@ const DEVICE_TTS_MAX_BYTES_KEY = 'wearabllm_v3_device_tts_max_bytes';
 const DEVICE_LED_SELF_TEST_KEY = 'wearabllm_v3_device_led_self_test';
 const DEVICE_DISPLAY_ENABLED_KEY = 'wearabllm_v3_device_display_enabled';
 const DEVICE_DISPLAY_SELF_TEST_KEY = 'wearabllm_v3_device_display_self_test';
-const DEFAULT_BRIDGE_URL = 'http://192.168.1.10:8765';
+const DEFAULT_BRIDGE_URL = 'https://brick-factorial-wearabllm-agent.hf.space';
+const APP_DEVICE_ID_KEY = 'wearabllm_v3_app_device_id';
+const ANDROID_BODY_DEVICE_ID = 'wearabllm-android';
+
+export async function loadAppDeviceId(): Promise<string> {
+  const existing = await SecureStore.getItemAsync(APP_DEVICE_ID_KEY);
+  if (existing === ANDROID_BODY_DEVICE_ID) {
+    return existing;
+  }
+  await SecureStore.setItemAsync(APP_DEVICE_ID_KEY, ANDROID_BODY_DEVICE_ID);
+  return ANDROID_BODY_DEVICE_ID;
+}
 
 export async function loadBridgeUrl(): Promise<string> {
   return normalizeBridgeBaseUrl((await SecureStore.getItemAsync(BRIDGE_URL_KEY)) || DEFAULT_BRIDGE_URL);
@@ -25,6 +37,14 @@ export async function loadBridgeUrl(): Promise<string> {
 
 export async function saveBridgeUrl(url: string): Promise<void> {
   await SecureStore.setItemAsync(BRIDGE_URL_KEY, normalizeBridgeBaseUrl(url));
+}
+
+export async function loadBridgeToken(): Promise<string> {
+  return (await SecureStore.getItemAsync(BRIDGE_TOKEN_KEY)) || '';
+}
+
+export async function saveBridgeToken(token: string): Promise<void> {
+  await SecureStore.setItemAsync(BRIDGE_TOKEN_KEY, token.trim());
 }
 
 export interface DeviceWifiSettings {

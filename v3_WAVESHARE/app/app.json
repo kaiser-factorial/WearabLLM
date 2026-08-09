@@ -9,24 +9,11 @@
     "android": {
       "package": "com.wearabllm.v3",
       "permissions": [
-        "INTERNET",
-        "RECORD_AUDIO",
-        "BLUETOOTH",
-        "BLUETOOTH_ADMIN",
-        "BLUETOOTH_CONNECT",
-        "BLUETOOTH_SCAN",
-        "ACCESS_FINE_LOCATION"
+        "INTERNET"
       ]
     },
     "plugins": [
-      "expo-secure-store",
-      [
-        "expo-speech-recognition",
-        {
-          "microphonePermission": "WearabLLM uses your microphone for push-to-talk voice input.",
-          "speechRecognitionPermission": "WearabLLM converts speech to text before sending it to your bridge."
-        }
-      ]
+      "expo-secure-store"
     ]
   }
 }

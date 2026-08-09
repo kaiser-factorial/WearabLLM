@@ -1,6 +1,6 @@
 # WearabLLM Conversation Console
 
-Local-only multi-device console for the shared WearabLLM conversation.
+Local-only multi-device console for the hosted Sphere conversation.
 
 ```bash
 ./v3_WAVESHARE/scripts/run_transcript_viewer.sh
@@ -11,11 +11,19 @@ Opens `http://127.0.0.1:8787`.
 ## What it does
 
 - Shows the **shared principal conversation** across device bodies
-  (`wearabllm-esp32` home base, `web-console`, future `wearabllm-wearable`)
-- Lets you **filter by body** and **reply from the browser**, continuing the
-  same thread the Waveshare uses
+  (`wearabllm-esp32` Waveshare, `wearabllm-android`, `web-console`, future `wearabllm-wearable`)
+- Shows live body presence horizontally across the top
+- Lets you reply from the browser, continuing the same shared thread
+- Keeps active conversation history in the side panel with a `+` new-session
+  action
+- Moves archived conversations behind a compact bottom Archive control
+- Places Rename and Archive behind each conversation's `...` menu
 - Keeps a secondary **device event feed** from private Supabase transcript rows
   (command + mic transcript log)
+- **Command center** tab for live agent personality:
+  system prompt, live OpenAI LLM/TTS model choices, TTS voice + delivery
+  instructions
+- **Deploy to Hugging Face** from the laptop (code upload only; secrets stay local)
 - Binds only to `127.0.0.1`; device tokens stay in the Python proxy and never
   reach browser JavaScript
 
@@ -47,11 +55,37 @@ python3 v3_WAVESHARE/transcript_viewer/server.py \
 | GET | `/api/conversation` | bridge `GET /v1/conversation` |
 | GET | `/api/devices` | bridge `GET /v1/devices` |
 | GET | `/api/sessions` | bridge `GET /v1/conversation/sessions` |
+| POST | `/api/sessions/<id>/rename` | bridge session rename |
+| POST | `/api/sessions/<id>/archive` | bridge session archive |
 | POST | `/api/reply` | bridge `POST /v1/query_text` |
+| GET | `/api/interactions[/<id>]` | bridge action queue status |
 | POST | `/api/session/reset` | bridge `POST /v1/session/reset` |
+| GET/POST | `/api/admin/config` | bridge `GET/POST /v1/admin/config` |
+| GET | `/api/admin/catalog` | bridge live OpenAI model catalog |
+| POST | `/api/admin/api-key` | bridge OpenAI key validation + macOS Keychain update |
+| POST | `/api/admin/deploy` | local `scripts/deploy_hf_space.py` |
 | GET | `/api/transcripts` | Supabase transcript function |
 
-## Hosted bridge requirement
+### Command center notes
+
+- **Save to agent** updates the live hosted bridge personality immediately.
+- **Refresh live models** calls OpenAI through the bridge and limits the LLM and
+  TTS pickers to models available to the configured account. Built-in TTS voice
+  choices follow the selected model's supported set.
+- **Save key & refresh** is only available on the local macOS bridge. The typed
+  key is posted over localhost, validated before activation, stored in macOS
+  Keychain, and never returned to or retained by the dashboard. For the hosted
+  bridge, set the key in Hugging Face Space Secrets instead.
+- When the bridge has Supabase service credentials, settings persist in
+  `wearabllm_agent_settings` (apply migration
+  `supabase/migrations/20260809010000_create_wearabllm_agent_settings.sql`).
+- **Deploy to HF** only packages bridge source (`agent_config.py`,
+  `durable_memory.py`, `wearabllm_bridge.py`, Dockerfile). It does not upload
+  `sdkconfig` or API keys.
+- Firmware device config (Wi-Fi, PTT, etc.) still uses the existing next-flash
+  path; Sphere is the conversation + agent brain control surface first.
+
+## Hosted bridge
 
 Conversation reads need the bridge endpoints:
 
@@ -59,18 +93,23 @@ Conversation reads need the bridge endpoints:
 - `GET /v1/devices`
 - `GET /v1/conversation/sessions`
 
-Redeploy the Hugging Face Space after merging those bridge changes so the
-console can load live turns. Replies already work against the existing
-`/v1/query_text` path once the token is configured.
+The deployed Space already exposes these endpoints. Redeploy after bridge
+changes so dashboard and hosted API revisions do not drift.
 
 ## Multi-device model
 
 All bodies share one principal conversation store. Each turn is tagged with
 `device_id`:
 
-- `wearabllm-esp32` — home Waveshare
+- `wearabllm-esp32` — Waveshare
+- `wearabllm-android` — Android phone app
 - `web-console` — this UI
 - `wearabllm-wearable` — reserved for the portable companion
 
 When the wearable arrives, flash it with its own device id/token; the console
 will list it automatically once it appears in turns.
+
+Enable **Also play on Waveshare** to create a targeted interaction in addition
+to the shared web reply. The board pulls that action from the hosted Supabase
+queue and acknowledges playback; the composer updates from the same action
+record.

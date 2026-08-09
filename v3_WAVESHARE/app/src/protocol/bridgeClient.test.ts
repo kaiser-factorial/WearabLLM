@@ -11,6 +11,7 @@ import {
   normalizePttPull,
   normalizeTtsMaxBytes,
   parseBridgeHealth,
+  parseBridgeConversation,
   parseDeviceWifiConfigResponse,
   summarizeBridgeBenchStatus,
 } from './bridgeClient';
@@ -21,14 +22,14 @@ function assertEqual(actual: string, expected: string): void {
   }
 }
 
-assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765'), 'http://192.168.86.31:8765');
-assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765/'), 'http://192.168.86.31:8765');
-assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765/v1/query'), 'http://192.168.86.31:8765');
-assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765/v1/query_text'), 'http://192.168.86.31:8765');
-assertEqual(normalizeBridgeBaseUrl('http://192.168.86.31:8765/v1/tts'), 'http://192.168.86.31:8765');
-assertEqual(normalizeBridgeBaseUrl('  http://192.168.86.31:8765/v1/query?x=1#frag  '), 'http://192.168.86.31:8765');
-assertEqual(bridgeTargetKey('http://192.168.86.31:8765/v1/query'), '192.168.86.31:8765');
-assertEqual(bridgeTargetKey('http://192.168.86.31/v1/query'), '192.168.86.31:80');
+assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765'), 'http://192.0.2.10:8765');
+assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/'), 'http://192.0.2.10:8765');
+assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/v1/query'), 'http://192.0.2.10:8765');
+assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/v1/query_text'), 'http://192.0.2.10:8765');
+assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/v1/tts'), 'http://192.0.2.10:8765');
+assertEqual(normalizeBridgeBaseUrl('  http://192.0.2.10:8765/v1/query?x=1#frag  '), 'http://192.0.2.10:8765');
+assertEqual(bridgeTargetKey('http://192.0.2.10:8765/v1/query'), '192.0.2.10:8765');
+assertEqual(bridgeTargetKey('http://192.0.2.10/v1/query'), '192.0.2.10:80');
 assertEqual(normalizeDeviceWifiBssid(''), '');
 assertEqual(normalizeDeviceWifiBssid('  02:00:00:00:00:01  '), '02:00:00:00:00:01');
 assertEqual(String(normalizePttGpio(' 8 ')), '8');
@@ -43,11 +44,40 @@ assertEqual(bridgeErrorMessage({ reply: 'Bridge error: bad audio' }, 'fallback')
 assertEqual(bridgeErrorMessage({ message: 'Updated' }, 'fallback'), 'Updated');
 assertEqual(bridgeErrorMessage({}, 'plain text failure'), 'plain text failure');
 
-if (firmwareBridgeTargetMatchesApp('http://192.168.86.31:8765', 'http://192.168.86.31:8765/v1/query') !== true) {
+const conversation = parseBridgeConversation({
+  ok: true,
+  conversation_backend: 'supabase',
+  active_session_id: 'session-1',
+  session: { id: 'session-1', started_at: '2026-08-09T12:00:00Z', last_turn_at: '2026-08-09T12:01:00Z' },
+  sessions: [
+    { id: 'session-1', started_at: '2026-08-09T12:00:00Z', last_turn_at: '2026-08-09T12:01:00Z' },
+    { id: 'session-0', started_at: '2026-08-08T12:00:00Z', last_turn_at: '2026-08-08T12:01:00Z', ended_at: '2026-08-08T12:02:00Z' },
+  ],
+  filter_device_id: null,
+  devices: [
+    { id: 'wearabllm-android', label: 'Android', kind: 'phone', status: 'active', description: 'Phone', seen: true },
+    { id: 'local-bridge', label: 'local-bridge', kind: 'custom', status: 'active', description: 'Infrastructure', seen: true },
+  ],
+  turns: [
+    { id: 1, device_id: 'wearabllm-android', role: 'user', content: 'Hello', created_at: null },
+    { id: 2, device_id: 'local-bridge', role: 'assistant', content: 'Hi', created_at: null },
+  ],
+});
+if (conversation.devices.length !== 1 || conversation.devices[0].id !== 'wearabllm-android') {
+  throw new Error(`Expected infrastructure devices to be filtered, got ${JSON.stringify(conversation.devices)}`);
+}
+if (conversation.turns[1].device_id !== 'web-console') {
+  throw new Error(`Expected legacy local-bridge turn to map to web-console, got ${conversation.turns[1].device_id}`);
+}
+if (conversation.session?.id !== 'session-1' || conversation.sessions.length !== 2) {
+  throw new Error(`Expected conversation sessions to parse, got ${JSON.stringify(conversation.sessions)}`);
+}
+
+if (firmwareBridgeTargetMatchesApp('http://192.0.2.10:8765', 'http://192.0.2.10:8765/v1/query') !== true) {
   throw new Error('Expected matching bridge targets');
 }
 
-if (firmwareBridgeTargetMatchesApp('http://192.168.86.31:8765', 'http://192.168.86.44:8765/v1/query') !== false) {
+if (firmwareBridgeTargetMatchesApp('http://192.0.2.10:8765', 'http://192.0.2.44:8765/v1/query') !== false) {
   throw new Error('Expected mismatched bridge targets');
 }
 
@@ -141,7 +171,7 @@ const health = parseBridgeHealth({
       wifi_ssid_set: true,
       wifi_password_set: true,
       wifi_bssid: '02:00:00:00:00:01',
-      bridge_url: 'http://192.168.86.31:8765/v1/query',
+      bridge_url: 'http://192.0.2.10:8765/v1/query',
       ptt_gpio: 0,
       ptt_active_level: 0,
       ptt_debounce_ms: 35,
@@ -149,7 +179,7 @@ const health = parseBridgeHealth({
       audio_out_enabled: true,
       audio_out_volume: 55,
       tts_enabled: false,
-      tts_url: 'http://192.168.86.31:8765/v1/tts',
+      tts_url: 'http://192.0.2.10:8765/v1/tts',
       tts_max_bytes: 65536,
       led_self_test: true,
       display_enabled: true,
@@ -209,7 +239,7 @@ const readySummary = summarizeBridgeBenchStatus(parseBridgeHealth({
       ready: true,
     },
   },
-}), 'http://192.168.86.31:8765');
+}), 'http://192.0.2.10:8765');
 
 if (!readySummary.readyForDryRun || readySummary.hasAudioUpload || !readySummary.message.includes('Ready')) {
   throw new Error(`Expected ready/no-audio summary, got ${JSON.stringify(readySummary)}`);
@@ -256,14 +286,14 @@ if (!audibleSummary.readyForDryRun || !audibleSummary.latestAudioAudible || !aud
   throw new Error(`Expected audible latest-audio summary, got ${JSON.stringify(audibleSummary)}`);
 }
 
-const bridgeMismatchSummary = summarizeBridgeBenchStatus(health, 'http://192.168.86.44:8765');
+const bridgeMismatchSummary = summarizeBridgeBenchStatus(health, 'http://192.0.2.44:8765');
 if (bridgeMismatchSummary.readyForDryRun || bridgeMismatchSummary.bridgeTargetMatches !== false || !bridgeMismatchSummary.message.includes('differs')) {
   throw new Error(`Expected bridge-target mismatch summary, got ${JSON.stringify(bridgeMismatchSummary)}`);
 }
 
 const wifiConfig = parseDeviceWifiConfigResponse({
   ok: true,
-  ssid: 'hyperplex',
+  ssid: 'example-network',
   bssid: '02:00:00:00:00:01',
   password_set: true,
   ptt_gpio: 8,
@@ -282,7 +312,7 @@ const wifiConfig = parseDeviceWifiConfigResponse({
 
 if (
   !wifiConfig.ok ||
-  wifiConfig.ssid !== 'hyperplex' ||
+  wifiConfig.ssid !== 'example-network' ||
   wifiConfig.bssid !== '02:00:00:00:00:01' ||
   wifiConfig.password_set !== true ||
   wifiConfig.ptt_gpio !== 8 ||

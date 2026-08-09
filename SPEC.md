@@ -1,6 +1,13 @@
 # WearabLLM Project Spec
 
-Last updated: 2026-07-10
+Last updated: 2026-08-09
+
+> Current implementation note: the clean hosted switch is complete. The
+> default path is a private Hugging Face Space using direct OpenAI APIs plus
+> Supabase conversations, archives, settings, memory substrate, and device
+> actions. The TFT, speaker, Android shared chat, dashboard delivery, and
+> physical Waveshare voice loop are working. Older phase descriptions below
+> remain design history where explicitly labeled.
 
 ## One-Line Summary
 
@@ -31,7 +38,7 @@ The project began on an Adafruit Circuit Playground Bluefruit because that board
   one idle hour, and retain private raw archives separately from durable facts.
 - Stream successful transcripts to a private Supabase table without exposing a
   database-admin key to firmware.
-- Use the onboard speaker for OpenRouter-hosted TTS, with physical volume controls.
+- Use the onboard speaker for OpenAI-hosted TTS, with physical volume controls.
 - Add authenticated OTA updates after one final USB partition/updater flash.
 - Keep the optional SPI TFT gated off until its perfboard wiring is verified.
 - Preserve the existing semantic response scale, but represent it more richly:
@@ -75,7 +82,7 @@ say "Hi ESP" or hold BOOT/PTT
 -> dim-white RGB ring while listening
 -> board captures WAV from onboard mic
 -> board posts WAV to the protected Hugging Face agent over HTTPS
--> hosted agent uses OpenRouter for transcription, reply, and TTS
+-> hosted agent uses OpenAI for transcription, reply, and TTS
 -> board applies LED valence command and plays the returned reply
 -> board optionally queues transcript/reply upload to Supabase
 ```
@@ -103,7 +110,7 @@ Current v3 firmware capabilities:
 - Wi-Fi station setup with local ignored `sdkconfig` credentials and optional BSSID/AP MAC pinning
 - serial Wi-Fi diagnostics that include connected AP BSSID, channel, RSSI, and auth mode after association
 - selectable bridge or direct-OpenAI HTTPS request path
-- direct `gpt-4o-transcribe` speech transcription
+- direct OpenAI speech transcription with a configurable model
 - direct `gpt-5.4-mini` Responses API command/reply generation with reboot-
   scoped `previous_response_id` context
 - direct `gpt-4o-mini-tts` WAV generation
@@ -113,7 +120,7 @@ Current v3 firmware capabilities:
   API and requires a device token on cloud POST requests
 - prepared private Supabase `wearabllm_memories` migration for cloud durable
   memory; only the hosted bridge may use the service-role credential
-- deployed protected hosted bridge uses OpenRouter for LLM, transcription, TTS,
+- deployed protected hosted bridge uses OpenAI for LLM, transcription, TTS,
   and automatic memory extraction; direct firmware OpenAI mode remains a
   separate, optional local profile
 - hosted shared conversation uses one-hour idle sessions: only the active
@@ -158,17 +165,19 @@ Current v3 bridge capabilities:
 - `POST /v1/tts` for phase-2 WAV output
 - `POST /v1/session/reset` to clear in-process conversation history
 - `POST /v1/device_wifi` for opt-in app-assisted firmware config updates
-- OpenAI STT path using `gpt-4o-transcribe`
+- OpenAI STT path with a configurable transcription model
 - in-session LLM context, retaining 20 user/assistant turns by default and configurable with `WEARABLLM_HISTORY_TURNS`
-- shared cross-session memory, enabled by the live launcher, that auto-extracts conservative stable user facts into `$HOME/Projects/MEMORY`
-- MEM records scoped to source `wearabllm-home-assistant`, personal assistant tags, and `localOnly` cloud-sync exclusion
-- bounded semantic retrieval (three records by default), duplicate suppression, list/forget/clear administration, and private JSON fallback when MEM is unavailable
+- hosted compact durable memory stored privately in Supabase
+- a richer Supabase memory-record schema for future household facts,
+  provenance, confidence, supersession, review, correction, and deletion
+- the separate local Memory Hub remains conceptually informative but is never
+  used as WearabLLM storage
 - optional local Whisper path
 - dry-run mode with fixed or sequenced LED commands
 - saved WAV capture inspection for first hardware audio validation
 - configurable upload-size cap for `/v1/query`, reported by `/health` and enforced with JSON 413 errors
 - tolerant live LLM response parser that normalizes plain two-line output, labeled text, fenced JSON, embedded JSON, and small JSON into the shared protocol shape
-- OpenAI `gpt-4o-mini-tts` output using the `verse` voice and the configured theatrical delivery instructions; output is normalized to 16 kHz mono 16-bit WAV for the board
+- OpenAI `gpt-4o-mini-tts` output using the configured voice and delivery instructions; output is normalized to 16 kHz mono 16-bit WAV for the board
 - OpenAI API key loading from the `wearabllm-openai-api-key` macOS Keychain service; an environment-provided key is persisted there by `run_bridge_live.sh`
 - opt-in local firmware config writer for Wi-Fi, bridge URL, BSSID/AP MAC, PTT GPIO, PTT active level, and PTT pull mode
 
@@ -177,12 +186,13 @@ Current v3 app capabilities:
 - Expo Android-first bridge console
 - bridge URL storage and `/health` check
 - typed transcript test through `/v1/query_text`
-- Android native hold-to-speak STT routed to `/v1/query_text`
+- Android shared chat routed to `/v1/query_text`, using keyboard dictation
+  instead of custom hold-to-speak UI
 - command/reply history display
-- device Wi-Fi credential form stored in SecureStore
-- optional AP MAC/BSSID validation and bridge submission for the next firmware flash
-- PTT GPIO, active-level, debounce, and pull-mode controls routed through the opt-in bridge device-config endpoint
-- RGB, speaker, TTS, and TFT bring-up toggles routed through the same next-flash device-config path
+- hosted Sphere URL and device token stored in SecureStore
+- horizontal live body presence and a shared conversation list
+- conversation creation, rename, and archive controls
+- optional Waveshare delivery for messages composed on Android
 
 Verified v3 state:
 
@@ -193,14 +203,14 @@ Verified v3 state:
 - ES7210 microphone and ES8311 speaker-driver initialization have been observed
   in serial logs
 - the local `Hi ESP` wake-word model is loaded on the physical board
-- the board joined the current home Wi-Fi network and received `192.168.86.38`,
-  confirming laptop-independent runtime network access
+- the board joined the configured home Wi-Fi network and received a private
+  LAN address, confirming laptop-independent runtime network access
 - BOOT/PTT capture and `Hi ESP` wake-word activation both complete the onboard mic -> bridge -> LED/speaker loop
 - captured physical-board microphone audio is non-silent and suitable for live transcription
 - ES8311 speaker tones and bridge TTS playback work on the physical speaker
 - live `verse` TTS returns a valid normalized WAV and plays through the board
 - session-context recall has been exercised through the live bridge
-- bridge unit suite passes with 61 tests; bridge smoke tests, Android protocol tests, app typecheck, protocol consistency checks, and firmware builds also pass locally
+- bridge unit suite passes with 79 tests; bridge smoke tests, Android protocol tests, app typecheck, protocol consistency checks, and firmware builds also pass locally
 - optional firmware variant builds pass locally for display, display boot self-test, audio-out, and TTS paths
 - app-assisted next-flash config covers Wi-Fi, BSSID, PTT, RGB self-test, speaker output, TTS playback, and TFT toggles
 - current firmware image has been built, coherence-verified, flashed, and observed booting with `Hi ESP`, 15-second capture, TTS, and K1/K3 button initialization
@@ -215,8 +225,8 @@ Verified v3 state:
   firmware binaries are ignored
 - GitHub PR #1 merged the standalone firmware, Supabase scaffold, and repository
   cleanup into `main` as commit `608fbbf`
-- Supabase migration `20260623130000` is applied to project
-  `anjwyaatldrjzecwnspq`; the `wearabllm-transcript` Edge Function is active,
+- Supabase migration `20260623130000` is applied to the configured private
+  project; the `wearabllm-transcript` Edge Function is active,
   its device secret is set server-side, and an unauthenticated request is
   rejected with HTTP 401
 - the matching Supabase endpoint and generated device token remain only in
@@ -233,7 +243,7 @@ Not yet verified or integrated:
 - physical confirmation that K1 and K3 produce the expected 10-point volume changes, although expander initialization, firmware build, flash, and boot are verified
 - BLE/SoftAP live provisioning; current device configuration still requires rebuilding and flashing firmware
 - a complete hosted physical interaction: wake/PTT, microphone capture,
-  OpenRouter request, LED command, audible TTS, and Supabase transcript row
+  OpenAI request, LED command, audible TTS, and Supabase transcript row
 - authenticated OTA updater and two-slot OTA partition layout
 
 ### v1 Phone App

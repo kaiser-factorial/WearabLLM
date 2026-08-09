@@ -35,6 +35,26 @@ PY
 )"
 
 PORT="${WEARABLLM_BRIDGE_PORT:-${CONFIGURED_BRIDGE_PORT:-8765}}"
+DEVICE_TOKEN="$(python3 - "${V3_DIR}/firmware/sdkconfig" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+prefix = "CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN="
+if path.is_file():
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(prefix):
+            value = ast.literal_eval(line[len(prefix):])
+            if isinstance(value, str):
+                print(value)
+            break
+PY
+)"
+AUTH_ARGS=()
+if [ -n "${DEVICE_TOKEN}" ]; then
+    AUTH_ARGS+=(--device-token "${DEVICE_TOKEN}")
+fi
 
 cd "${BRIDGE_DIR}"
 
@@ -67,6 +87,7 @@ echo "  device config endpoint: enabled"
 exec "${PYTHON_BIN}" wearabllm_bridge.py \
     --host "${HOST}" \
     --port "${PORT}" \
+    "${AUTH_ARGS[@]}" \
     --dry-run \
     --dry-run-command "${DRY_RUN_COMMAND}" \
     --dry-run-sequence "${DRY_RUN_SEQUENCE}" \

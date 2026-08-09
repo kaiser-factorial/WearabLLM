@@ -24,10 +24,10 @@ class BridgeTargetTest(unittest.TestCase):
 
     def test_stale_ipv4_target_suggests_current_address(self) -> None:
         result = analyze_bridge_target(
-            "http://192.168.86.31:8765/v1/query", ["192.168.1.3"]
+            "http://192.0.2.10:8765/v1/query", ["192.0.2.11"]
         )
         self.assertFalse(result["matches_local"])
-        self.assertEqual(result["suggested_host"], "192.168.1.3")
+        self.assertEqual(result["suggested_host"], "192.0.2.11")
 
     def test_hostname_target_is_unknown(self) -> None:
         result = analyze_bridge_target(

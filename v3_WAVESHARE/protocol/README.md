@@ -73,7 +73,7 @@ next flash:
       "audio_out_enabled": false,
       "audio_out_volume": 45,
       "tts_enabled": false,
-      "tts_url": "http://192.168.86.31:8765/v1/tts",
+      "tts_url": "http://192.0.2.10:8765/v1/tts",
       "tts_max_bytes": 131072,
       "led_self_test": true,
       "display_enabled": true,
@@ -138,7 +138,7 @@ Bench-stage device setup can ask the local bridge to update ignored
 POST /v1/device_wifi
 Content-Type: application/json
 
-{"ssid":"hyperplex","password":"..."}
+{"ssid":"example-network","password":"..."}
 ```
 
 Optional BSSID/AP MAC pinning, PTT wiring settings, speaker/TTS settings, and
@@ -146,7 +146,7 @@ TFT bring-up settings are supported:
 
 ```json
 {
-  "ssid": "hyperplex",
+  "ssid": "example-network",
   "password": "...",
   "bssid": "02:00:00:00:00:01",
   "ptt_gpio": 0,

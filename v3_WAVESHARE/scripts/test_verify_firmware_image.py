@@ -53,7 +53,7 @@ class FirmwareImageVerifierTest(unittest.TestCase):
     def test_rejects_stale_embedded_bridge_url(self) -> None:
         root = self.make_firmware()
         (root / "build" / "wearabllm_waveshare.bin").write_bytes(
-            b"image:http://192.168.86.31:8765/v1/query"
+            b"image:http://192.0.2.10:8765/v1/query"
         )
         result = verify(root, require_first_flash_profile=False)
         self.assertFalse(result["ok"])

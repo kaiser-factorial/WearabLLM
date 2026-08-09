@@ -1,5 +1,11 @@
 # v3 Bring-Up Notes
 
+> **Current default (2026-08-09):** normal runtime uses the authenticated
+> hosted HF Space, direct OpenAI APIs, and a Supabase action queue. The physical
+> PTT/wake, display, and TTS loop is verified. Local-bridge sections below are
+> retained as development/dry-run alternatives; they are not the deployment
+> default.
+
 For the current verified board/software state, see `docs/STATUS.md`.
 
 ## Hardware Checks Before Power
@@ -9,8 +15,8 @@ For the TFT perfboard adapter:
 1. Check continuity from Waveshare `3V3` to TFT `VCC`.
 2. Check continuity from Waveshare `GND` to TFT `GND`.
 3. Confirm there is no continuity between `3V3` and `GND`.
-4. Confirm TFT `SCL` goes to `GPIO4`, not Waveshare I2C `SCL`.
-5. Confirm TFT `SDA` goes to `GPIO9`, not Waveshare I2C `SDA`.
+4. Confirm TFT `CLK`/`SCL` goes to `GPIO6`, not Waveshare I2C `SCL`.
+5. Confirm TFT `SDA`/`MOSI` goes to `GPIO7`, not Waveshare I2C `SDA`.
 
 ## Flash/Test Checklist
 
@@ -160,6 +166,40 @@ raise firmware capture duration, raise the bridge limit too:
 WEARABLLM_MAX_AUDIO_BYTES=1048576 ./scripts/run_bridge_dryrun.sh
 ```
 
+### 2a. Phone Or Dashboard Reply On Waveshare
+
+With the laptop bridge running, the Android app and local conversation console
+can create a response for the stationary Waveshare without waiting for a board
+button press:
+
+1. In the Android prompt panel or the console composer, select **Send Home
+   Base**.
+2. Submit a short message.
+3. The UI initially shows `queued`, then updates through `dispatched`,
+   `delivered`, and `played` after the board pulls and completes it.
+
+The firmware derives its poll and acknowledgement URLs from the configured
+**Bridge query URL**. Leave that URL ending in `/v1/query`; the firmware uses
+the same host to request `/v1/devices/wearabllm-esp32/actions` every two
+seconds by default. `Fetch remote phone/dashboard actions` is enabled by
+default under **WearabLLM v3** in `menuconfig`.
+
+For the physical validation, keep the board serial monitor open and look for:
+
+```text
+remote action <id> command=<LED command>
+```
+
+The selected LED command should run, the display should show the reply when
+enabled, and the speaker should play it when bridge TTS and speaker output are
+enabled. The UI status is `played` only after that local response path has
+finished. `failed` records a board-side error instead of silently losing the
+message.
+
+This is a local-network feature: phone, laptop bridge, and home base must all
+be able to reach the laptop bridge. It does not expose the board to the public
+internet.
+
 ### 3. Configure Firmware
 
 In another terminal:
@@ -288,7 +328,7 @@ WearabLLM v3 -> Bridge TTS URL   -> http://<computer-lan-ip>:8765/v1/tts
 You can override detection:
 
 ```bash
-./scripts/configure_firmware.py --bridge-host 192.168.86.31
+./scripts/configure_firmware.py --bridge-host 192.0.2.10
 ```
 
 ### 4. Build, Flash, And Monitor
@@ -770,10 +810,10 @@ Set the WearabLLM menuconfig values before flashing:
 
 ## Optional TFT Display
 
-The ST7735 SPI TFT driver is compiled only when this is enabled:
+The ST7789 SPI TFT driver for the 240x320 TFT200C is compiled only when this is enabled:
 
 ```text
-WearabLLM v3 -> Enable SPI TFT display
+WearabLLM v3 -> Enable TFT200C SPI display
 ```
 
 For a wiring-only boot test, temporarily enable:
@@ -786,14 +826,18 @@ Leave it disabled until the perfboard adapter passes continuity checks. When ena
 
 | Signal | GPIO |
 |---|---:|
-| SCLK | `GPIO4` |
-| MOSI | `GPIO9` |
-| CS | `GPIO3` |
-| DC | `GPIO7` |
-| RST | `GPIO6` |
+| SCLK | `GPIO6` |
+| MOSI | `GPIO7` |
+| CS | `GPIO9` |
+| DC | `GPIO4` |
+| RST | `GPIO3` |
 | BL | `GPIO5` |
 
-If your backlight is tied directly to `3V3`, the `BL` GPIO setting is not used electrically. The driver currently assumes a `128x160` ST7735 and exposes `X offset`, `Y offset`, and `Invert TFT colors` in menuconfig for the common breakout variants.
+The current module header is `BLK | RES | SDA | CLK | CS | DC | VCC | GND`.
+Power it from 3.3 V. The firmware uses a 320x240 logical landscape canvas and
+exposes rotation, X offset, Y offset, and color inversion in menuconfig. See
+`docs/PINMAP.md` for the controller-identification caveat and exact harness
+remap.
 
 Expected display behavior:
 
@@ -801,7 +845,7 @@ Expected display behavior:
 - boot/idle: `READY` and `HOLD BUTTON TO ASK`
 - while holding PTT: `LISTENING`
 - after release while waiting for bridge/API: `THINKING`
-- after bridge response: response code plus wrapped answer text
+- after bridge response: wrapped answer text
 - on error: short error message
 
 ## Optional Speaker Earcon

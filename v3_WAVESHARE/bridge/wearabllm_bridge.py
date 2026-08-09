@@ -24,6 +24,7 @@ import os
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -31,17 +32,22 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import wave
+from datetime import datetime, timezone
 from io import BytesIO
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from action_queue import JsonActionQueue, SupabaseActionQueue, validate_device_id
+from agent_config import AgentConfig, AgentConfigStore
 from durable_memory import (
+    DEFAULT_CONVERSATION_FILE,
     DEFAULT_MEMORY_FILE,
     DEFAULT_MEM_ROOT,
     EXTRACTION_PROMPT,
     DurableMemoryStore,
+    LocalConversationStore,
     MemDatabaseStore,
     SupabaseConversationStore,
     SupabaseMemoryStore,
@@ -99,16 +105,24 @@ TTS_SAMPLE_RATE = 16000
 TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH = 2
 DEFAULT_MAX_AUDIO_BYTES = 512 * 1024
+DEVICE_PRESENCE_TTL_SECONDS = 20
 
 # Shared device-body catalog for home base + future wearable + web console.
 # The bridge accepts any valid device id; this list is a UI/discovery hint.
 KNOWN_DEVICE_BODIES: list[dict[str, str]] = [
     {
         "id": "wearabllm-esp32",
-        "label": "Home base",
+        "label": "Waveshare",
         "kind": "home",
         "status": "active",
         "description": "Waveshare ESP32-S3 audio board on the home network",
+    },
+    {
+        "id": "wearabllm-android",
+        "label": "Android",
+        "kind": "phone",
+        "status": "active",
+        "description": "Android phone for prompting Sphere from Wi-Fi or cellular",
     },
     {
         "id": "web-console",
@@ -125,9 +139,38 @@ KNOWN_DEVICE_BODIES: list[dict[str, str]] = [
         "description": "Portable companion body that joins the same principal conversation",
     },
 ]
+INFRASTRUCTURE_DEVICE_IDS = {"local-bridge"}
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 V3_DIR = Path(__file__).resolve().parents[1]
 CONFIGURE_FIRMWARE = V3_DIR / "scripts" / "configure_firmware.py"
+DEFAULT_ACTION_QUEUE_FILE = Path.home() / ".wearabllm" / "actions.json"
+KEYCHAIN_SERVICE = "wearabllm-openai-api-key"
+DEFAULT_TTS_VOICES = (
+    "alloy",
+    "ash",
+    "ballad",
+    "coral",
+    "echo",
+    "fable",
+    "nova",
+    "onyx",
+    "sage",
+    "shimmer",
+    "verse",
+    "marin",
+    "cedar",
+)
+LEGACY_TTS_VOICES = (
+    "alloy",
+    "ash",
+    "coral",
+    "echo",
+    "fable",
+    "onyx",
+    "nova",
+    "sage",
+    "shimmer",
+)
 
 
 def pcm16_level_stats(pcm_bytes: bytes) -> dict[str, Any]:
@@ -202,13 +245,46 @@ class BridgeState:
         self.dry_run_sequence = parse_command_sequence(args.dry_run_sequence)
         self.dry_run_sequence_index = 0
         self.history_turns = max(0, int(getattr(args, "history_turns", 20)))
+        self.max_output_tokens = max(64, min(int(getattr(args, "max_output_tokens", 512)), 4096))
         self.history: list[dict[str, str]] = []
         self.history_lock = threading.Lock()
+        self.device_presence: dict[str, dict[str, Any]] = {}
+        self.device_presence_lock = threading.Lock()
+        self.action_backend = str(getattr(args, "action_backend", "local"))
+        if self.action_backend == "supabase":
+            self.action_queue = SupabaseActionQueue.from_environment(
+                lease_seconds=getattr(args, "action_lease_seconds", 45),
+            )
+        else:
+            self.action_queue = JsonActionQueue(
+                getattr(args, "action_queue_file", str(DEFAULT_ACTION_QUEUE_FILE)),
+                lease_seconds=getattr(args, "action_lease_seconds", 45),
+            )
+        self.agent_config = AgentConfigStore(
+            initial=AgentConfig(
+                system_prompt=SYSTEM_PROMPT,
+                tts_voice=getattr(args, "tts_voice", "marin"),
+                tts_instructions=getattr(args, "tts_instructions", TTS_INSTRUCTIONS),
+                tts_model=getattr(args, "tts_model", "gpt-4o-mini-tts"),
+                llm_model=getattr(args, "llm_model", "gpt-5.4-mini"),
+                source="cli",
+            ),
+            local_path=getattr(args, "agent_config_file", "") or None,
+            supabase_url=os.environ.get("SUPABASE_URL", ""),
+            supabase_service_role_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+            principal_id=os.environ.get("WEARABLLM_PRINCIPAL_ID", "primary"),
+        )
         self.conversation_backend = str(getattr(args, "conversation_backend", "local"))
         self.conversation_store = None
         if self.conversation_backend == "supabase":
             self.conversation_store = SupabaseConversationStore.from_environment(
                 session_idle_seconds=max(60, int(getattr(args, "session_idle_seconds", 3600)))
+            )
+        elif hasattr(args, "conversation_backend") or hasattr(args, "conversation_file"):
+            self.conversation_store = LocalConversationStore(
+                getattr(args, "conversation_file", DEFAULT_CONVERSATION_FILE),
+                principal_id=os.environ.get("WEARABLLM_PRINCIPAL_ID", "primary"),
+                session_idle_seconds=max(60, int(getattr(args, "session_idle_seconds", 3600))),
             )
         self.durable_memory_enabled = bool(getattr(args, "durable_memory", False))
         self.memory_backend = str(getattr(args, "memory_backend", "local"))
@@ -229,7 +305,141 @@ class BridgeState:
             else:
                 self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
 
+    def current_agent_config(self) -> AgentConfig:
+        """Return live settings, with a lightweight fallback for focused unit tests."""
+        store = getattr(self, "agent_config", None)
+        if store:
+            return store.snapshot()
+        return AgentConfig(
+            system_prompt=SYSTEM_PROMPT,
+            tts_voice=getattr(self.args, "tts_voice", "marin"),
+            tts_instructions=getattr(self.args, "tts_instructions", TTS_INSTRUCTIONS),
+            tts_model=getattr(self.args, "tts_model", "gpt-4o-mini-tts"),
+            llm_model=getattr(self.args, "llm_model", "gpt-5.4-mini"),
+            source="test-fallback",
+        )
+
+    def touch_device(self, device_id: str) -> None:
+        if device_id in INFRASTRUCTURE_DEVICE_IDS:
+            return
+        validate_device_id(device_id)
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.device_presence_lock:
+            self.device_presence[device_id] = {
+                "monotonic": time.monotonic(),
+                "last_seen_at": now,
+            }
+
+    def _presence_for(self, device_id: str) -> tuple[bool, str | None]:
+        with self.device_presence_lock:
+            presence = self.device_presence.get(device_id)
+            if not presence:
+                return False, None
+            online = time.monotonic() - float(presence["monotonic"]) <= DEVICE_PRESENCE_TTL_SECONDS
+            return online, str(presence.get("last_seen_at") or "") or None
+
+    @staticmethod
+    def _model_ids(payload: Any) -> list[str]:
+        """Normalize the OpenAI SDK's paginated model response."""
+        rows = getattr(payload, "data", payload)
+        if not isinstance(rows, (list, tuple)):
+            return []
+        ids = {
+            str(getattr(row, "id", row.get("id", "") if isinstance(row, dict) else "")).strip()
+            for row in rows
+        }
+        return sorted(model_id for model_id in ids if model_id)
+
+    @staticmethod
+    def _is_assistant_model(model_id: str) -> bool:
+        lowered = model_id.lower()
+        if not lowered.startswith("gpt-"):
+            return False
+        return not any(marker in lowered for marker in ("audio", "image", "realtime", "transcribe", "tts"))
+
+    @staticmethod
+    def _is_tts_model(model_id: str) -> bool:
+        lowered = model_id.lower()
+        return lowered.startswith("tts-") or "mini-tts" in lowered
+
+    @staticmethod
+    def _tts_voices_for_model(model_id: str) -> list[str]:
+        if model_id.lower().startswith("tts-1"):
+            return list(LEGACY_TTS_VOICES)
+        return list(DEFAULT_TTS_VOICES)
+
+    def _catalog_from_model_ids(self, model_ids: list[str]) -> dict[str, Any]:
+        tts_models = [model_id for model_id in model_ids if self._is_tts_model(model_id)]
+        return {
+            "provider": "openai",
+            "source": "live",
+            "assistant_models": [model_id for model_id in model_ids if self._is_assistant_model(model_id)],
+            "tts_models": tts_models,
+            "tts_voices": list(DEFAULT_TTS_VOICES),
+            "tts_voices_by_model": {
+                model_id: self._tts_voices_for_model(model_id) for model_id in tts_models
+            },
+        }
+
+    def openai_catalog(self) -> dict[str, Any]:
+        """Fetch the account's currently available model IDs without exposing its key."""
+        if self.args.provider != "openai":
+            raise RuntimeError("Live model discovery is available only for the OpenAI provider")
+        if not self.openai_client:
+            raise RuntimeError("OpenAI client is not configured")
+        model_ids = self._model_ids(self.openai_client.models.list())
+        return self._catalog_from_model_ids(model_ids)
+
+    def replace_openai_api_key(self, api_key: str) -> dict[str, Any]:
+        """Validate a new local OpenAI key, retain it in Keychain, and hot-swap the client."""
+        if self.args.provider != "openai":
+            raise ValueError("API key updates are available only for the OpenAI provider")
+        if os.environ.get("WEARABLLM_HOSTED") == "1":
+            raise ValueError("Hosted agent keys must be updated in Hugging Face Space Secrets")
+        candidate = api_key.strip()
+        if not (20 <= len(candidate) <= 500):
+            raise ValueError("OpenAI API key must be 20..500 characters")
+        if OpenAI is None:
+            raise RuntimeError("openai package is not installed")
+
+        # Validate before replacing the active client or touching Keychain.
+        client = OpenAI(api_key=candidate)
+        model_ids = self._model_ids(client.models.list())
+        if not model_ids:
+            raise RuntimeError("OpenAI returned no available models for this key")
+
+        if sys.platform != "darwin":
+            raise RuntimeError("Dashboard key storage is currently supported on macOS only")
+        account = os.environ.get("USER", "wearabllm")
+        try:
+            subprocess.run(
+                [
+                    "security",
+                    "add-generic-password",
+                    "-U",
+                    "-a",
+                    account,
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-w",
+                    candidate,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("macOS Keychain command is unavailable") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("Could not save the OpenAI API key to macOS Keychain") from exc
+
+        os.environ["OPENAI_API_KEY"] = candidate
+        self.openai_client = client
+        catalog = self._catalog_from_model_ids(model_ids)
+        return {"ok": True, "key_storage": "macos-keychain", "catalog": catalog}
+
     def runtime_config(self) -> dict[str, Any]:
+        agent = self.current_agent_config()
         config = {
             "provider": self.args.provider,
             "dry_run": self.args.dry_run,
@@ -238,16 +448,17 @@ class BridgeState:
             "device_config": bool(getattr(self.args, "allow_device_config", False)),
             "stt": self.args.stt,
             "stt_model": self.args.stt_model,
-            "llm_model": self.args.llm_model,
-            "tts_model": self.args.tts_model,
-            "tts_voice": self.args.tts_voice,
-            "tts_instructions": getattr(self.args, "tts_instructions", TTS_INSTRUCTIONS),
+            "llm_model": agent.llm_model,
+            "tts_model": agent.tts_model,
+            "tts_voice": agent.tts_voice,
+            "tts_instructions": agent.tts_instructions,
             "typed_bypass": bool(self.args.typed),
             "save_wav_dir": self.args.save_wav_dir or None,
             "capture_count": self.capture_count,
             "latest_capture": self.latest_capture,
             "max_audio_bytes": self.args.max_audio_bytes,
             "history_turns": self.history_turns,
+            "max_output_tokens": self.max_output_tokens,
             "session_idle_seconds": getattr(self.args, "session_idle_seconds", None),
             "history_messages": len(self.history),
             "conversation_backend": self.conversation_backend,
@@ -257,7 +468,13 @@ class BridgeState:
             "durable_memory_records": len(self.memory_store.list()) if self.memory_store else 0,
             "memory_retrieval_limit": self.memory_retrieval_limit,
             "device_auth_required": bool(getattr(self.args, "device_token", "")),
+            "action_queue": {
+                "backend": "supabase" if self.action_backend == "supabase" else "local-json",
+                "lease_seconds": self.action_queue.lease_seconds,
+            },
         }
+        if self.action_backend != "supabase":
+            config["action_queue"]["path"] = str(self.action_queue.path)
         if bool(getattr(self.args, "allow_device_config", False)):
             config["firmware_config"] = self.firmware_config_status()
         return config
@@ -401,10 +618,27 @@ class BridgeState:
             result = self.whisper_model.transcribe(audio_file.name, language="en", fp16=False)
         return str(result.get("text", "")).strip()
 
-    def ask_llm(self, transcript: str, *, device_id: str = "wearabllm-unknown") -> tuple[str, str]:
+    def ask_llm(
+        self,
+        transcript: str,
+        *,
+        device_id: str = "wearabllm-unknown",
+        response_device_id: str | None = None,
+    ) -> tuple[str, str]:
+        response_device = response_device_id or device_id
         if self.args.dry_run:
             command = self.next_dry_run_command()
-            return command, f"Dry run transcript: {transcript or '(empty audio)'}"
+            reply = f"Dry run transcript: {transcript or '(empty audio)'}"
+            if self.history_turns:
+                with self.history_lock:
+                    self.history.extend(
+                        [
+                            {"role": "user", "content": transcript, "device_id": device_id},
+                            {"role": "assistant", "content": reply, "device_id": response_device},
+                        ]
+                    )
+                    self.history = self.history[-(self.history_turns * 2):]
+            return command, reply
 
         if self.args.provider not in ("openai", "openrouter"):
             raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
@@ -427,8 +661,16 @@ class BridgeState:
                     persisted_history = self.conversation_store.history(active_session_id, self.history_turns * 2)
                 except Exception as exc:  # Conversation storage must not break a voice interaction.
                     print(f"WARNING: conversation retrieval failed: {exc}")
-            input_messages = [*persisted_history, {"role": "user", "content": transcript}]
-            instructions = SYSTEM_PROMPT
+            input_messages = [
+                {
+                    "role": str(message.get("role", "user")),
+                    "content": str(message.get("content", "")),
+                }
+                for message in persisted_history
+            ]
+            input_messages.append({"role": "user", "content": transcript})
+            agent = self.current_agent_config()
+            instructions = agent.system_prompt
             if memories:
                 memory_context = "\n".join(f"- {memory}" for memory in memories)
                 instructions += (
@@ -436,13 +678,18 @@ class BridgeState:
                     "use it only when relevant, and prefer the user's current statement if it conflicts:\n"
                     f"{memory_context}"
                 )
-            raw = self._generate_text(instructions, input_messages, max_output_tokens=160)
+            raw = self._generate_text(
+                instructions,
+                input_messages,
+                max_output_tokens=self.max_output_tokens,
+                model=agent.llm_model,
+            )
             command, reply = parse_llm_response(raw)
             if self.history_turns:
                 self.history.extend(
                     [
-                        {"role": "user", "content": transcript},
-                        {"role": "assistant", "content": reply},
+                        {"role": "user", "content": transcript, "device_id": device_id},
+                        {"role": "assistant", "content": reply, "device_id": response_device},
                     ]
                 )
                 self.history = self.history[-(self.history_turns * 2):]
@@ -450,10 +697,10 @@ class BridgeState:
                 try:
                     if active_session_id:
                         self.conversation_store.append(active_session_id, device_id, "user", transcript)
-                        self.conversation_store.append(active_session_id, device_id, "assistant", reply)
+                        self.conversation_store.append(active_session_id, response_device, "assistant", reply)
                 except Exception as exc:  # Preserve a live reply if storage is temporarily unavailable.
                     print(f"WARNING: conversation persistence failed: {exc}")
-        if not self.conversation_store:
+        if self.conversation_backend != "supabase":
             self.extract_and_store_memories(transcript, reply)
         return command, reply
 
@@ -519,7 +766,7 @@ class BridgeState:
     ) -> str:
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
-        selected_model = model or self.args.llm_model
+        selected_model = model or self.current_agent_config().llm_model
         if self.args.provider == "openai":
             response = self.openai_client.responses.create(
                 model=selected_model,
@@ -543,6 +790,68 @@ class BridgeState:
             if self.conversation_store:
                 self.conversation_store.clear()
             self.history.clear()
+
+    def start_new_conversation(self) -> dict[str, Any]:
+        """Archive the active thread and create the replacement immediately."""
+        with self.history_lock:
+            if self.conversation_store:
+                self.conversation_store.clear()
+                session = self.conversation_store.create_session()
+            else:  # Focused tests may construct BridgeState without the full store.
+                session = None
+            self.history.clear()
+        return {
+            "ok": True,
+            "history_messages": 0,
+            "active_session_id": str(session["id"]) if session else None,
+            "session": session,
+        }
+
+    def archive_conversation(self, session_id: str) -> dict[str, Any]:
+        """Archive one persisted thread without deleting its transcript."""
+        clean_session_id = session_id.strip().lower()
+        if not re.fullmatch(r"[a-f0-9-]{36}", clean_session_id):
+            raise ValueError("Invalid conversation session ID")
+        if not self.conversation_store:
+            raise RuntimeError("Conversation persistence is not configured")
+        with self.history_lock:
+            sessions = self.conversation_store.list_sessions(limit=100)
+            session = next(
+                (item for item in sessions if str(item.get("id", "")).lower() == clean_session_id),
+                None,
+            )
+            if not session:
+                raise LookupError("Conversation session not found")
+            active = self.conversation_store.active_session()
+            was_active = bool(active and str(active.get("id", "")).lower() == clean_session_id)
+            already_archived = bool(session.get("archived_at"))
+            archived_turns = 0 if already_archived else self.conversation_store.archive(session)
+            replacement = None
+            if was_active:
+                replacement = self.conversation_store.create_session()
+                self.history.clear()
+        return {
+            "ok": True,
+            "archived_session_id": clean_session_id,
+            "archived_turns": archived_turns,
+            "already_archived": already_archived,
+            "active_session_id": str(replacement["id"])
+            if replacement
+            else str(active["id"])
+            if active and not was_active
+            else None,
+            "session": replacement,
+        }
+
+    def rename_conversation(self, session_id: str, title: str) -> dict[str, Any]:
+        """Persist a user-authored title shared by every Sphere client."""
+        clean_session_id = session_id.strip().lower()
+        if not re.fullmatch(r"[a-f0-9-]{36}", clean_session_id):
+            raise ValueError("Invalid conversation session ID")
+        if not self.conversation_store:
+            raise RuntimeError("Conversation persistence is not configured")
+        session = self.conversation_store.rename(clean_session_id, title)
+        return {"ok": True, "session": session}
 
     def conversation_snapshot(
         self,
@@ -573,6 +882,15 @@ class BridgeState:
             turns: list[dict[str, Any]] = []
             if target_session:
                 turns = self.conversation_store.turns(str(target_session["id"]))
+            turns = [
+                {
+                    **turn,
+                    "device_id": "web-console"
+                    if str(turn.get("device_id", "")).strip() in INFRASTRUCTURE_DEVICE_IDS
+                    else turn.get("device_id"),
+                }
+                for turn in turns
+            ]
             if filter_device:
                 turns = [turn for turn in turns if str(turn.get("device_id", "")) == filter_device]
             if len(turns) > limit:
@@ -600,10 +918,13 @@ class BridgeState:
         with self.history_lock:
             local_turns: list[dict[str, Any]] = []
             for index, message in enumerate(self.history[-limit:]):
+                turn_device = str(message.get("device_id", "")).strip() or "wearabllm-unknown"
+                if turn_device in INFRASTRUCTURE_DEVICE_IDS:
+                    turn_device = "web-console"
                 local_turns.append(
                     {
                         "id": index + 1,
-                        "device_id": filter_device or "local-bridge",
+                        "device_id": turn_device,
                         "role": message.get("role", "user"),
                         "content": message.get("content", ""),
                         "created_at": None,
@@ -618,20 +939,31 @@ class BridgeState:
                 "active_session_id": None,
                 "sessions": [],
                 "turns": local_turns,
-                "devices": self._device_catalog({"local-bridge"}),
+                "devices": self._device_catalog(
+                    {
+                        str(turn.get("device_id", "")).strip()
+                        for turn in local_turns
+                        if str(turn.get("device_id", "")).strip()
+                    }
+                ),
                 "filter_device_id": filter_device,
             }
 
     def _device_catalog(self, seen_device_ids: set[str]) -> list[dict[str, Any]]:
+        seen_device_ids = seen_device_ids - INFRASTRUCTURE_DEVICE_IDS
         catalog: list[dict[str, Any]] = []
         known_ids = {item["id"] for item in KNOWN_DEVICE_BODIES}
         for body in KNOWN_DEVICE_BODIES:
             entry = dict(body)
-            entry["seen"] = body["id"] in seen_device_ids
+            online, last_seen_at = self._presence_for(body["id"])
+            entry["seen"] = online
+            entry["online"] = online
+            entry["last_seen_at"] = last_seen_at
             catalog.append(entry)
         for device_id in sorted(seen_device_ids):
             if device_id in known_ids:
                 continue
+            online, last_seen_at = self._presence_for(device_id)
             catalog.append(
                 {
                     "id": device_id,
@@ -639,7 +971,9 @@ class BridgeState:
                     "kind": "custom",
                     "status": "active",
                     "description": "Discovered device body",
-                    "seen": True,
+                    "seen": online,
+                    "online": online,
+                    "last_seen_at": last_seen_at,
                 }
             )
         return catalog
@@ -657,11 +991,16 @@ class BridgeState:
         transcript: str,
         *,
         device_id: str = "wearabllm-unknown",
+        response_device_id: str | None = None,
         audio_bytes: int = 0,
         saved_wav: Path | None = None,
         wav_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        command, reply = self.ask_llm(transcript, device_id=device_id)
+        command, reply = self.ask_llm(
+            transcript,
+            device_id=device_id,
+            response_device_id=response_device_id,
+        )
         return {
             "command": command,
             "reply": reply,
@@ -670,6 +1009,34 @@ class BridgeState:
             "saved_wav": str(saved_wav) if saved_wav else None,
             "wav_info": wav_info,
         }
+
+    def create_interaction(
+        self,
+        *,
+        transcript: str,
+        origin_device_id: str,
+        target_device_id: str,
+        idempotency_key: str = "",
+        response_device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Answer a prompt once, then queue the physical response for its target."""
+        origin = validate_device_id(origin_device_id)
+        target = validate_device_id(target_device_id)
+        response_device = validate_device_id(response_device_id) if response_device_id else origin
+        payload = self.answer_transcript(
+            transcript,
+            device_id=origin,
+            response_device_id=response_device,
+        )
+        action, created = self.action_queue.create(
+            origin_device_id=origin,
+            target_device_id=target,
+            transcript=str(payload["transcript"]),
+            command=str(payload["command"]),
+            reply=str(payload["reply"]),
+            idempotency_key=idempotency_key,
+        )
+        return {**payload, "action": action, "action_created": created}
 
     def synthesize_tts_wav(self, text: str) -> bytes:
         if self.args.dry_run:
@@ -680,14 +1047,15 @@ class BridgeState:
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
 
+        agent = self.current_agent_config()
         request_args: dict[str, Any] = {
-            "model": self.args.tts_model,
-            "voice": self.args.tts_voice,
+            "model": agent.tts_model,
+            "voice": agent.tts_voice,
             "input": text,
             "response_format": "wav",
         }
         if self.args.provider == "openai":
-            request_args["instructions"] = self.args.tts_instructions
+            request_args["instructions"] = agent.tts_instructions
         response = self.openai_client.audio.speech.create(**request_args)
         if hasattr(response, "read"):
             wav_bytes = bytes(response.read())
@@ -989,6 +1357,70 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     }
                 )
                 return
+            if path == "/v1/admin/config":
+                if not self._is_authorized():
+                    self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                    return
+                self._send_json({"ok": True, "config": state.agent_config.snapshot().public_dict()})
+                return
+            if path == "/v1/admin/catalog":
+                if not self._is_authorized():
+                    self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                    return
+                try:
+                    self._send_json({"ok": True, "catalog": state.openai_catalog()})
+                except Exception as exc:
+                    self._send_error_json(HTTPStatus.BAD_GATEWAY, str(exc))
+                return
+            if path == "/v1/interactions":
+                if not self._is_authorized():
+                    self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                    return
+                params = urllib.parse.parse_qs(parsed.query)
+                target = (params.get("target_device_id") or [""])[0].strip()
+                limit_raw = (params.get("limit") or ["100"])[0]
+                if not limit_raw.isdecimal():
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid limit")
+                    return
+                try:
+                    actions = state.action_queue.list(target_device_id=target, limit=int(limit_raw))
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self._send_json({"ok": True, "actions": actions})
+                return
+            action_match = re.fullmatch(r"/v1/interactions/([a-f0-9-]{36})", path)
+            if action_match:
+                if not self._is_authorized():
+                    self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                    return
+                try:
+                    action = state.action_queue.get(action_match.group(1))
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                if not action:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, "Action not found")
+                    return
+                self._send_json({"ok": True, "action": action})
+                return
+            device_action_match = re.fullmatch(r"/v1/devices/([A-Za-z0-9._-]{1,80})/actions", path)
+            if device_action_match:
+                if not self._is_authorized():
+                    self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                    return
+                target = device_action_match.group(1)
+                try:
+                    if self._device_id() != target:
+                        self._send_error_json(HTTPStatus.FORBIDDEN, "Device ID does not match action target")
+                        return
+                    state.touch_device(target)
+                    action = state.action_queue.claim_next(target)
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self._send_json({"ok": True, "action": action})
+                return
             if path in {"/v1/conversation", "/v1/devices", "/v1/conversation/sessions"}:
                 if not self._is_authorized():
                     self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
@@ -1037,26 +1469,92 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             if not self._is_authorized():
                 self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
                 return
-            if self.path == "/v1/query":
+            path = urllib.parse.urlsplit(self.path).path
+            if path == "/v1/query":
                 self._handle_audio_query()
                 return
-            if self.path == "/v1/query_text":
+            if path == "/v1/query_text":
                 self._handle_text_query()
                 return
-            if self.path == "/v1/tts":
+            if path == "/v1/tts":
                 self._handle_tts()
                 return
-            if self.path == "/v1/session/reset":
+            if path == "/v1/heartbeat":
                 try:
-                    state.clear_history()
+                    device_id = self._device_id()
+                    state.touch_device(device_id)
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self._send_json({"ok": True, "device_id": device_id})
+                return
+            if path == "/v1/session/reset":
+                try:
+                    payload = state.start_new_conversation()
                 except Exception as exc:
                     print(f"ERROR: {exc}")
                     self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
                     return
-                self._send_json({"ok": True, "history_messages": 0})
+                self._send_json(payload)
                 return
-            if self.path == "/v1/device_wifi":
+            session_archive_match = re.fullmatch(
+                r"/v1/conversation/sessions/([a-f0-9-]{36})/archive", path
+            )
+            if session_archive_match:
+                try:
+                    payload = state.archive_conversation(session_archive_match.group(1))
+                except LookupError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                except Exception as exc:
+                    print(f"ERROR: conversation archive failed: {exc}")
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self._send_json(payload)
+                return
+            session_rename_match = re.fullmatch(
+                r"/v1/conversation/sessions/([a-f0-9-]{36})/rename", path
+            )
+            if session_rename_match:
+                request = self._read_json_request(max_bytes=2_048)
+                if request is None:
+                    return
+                try:
+                    payload = state.rename_conversation(
+                        session_rename_match.group(1), str(request.get("title", ""))
+                    )
+                except LookupError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                except Exception as exc:
+                    print(f"ERROR: conversation rename failed: {exc}")
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self._send_json(payload)
+                return
+            if path == "/v1/device_wifi":
                 self._handle_device_wifi()
+                return
+            if path == "/v1/interactions":
+                self._handle_interaction()
+                return
+            if path == "/v1/admin/config":
+                self._handle_admin_config()
+                return
+            if path == "/v1/admin/api-key":
+                self._handle_admin_api_key()
+                return
+            action_ack_match = re.fullmatch(
+                r"/v1/devices/([A-Za-z0-9._-]{1,80})/actions/([a-f0-9-]{36})/ack", path
+            )
+            if action_ack_match:
+                self._handle_action_ack(action_ack_match.group(1), action_ack_match.group(2))
                 return
             self._send_error_json(HTTPStatus.NOT_FOUND, "Unknown endpoint")
 
@@ -1090,6 +1588,7 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             wav_bytes = self.rfile.read(length)
             try:
                 device_id = self._device_id()
+                state.touch_device(device_id)
                 saved_path = state.save_debug_wav(wav_bytes)
                 wav_info = inspect_wav(wav_bytes)
                 transcript = state.transcribe(wav_bytes)
@@ -1144,7 +1643,16 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 return
 
             try:
-                payload = state.answer_transcript(transcript, device_id=self._device_id())
+                response_device = str(request.get("response_device_id", "")).strip() or None
+                if response_device:
+                    response_device = validate_device_id(response_device)
+                device_id = self._device_id()
+                state.touch_device(device_id)
+                payload = state.answer_transcript(
+                    transcript,
+                    device_id=device_id,
+                    response_device_id=response_device,
+                )
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -1158,6 +1666,113 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
 
             self._log_response(payload)
             self._send_json(payload)
+
+        def _handle_interaction(self) -> None:
+            request = self._read_json_request(max_bytes=16_384)
+            if request is None:
+                return
+            transcript = str(request.get("transcript", "")).strip()
+            origin = str(request.get("origin_device_id", "")).strip()
+            target = str(request.get("target_device_id", "")).strip()
+            if not origin:
+                try:
+                    origin = self._device_id()
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+            if not transcript or not target:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "transcript and target_device_id are required")
+                return
+            try:
+                state.touch_device(origin)
+                payload = state.create_interaction(
+                    transcript=transcript,
+                    origin_device_id=origin,
+                    target_device_id=target,
+                    idempotency_key=str(request.get("idempotency_key", "")),
+                    response_device_id=str(request.get("response_device_id", "")).strip() or None,
+                )
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            except Exception as exc:  # pragma: no cover - runtime path
+                print(f"ERROR: interaction creation failed: {exc}")
+                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
+            self._log_response(payload)
+            self._send_json({"ok": True, **payload})
+
+        def _handle_action_ack(self, target_device_id: str, action_id: str) -> None:
+            try:
+                if self._device_id() != target_device_id:
+                    self._send_error_json(HTTPStatus.FORBIDDEN, "Device ID does not match action target")
+                    return
+                state.touch_device(target_device_id)
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            request = self._read_json_request(max_bytes=2_048)
+            if request is None:
+                return
+            try:
+                action = state.action_queue.acknowledge(
+                    target_device_id,
+                    action_id,
+                    str(request.get("status", "")),
+                    str(request.get("error", "")),
+                )
+            except LookupError:
+                self._send_error_json(HTTPStatus.NOT_FOUND, "Action not found")
+                return
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json({"ok": True, "action": action})
+
+        def _handle_admin_config(self) -> None:
+            request = self._read_json_request(max_bytes=64_000)
+            if request is None:
+                return
+            try:
+                config = state.agent_config.update(request)
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            except Exception as exc:  # pragma: no cover - persistence/runtime path
+                print(f"ERROR: agent config update failed: {exc}")
+                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
+            self._send_json({"ok": True, "config": config.public_dict()})
+
+        def _handle_admin_api_key(self) -> None:
+            request = self._read_json_request(max_bytes=2_048)
+            if request is None:
+                return
+            try:
+                payload = state.replace_openai_api_key(str(request.get("api_key", "")))
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            except Exception as exc:
+                print(f"ERROR: OpenAI API key update failed: {exc}")
+                self._send_error_json(HTTPStatus.BAD_GATEWAY, str(exc))
+                return
+            self._send_json(payload)
+
+        def _read_json_request(self, *, max_bytes: int) -> dict[str, Any] | None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > max_bytes:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return None
+            try:
+                request = json.loads(self.rfile.read(length).decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return None
+            if not isinstance(request, dict):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON body must be an object")
+                return None
+            return request
 
         def _handle_tts(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
@@ -1317,6 +1932,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of user/assistant turns retained in memory for this bridge process.",
     )
     parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=int(os.environ.get("WEARABLLM_MAX_OUTPUT_TOKENS", "512")),
+        help="Maximum assistant output tokens per response (clamped to 64..4096; default: 512).",
+    )
+    parser.add_argument(
         "--session-idle-seconds",
         type=int,
         default=int(os.environ.get("WEARABLLM_SESSION_IDLE_SECONDS", "3600")),
@@ -1327,6 +1948,11 @@ def parse_args() -> argparse.Namespace:
         choices=("local", "supabase"),
         default=os.environ.get("WEARABLLM_CONVERSATION_BACKEND", "local"),
         help="Recent-conversation backend: process-local or shared Supabase turns.",
+    )
+    parser.add_argument(
+        "--conversation-file",
+        default=os.environ.get("WEARABLLM_CONVERSATION_FILE", str(DEFAULT_CONVERSATION_FILE)),
+        help="Private local conversation JSON path (default: ~/.wearabllm/conversations.json).",
     )
     parser.add_argument(
         "--device-id",
@@ -1370,6 +1996,31 @@ def parse_args() -> argparse.Namespace:
         "--device-token",
         default=os.environ.get("WEARABLLM_DEVICE_TOKEN", ""),
         help="Require this device token in X-WearabLLM-Device-Token on every POST request.",
+    )
+    parser.add_argument(
+        "--action-backend",
+        choices=("local", "supabase"),
+        default=os.environ.get(
+            "WEARABLLM_ACTION_BACKEND",
+            "supabase" if os.environ.get("WEARABLLM_HOSTED", "") == "1" else "local",
+        ),
+        help="Device-action queue backend: local JSON or hosted Supabase.",
+    )
+    parser.add_argument(
+        "--action-queue-file",
+        default=os.environ.get("WEARABLLM_ACTION_QUEUE_FILE", str(DEFAULT_ACTION_QUEUE_FILE)),
+        help="Durable local JSON queue for responses targeted at a device.",
+    )
+    parser.add_argument(
+        "--action-lease-seconds",
+        type=int,
+        default=int(os.environ.get("WEARABLLM_ACTION_LEASE_SECONDS", "45")),
+        help="Seconds before an unacknowledged board action is eligible for redelivery.",
+    )
+    parser.add_argument(
+        "--agent-config-file",
+        default=os.environ.get("WEARABLLM_CONFIG_FILE", str(Path.home() / ".wearabllm" / "agent_config.json")),
+        help="Private local persistence path for dashboard-editable agent settings.",
     )
     parser.add_argument("--local-whisper-model", default=os.environ.get("WEARABLLM_LOCAL_WHISPER_MODEL", "base"))
     parser.add_argument("--typed", default="", help="Bypass STT and use this transcript for hardware-loop testing")
