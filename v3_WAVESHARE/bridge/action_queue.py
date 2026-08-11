@@ -32,6 +32,7 @@ IN_PROGRESS_STATUSES = {"dispatched", "delivered", "rendered", "tts_started"}
 STATUS_ORDER = {"dispatched": 0, "delivered": 1, "rendered": 2, "tts_started": 3}
 LED_COMMANDS = {"GS", "GP", "GC", "RS", "RF", "YP", "BS", "PS", "PP"}
 EXPRESSION_CHANNELS = {"visual", "display", "audio"}
+TEMPERATURE_ACTION_TYPE = "temperature_measurement"
 
 
 def now_iso() -> str:
@@ -109,6 +110,46 @@ def normalize_expiry(expires_at: str | None) -> str | None:
     if parsed <= datetime.now(timezone.utc):
         raise ValueError("Action expiry must be in the future")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def normalize_available_at(available_at: str | None) -> str:
+    if not available_at:
+        return now_iso()
+    parsed = parse_iso(str(available_at))
+    if parsed.tzinfo is None:
+        raise ValueError("Action availability must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def normalize_temperature_result(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    if not isinstance(result, dict):
+        raise ValueError("Temperature result must be an object")
+    try:
+        sequence = int(result.get("sequence", 0))
+        celsius = float(result.get("celsius"))
+        raw_adc = int(result.get("raw_adc", -1))
+        uptime_ms = int(result.get("uptime_ms", -1))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Temperature result contains invalid numeric fields") from exc
+    if sequence < 1 or not -40.0 <= celsius <= 125.0:
+        raise ValueError("Temperature result is outside the supported range")
+    if not 0 <= raw_adc <= 4095 or uptime_ms < 0:
+        raise ValueError("Temperature result contains invalid sensor metadata")
+    measured_at = str(result.get("measured_at", "")).strip() or now_iso()
+    measured = parse_iso(measured_at)
+    if measured.tzinfo is None:
+        raise ValueError("Temperature result timestamp must include a timezone")
+    return {
+        "version": 1,
+        "sequence": sequence,
+        "celsius": round(celsius, 2),
+        "fahrenheit": round(celsius * 9.0 / 5.0 + 32.0, 2),
+        "raw_adc": raw_adc,
+        "uptime_ms": uptime_ms,
+        "measured_at": measured.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
 
 
 class JsonActionQueue:
@@ -218,6 +259,67 @@ class JsonActionQueue:
             self._persist_locked()
             return deepcopy(action), True
 
+    def create_temperature_request(
+        self,
+        *,
+        origin_device_id: str,
+        target_device_id: str,
+        transcript: str,
+        idempotency_key: str,
+        schedule_id: str,
+        schedule_index: int,
+        schedule_count: int,
+        available_at: str,
+        expires_at: str,
+    ) -> tuple[dict[str, Any], bool]:
+        origin = validate_device_id(origin_device_id)
+        target = validate_device_id(target_device_id)
+        key = validate_idempotency_key(idempotency_key)
+        clean_transcript = transcript.strip()
+        if not clean_transcript:
+            raise ValueError("Missing transcript")
+        available = normalize_available_at(available_at)
+        expiry = normalize_expiry(expires_at)
+        payload = {
+            "version": 1,
+            "schedule_id": validate_idempotency_key(schedule_id),
+            "schedule_index": int(schedule_index),
+            "schedule_count": int(schedule_count),
+        }
+        with self._lock:
+            existing = next(
+                (item for item in self._actions if item.get("origin_device_id") == origin and item.get("idempotency_key") == key),
+                None,
+            )
+            if existing:
+                return deepcopy(existing), False
+            timestamp = now_iso()
+            action = {
+                "id": str(uuid.uuid4()),
+                "origin_device_id": origin,
+                "target_device_id": target,
+                "transcript": clean_transcript,
+                "command": "BS",
+                "reply": "Take one temperature reading.",
+                "action_type": TEMPERATURE_ACTION_TYPE,
+                "expression": {},
+                "payload": payload,
+                "result": None,
+                "status": "queued",
+                "idempotency_key": key,
+                "attempts": 0,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "available_at": available,
+                "leased_until": None,
+                "expires_at": expiry,
+                "error": None,
+            }
+            self._actions.append(action)
+            self._trim_locked()
+            self._persist_locked()
+            return deepcopy(action), True
+
     def claim_next(self, target_device_id: str) -> dict[str, Any] | None:
         target = validate_device_id(target_device_id)
         now = datetime.now(timezone.utc)
@@ -242,6 +344,7 @@ class JsonActionQueue:
                     item
                     for item in self._actions
                     if item.get("target_device_id") == target
+                    and parse_iso(str(item.get("available_at") or item.get("created_at") or now_iso())) <= now
                     and (
                         item.get("status") == "queued"
                         or (
@@ -264,7 +367,14 @@ class JsonActionQueue:
             self._persist_locked()
             return deepcopy(candidate)
 
-    def acknowledge(self, target_device_id: str, action_id: str, status: str, error: str = "") -> dict[str, Any]:
+    def acknowledge(
+        self,
+        target_device_id: str,
+        action_id: str,
+        status: str,
+        error: str = "",
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         target = validate_device_id(target_device_id)
         action_key = validate_action_id(action_id)
         if status not in {"delivered", "rendered", "tts_started", "completed", "played", "failed"}:
@@ -285,6 +395,9 @@ class JsonActionQueue:
                 and STATUS_ORDER[status] <= STATUS_ORDER[current]
             ):
                 return deepcopy(action)
+            normalized_result = None
+            if status == "completed" and action.get("action_type") == TEMPERATURE_ACTION_TYPE:
+                normalized_result = normalize_temperature_result(result)
             action["status"] = status
             action["leased_until"] = (
                 None
@@ -296,6 +409,8 @@ class JsonActionQueue:
             action["updated_at"] = now_iso()
             action["error"] = clean_error or None
             if status == "completed":
+                if action.get("action_type") == TEMPERATURE_ACTION_TYPE:
+                    action["result"] = normalized_result
                 action["completed_at"] = action["updated_at"]
             self._persist_locked()
             return deepcopy(action)
@@ -312,6 +427,25 @@ class JsonActionQueue:
         with self._lock:
             actions = [item for item in self._actions if not target or item.get("target_device_id") == target]
             return deepcopy(actions[-safe_limit:][::-1])
+
+    def cancel_temperature_schedule(self, schedule_id: str) -> int:
+        schedule = validate_idempotency_key(schedule_id)
+        count = 0
+        with self._lock:
+            for action in self._actions:
+                if (
+                    action.get("action_type") == TEMPERATURE_ACTION_TYPE
+                    and (action.get("payload") or {}).get("schedule_id") == schedule
+                    and action.get("status") not in TERMINAL_STATUSES
+                ):
+                    action["status"] = "failed"
+                    action["error"] = "Cancelled by user"
+                    action["leased_until"] = None
+                    action["updated_at"] = now_iso()
+                    count += 1
+            if count:
+                self._persist_locked()
+        return count
 
 
 class SupabaseActionQueue:
@@ -377,6 +511,16 @@ class SupabaseActionQueue:
             raise RuntimeError("Supabase returned invalid action JSON") from exc
 
     def _row(self, record: dict[str, Any]) -> dict[str, Any]:
+        action_type = str(record.get("action_type", "expression"))
+        expression = (
+            normalize_expression(
+                str(record.get("command", "")),
+                str(record.get("reply", "")),
+                record.get("expression") if isinstance(record.get("expression"), dict) else None,
+            )
+            if action_type == "expression"
+            else {}
+        )
         return {
             "id": str(record.get("id", "")),
             "origin_device_id": str(record.get("origin_device_id", "")),
@@ -384,18 +528,17 @@ class SupabaseActionQueue:
             "transcript": str(record.get("transcript", "")),
             "command": str(record.get("command", "")),
             "reply": str(record.get("reply", "")),
-            "action_type": str(record.get("action_type", "expression")),
-            "expression": normalize_expression(
-                str(record.get("command", "")),
-                str(record.get("reply", "")),
-                record.get("expression") if isinstance(record.get("expression"), dict) else None,
-            ),
+            "action_type": action_type,
+            "expression": expression,
+            "payload": record.get("payload") if isinstance(record.get("payload"), dict) else {},
+            "result": record.get("result") if isinstance(record.get("result"), dict) else None,
             "status": str(record.get("status", "queued")),
             "idempotency_key": record.get("idempotency_key"),
             "attempts": int(record.get("delivery_attempts", 0)),
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
             "leased_until": record.get("lease_expires_at"),
+            "available_at": record.get("available_at") or record.get("created_at"),
             "expires_at": record.get("expires_at"),
             "completed_at": record.get("completed_at"),
             "error": record.get("error"),
@@ -462,6 +605,55 @@ class SupabaseActionQueue:
             raise RuntimeError("Supabase did not return the created action")
         return self._row(payload[0]), True
 
+    def create_temperature_request(
+        self,
+        *,
+        origin_device_id: str,
+        target_device_id: str,
+        transcript: str,
+        idempotency_key: str,
+        schedule_id: str,
+        schedule_index: int,
+        schedule_count: int,
+        available_at: str,
+        expires_at: str,
+    ) -> tuple[dict[str, Any], bool]:
+        origin = validate_device_id(origin_device_id)
+        target = validate_device_id(target_device_id)
+        key = validate_idempotency_key(idempotency_key)
+        if existing := self._find_idempotent(origin, key):
+            return existing, False
+        clean_transcript = transcript.strip()
+        if not clean_transcript:
+            raise ValueError("Missing transcript")
+        payload = self._request(
+            "POST",
+            "/rest/v1/wearabllm_device_actions",
+            {
+                "principal_id": self.principal_id,
+                "origin_device_id": origin,
+                "target_device_id": target,
+                "transcript": clean_transcript,
+                "command": "BS",
+                "reply": "Take one temperature reading.",
+                "action_type": TEMPERATURE_ACTION_TYPE,
+                "expression": {},
+                "payload": {
+                    "version": 1,
+                    "schedule_id": validate_idempotency_key(schedule_id),
+                    "schedule_index": int(schedule_index),
+                    "schedule_count": int(schedule_count),
+                },
+                "status": "queued",
+                "idempotency_key": key,
+                "available_at": normalize_available_at(available_at),
+                "expires_at": normalize_expiry(expires_at),
+            },
+        )
+        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+            raise RuntimeError("Supabase did not return the created temperature action")
+        return self._row(payload[0]), True
+
     def claim_next(self, target_device_id: str) -> dict[str, Any] | None:
         target = validate_device_id(target_device_id)
         payload = self._request(
@@ -475,7 +667,14 @@ class SupabaseActionQueue:
         )
         return self._row(payload[0]) if isinstance(payload, list) and payload else None
 
-    def acknowledge(self, target_device_id: str, action_id: str, status: str, error: str = "") -> dict[str, Any]:
+    def acknowledge(
+        self,
+        target_device_id: str,
+        action_id: str,
+        status: str,
+        error: str = "",
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         target = validate_device_id(target_device_id)
         action_key = validate_action_id(action_id)
         if status not in {"delivered", "rendered", "tts_started", "completed", "played", "failed"}:
@@ -514,6 +713,8 @@ class SupabaseActionQueue:
         if status == "delivered":
             update["delivered_at"] = timestamp
         elif status == "completed":
+            if existing.get("action_type") == TEMPERATURE_ACTION_TYPE:
+                update["result"] = normalize_temperature_result(result)
             update["completed_at"] = timestamp
         elif status == "played":
             update["played_at"] = timestamp
@@ -560,3 +761,22 @@ class SupabaseActionQueue:
             f"&order=created_at.desc&limit={safe_limit}",
         )
         return [self._row(record) for record in payload or [] if isinstance(record, dict)]
+
+    def cancel_temperature_schedule(self, schedule_id: str) -> int:
+        schedule = validate_idempotency_key(schedule_id)
+        principal = urllib.parse.quote(self.principal_id, safe="")
+        encoded_schedule = urllib.parse.quote(schedule, safe="")
+        payload = self._request(
+            "PATCH",
+            "/rest/v1/wearabllm_device_actions"
+            f"?principal_id=eq.{principal}&action_type=eq.{TEMPERATURE_ACTION_TYPE}"
+            f"&payload->>schedule_id=eq.{encoded_schedule}"
+            "&status=not.in.(completed,played,failed,expired)",
+            {
+                "status": "failed",
+                "error": "Cancelled by user",
+                "lease_expires_at": None,
+                "failed_at": now_iso(),
+            },
+        )
+        return len(payload) if isinstance(payload, list) else 0

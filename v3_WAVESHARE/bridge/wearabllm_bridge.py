@@ -147,6 +147,13 @@ KNOWN_DEVICE_BODIES: list[dict[str, str]] = [
         "description": "Local browser console for reading and continuing the shared thread",
     },
     {
+        "id": "ducati-temp-sensor",
+        "label": "Ducati sensor",
+        "kind": "sensor",
+        "status": "active",
+        "description": "Hybrid BLE and outbound Wi-Fi ESP32-S3 temperature sensor",
+    },
+    {
         "id": "wearabllm-wearable",
         "label": "Wearable",
         "kind": "wearable",
@@ -559,6 +566,11 @@ class BridgeState:
             "web_search": self.web_search_enabled,
             "source_code_tools": bool(self.source_store),
             "max_tool_rounds": self.max_tool_rounds,
+            "model_tools": [
+                str(tool.get("name"))
+                for tool in function_tools()
+                if tool.get("type") == "function" and tool.get("name")
+            ],
             "device_auth_required": bool(getattr(self.args, "device_token", "")),
             "action_queue": {
                 "backend": "supabase" if self.action_backend == "supabase" else "local-json",
@@ -1268,6 +1280,21 @@ class BridgeState:
         if name == "send_to_body":
             targets = [str(value) for value in arguments.get("target_device_ids", [])]
             return f"Expression queued — {', '.join(targets) or 'no target'}"
+        if name == "temperature_read":
+            reading = result.get("result") if isinstance(result.get("result"), dict) else None
+            if reading:
+                return f"Temperature measured — {float(reading.get('celsius', 0)):.2f} °C"
+            return f"Temperature requested — {result.get('status', 'queued')}"
+        if name == "temperature_loop":
+            return (
+                f"Temperature loop scheduled — {result.get('count', '?')} readings every "
+                f"{result.get('interval_seconds', '?')}s · {clip(result.get('schedule_id'), 64)}"
+            )
+        if name == "temperature_loop_cancel":
+            return (
+                f"Temperature loop cancelled — {result.get('cancelled', 0)} pending action"
+                f"{'s' if result.get('cancelled', 0) != 1 else ''}"
+            )
         if name == "source_list":
             entries = result.get("entries", [])
             count = len(entries) if isinstance(entries, list) else 0
@@ -1333,6 +1360,34 @@ class BridgeState:
             if self.conversation_store:
                 self.conversation_store.clear()
             self.history.clear()
+
+    def record_temperature_action(self, action: dict[str, Any]) -> None:
+        """Publish confirmed loop readings without claiming an unverified value."""
+        result = action.get("result") if isinstance(action.get("result"), dict) else None
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        if not result or int(payload.get("schedule_count", 1)) <= 1:
+            return
+        if not self.conversation_store:
+            return
+        try:
+            session = self.conversation_store.active_session() or self.conversation_store.create_session()
+            index = int(payload.get("schedule_index", 1))
+            count = int(payload.get("schedule_count", 1))
+            celsius = float(result["celsius"])
+            fahrenheit = float(result["fahrenheit"])
+            self.conversation_store.append(
+                str(session["id"]),
+                "ducati-temp-sensor",
+                "assistant",
+                f"Temperature loop {index}/{count}: {celsius:.2f} °C / {fahrenheit:.2f} °F.",
+                metadata={
+                    "sensor_reading": result,
+                    "sensor_schedule_id": payload.get("schedule_id"),
+                    "sensor_action_id": action.get("id"),
+                },
+            )
+        except Exception as exc:
+            print(f"WARNING: temperature reading persistence failed: {exc}")
 
     def start_new_conversation(self) -> dict[str, Any]:
         """End and preserve a nonempty active thread, then create its replacement."""
@@ -2276,11 +2331,13 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             if request is None:
                 return
             try:
+                previous = state.action_queue.get(action_id)
                 action = state.action_queue.acknowledge(
                     target_device_id,
                     action_id,
                     str(request.get("status", "")),
                     str(request.get("error", "")),
+                    request.get("result") if isinstance(request.get("result"), dict) else None,
                 )
             except LookupError:
                 self._send_error_json(HTTPStatus.NOT_FOUND, "Action not found")
@@ -2288,6 +2345,12 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
+            if (
+                action.get("action_type") == "temperature_measurement"
+                and action.get("status") == "completed"
+                and (previous or {}).get("status") != "completed"
+            ):
+                state.record_temperature_action(action)
             self._send_json({"ok": True, "action": action})
 
         def _handle_admin_config(self) -> None:

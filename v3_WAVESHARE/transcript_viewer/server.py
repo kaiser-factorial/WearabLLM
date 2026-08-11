@@ -137,6 +137,13 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
                             "description": "This browser — reply here to continue the shared thread",
                         },
                         {
+                            "id": "ducati-temp-sensor",
+                            "label": "Ducati sensor",
+                            "kind": "sensor",
+                            "status": "active",
+                            "description": "Hybrid BLE and outbound Wi-Fi ESP32-S3 temperature sensor",
+                        },
+                        {
                             "id": "wearabllm-wearable",
                             "label": "Wearable",
                             "kind": "wearable",

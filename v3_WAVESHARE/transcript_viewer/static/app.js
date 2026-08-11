@@ -84,6 +84,7 @@ const state = {
   sensorCharacteristic: null,
   sensorCommandCharacteristic: null,
   sensorReadings: [],
+  sensorSeenActionIds: new Set(),
   sensorLastSequence: null,
 };
 
@@ -182,7 +183,8 @@ function mergeDevices(known = [], remote = []) {
     "wearabllm-esp32": 0,
     "wearabllm-android": 1,
     "web-console": 2,
-    "wearabllm-wearable": 3,
+    "ducati-temp-sensor": 3,
+    "wearabllm-wearable": 4,
   };
   return Array.from(byId.values()).sort((a, b) =>
     (order[a.id] ?? 100).toString().localeCompare((order[b.id] ?? 100).toString())
@@ -625,11 +627,52 @@ async function refreshConversation({ forceRender = false } = {}) {
       : "This conversation is archived. Start a new one to reply.";
     if (!isCurrent) els.composerStatus.textContent = "Archived conversation · read only";
     setStatus("online", "Live");
+    if (state.view === "sensor") void refreshTemperatureActions();
   } catch (error) {
     console.error(error);
     setStatus("offline", error.message || "Retrying");
   } finally {
     state.polling = false;
+  }
+}
+
+async function refreshTemperatureActions() {
+  try {
+    const payload = await fetchJson(
+      "/api/interactions?target_device_id=ducati-temp-sensor&limit=50",
+    );
+    const actions = Array.isArray(payload.actions) ? [...payload.actions].reverse() : [];
+    let latest = null;
+    for (const action of actions) {
+      if (action?.action_type !== "temperature_measurement" || action?.status !== "completed") continue;
+      if (!action.result || state.sensorSeenActionIds.has(action.id)) continue;
+      state.sensorSeenActionIds.add(action.id);
+      const celsius = Number(action.result.celsius);
+      const reading = {
+        sequence: Number(action.result.sequence),
+        celsius,
+        fahrenheit: Number(action.result.fahrenheit ?? ((celsius * 9) / 5 + 32)),
+        rawAdc: Number(action.result.raw_adc),
+        uptimeMs: Number(action.result.uptime_ms),
+        time: new Date(action.result.measured_at || action.completed_at || Date.now()),
+        source: "Wi-Fi",
+      };
+      const alreadyReceivedOverBle = state.sensorReadings.some(
+        (item) => item.sequence === reading.sequence && item.uptimeMs === reading.uptimeMs,
+      );
+      if (!alreadyReceivedOverBle) {
+        state.sensorReadings = [reading, ...state.sensorReadings].slice(0, 20);
+      }
+      latest = reading;
+    }
+    if (latest) {
+      els.sensorCelsius.textContent = latest.celsius.toFixed(2);
+      els.sensorFahrenheit.textContent = `${latest.fahrenheit.toFixed(2)} °F`;
+      els.sensorReadingMeta.textContent = `Wi-Fi reading ${latest.sequence} · raw ADC ${latest.rawAdc} · board up ${Math.round(latest.uptimeMs / 1000)}s`;
+      renderSensorHistory();
+    }
+  } catch (error) {
+    console.warn("temperature actions", error);
   }
 }
 

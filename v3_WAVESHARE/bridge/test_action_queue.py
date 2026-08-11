@@ -99,6 +99,82 @@ class JsonActionQueueTest(unittest.TestCase):
         assert expired is not None
         self.assertEqual(expired["status"], "expired")
 
+    def test_temperature_request_waits_until_due_and_records_result(self) -> None:
+        queue = JsonActionQueue(self.path)
+        now = datetime.now(timezone.utc)
+        action, created = queue.create_temperature_request(
+            origin_device_id="web-console",
+            target_device_id="ducati-temp-sensor",
+            transcript="Take two readings.",
+            idempotency_key="temperature-route-1",
+            schedule_id="temp-loop-test",
+            schedule_index=1,
+            schedule_count=2,
+            available_at=(now + timedelta(milliseconds=20)).isoformat(),
+            expires_at=(now + timedelta(seconds=30)).isoformat(),
+        )
+        self.assertTrue(created)
+        self.assertIsNone(queue.claim_next("ducati-temp-sensor"))
+        import time
+        time.sleep(0.03)
+        claimed = queue.claim_next("ducati-temp-sensor")
+        assert claimed is not None
+        self.assertEqual(claimed["id"], action["id"])
+        completed = queue.acknowledge(
+            "ducati-temp-sensor",
+            str(action["id"]),
+            "completed",
+            result={"sequence": 7, "celsius": 22.31, "raw_adc": 1924, "uptime_ms": 4200},
+        )
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["result"]["fahrenheit"], 72.16)
+
+    def test_invalid_temperature_result_does_not_complete_action(self) -> None:
+        queue = JsonActionQueue(self.path)
+        action, _ = queue.create_temperature_request(
+            origin_device_id="web-console",
+            target_device_id="ducati-temp-sensor",
+            transcript="Take one reading.",
+            idempotency_key="temperature-invalid-result",
+            schedule_id="temperature-invalid-result",
+            schedule_index=1,
+            schedule_count=1,
+            available_at=None,
+            expires_at=None,
+        )
+        claimed = queue.claim_next("ducati-temp-sensor")
+        self.assertIsNotNone(claimed)
+
+        with self.assertRaisesRegex(ValueError, "invalid numeric fields"):
+            queue.acknowledge(
+                "ducati-temp-sensor",
+                action["id"],
+                "completed",
+                result={"sequence": 1, "raw_adc": 1924, "uptime_ms": 4200},
+            )
+
+        unchanged = queue.get(action["id"])
+        self.assertEqual(unchanged["status"], "dispatched")
+        self.assertIsNone(unchanged.get("result"))
+
+    def test_temperature_schedule_can_be_cancelled(self) -> None:
+        queue = JsonActionQueue(self.path)
+        now = datetime.now(timezone.utc)
+        for index in range(2):
+            queue.create_temperature_request(
+                origin_device_id="web-console",
+                target_device_id="ducati-temp-sensor",
+                transcript="Schedule readings.",
+                idempotency_key=f"temperature-cancel-{index}",
+                schedule_id="temp-loop-cancel",
+                schedule_index=index + 1,
+                schedule_count=2,
+                available_at=(now + timedelta(minutes=index)).isoformat(),
+                expires_at=(now + timedelta(minutes=index, seconds=90)).isoformat(),
+            )
+        self.assertEqual(queue.cancel_temperature_schedule("temp-loop-cancel"), 2)
+        self.assertTrue(all(item["status"] == "failed" for item in queue.list(target_device_id="ducati-temp-sensor")))
+
 
 class SupabaseActionQueueTest(unittest.TestCase):
     def setUp(self) -> None:

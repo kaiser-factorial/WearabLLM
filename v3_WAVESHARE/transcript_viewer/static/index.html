@@ -132,24 +132,24 @@
                 <strong id="sensor-celsius">—</strong><span>°C</span>
                 <small id="sensor-fahrenheit">Waiting for a reading</small>
               </div>
-              <p id="sensor-reading-meta" class="sensor-reading-meta">Connect v6.2, then request a reading here or on the device.</p>
+              <p id="sensor-reading-meta" class="sensor-reading-meta">Connect v6.2 or v6.3, then request a reading here or on the device.</p>
+              <div class="sensor-reading-actions">
+                <button id="sensor-take-reading" type="button" disabled>Take reading</button>
+              </div>
             </section>
 
             <section class="sensor-card sensor-connect-card" aria-labelledby="sensor-connect-title">
               <p class="eyebrow">Bluetooth LE</p>
-              <h2 id="sensor-connect-title">Ducati sensor v6.2</h2>
+              <h2 id="sensor-connect-title">Ducati sensor</h2>
               <p class="hint">
-                Your browser connects straight to the ESP32-S3. Readings stay on this page and are not sent to Sphere or the cloud.
+                Direct BLE readings stay on this page. With v6.3, confirmed Wi-Fi readings also arrive through Sphere's private bridge.
               </p>
               <ol class="sensor-steps">
-                <li>Power the ESP32-S3 running v6.2.</li>
+                <li>Power the ESP32-S3 running v6.2 or v6.3.</li>
                 <li>Connect and choose <strong>Ducati Temperature Sensor</strong>.</li>
                 <li>Use <strong>Take reading</strong> here or press the TinkerBlock button.</li>
               </ol>
-              <div class="sensor-actions">
-                <button id="sensor-connect" type="button">Connect sensor</button>
-                <button id="sensor-take-reading" type="button" class="ghost" disabled>Take reading</button>
-              </div>
+              <button id="sensor-connect" type="button">Connect sensor</button>
               <p id="sensor-status" class="hint sensor-status" aria-live="polite">Ready to connect.</p>
             </section>
 

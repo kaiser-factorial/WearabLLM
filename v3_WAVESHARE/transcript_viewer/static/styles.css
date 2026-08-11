@@ -274,6 +274,7 @@ body {
 .body-status.home .device-dot { color: var(--home); background: var(--home); }
 .body-status.phone .device-dot { color: #f7ca43; background: #f7ca43; }
 .body-status.web .device-dot { color: var(--web); background: var(--web); }
+.body-status.sensor .device-dot { color: var(--accent); background: var(--accent); }
 .body-status.wearable .device-dot { color: var(--wearable); background: var(--wearable); }
 .body-status.custom .device-dot { color: var(--accent-2); background: var(--accent-2); }
 
@@ -551,13 +552,9 @@ body {
 }
 .sensor-connect-card { display: flex; flex-direction: column; }
 .sensor-connect-card .hint { margin-top: 12px; }
-.sensor-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: auto;
-}
-.sensor-actions button { width: 100%; }
+.sensor-connect-card > button { width: 100%; margin-top: auto; }
+.sensor-reading-actions { position: relative; z-index: 1; margin-top: 18px; }
+.sensor-reading-actions button { width: 100%; }
 .sensor-steps {
   display: grid;
   gap: 9px;

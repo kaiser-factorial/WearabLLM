@@ -5,8 +5,9 @@ authorization boundaries, and their current limitations.
 
 ## Current status and deferred work
 
-The ten-tool set is implemented and locally tested. The four supporting
-Supabase migrations, including private hybrid vector retrieval, were applied
+The thirteen-tool set is implemented and locally tested. The five supporting
+Supabase migrations, including private hybrid vector retrieval and due-time
+temperature actions, were applied
 on 2026-08-11. The private hosted bridge revision was deployed and live-smoked
 the same day: status, semantic memory retrieval, forgetting, and web-source
 collection all completed through the authenticated device API.
@@ -37,10 +38,39 @@ level for compatibility with the currently flashed firmware.
 | `source_list` | Bridge function | Build-time source manifest | None | No |
 | `source_read` | Bridge function | One bounded source line range | None | No |
 | `send_to_body` | Bridge function | Target/action state | Queues one action per target | Yes |
+| `temperature_read` | Bridge function | Confirmed Ducati sensor result | Queues one fresh physical reading and waits up to 20 seconds | Yes |
+| `temperature_loop` | Bridge function | Scheduled action state | Queues 2–10 due-time readings at 30–3600 second intervals | Yes |
+| `temperature_loop_cancel` | Bridge function | One known schedule | Fails unfinished actions in that schedule | Yes |
 
 The memory tools operate only on WearabLLM's private Supabase
 `wearabllm_memory_records` table. They do not access the separate local Memory
 Hub used by development agents.
+
+## Temperature tools
+
+The dedicated `ducati-temp-sensor` body runs the hybrid v6.3 firmware. It
+polls the private hosted bridge over authenticated outbound HTTPS, so the
+bridge never opens an inbound home-network port and never depends on a browser
+holding a Bluetooth connection.
+
+- `temperature_read` creates one action, waits for up to 20 seconds, and
+  returns a numeric value only after the ESP32 posts a terminal `completed`
+  acknowledgement containing sequence, Celsius, ADC, uptime, and measurement
+  time. A timeout returns `pending`, never a guessed or cached reading.
+- `temperature_loop` expands one request into 2–10 independently leased
+  actions with explicit due times. The minimum interval is 30 seconds, the
+  maximum is one hour, and each due action expires after two minutes.
+- `temperature_loop_cancel` requires the schedule ID returned at creation and
+  marks only unfinished actions as cancelled.
+
+Confirmed loop readings are appended to the active shared conversation as
+sensor-authored turns and also appear in the Sensor tab's local history. BLE
+remains available for direct manual readings; both transports use the same
+measurement and validation code on the ESP32.
+
+The ESP32 stores Wi-Fi credentials, bridge URL/token, and its TLS root CA only
+in the Git-ignored `v6.3_temperature_sensor/wifi_config.h`. HTTPS fails closed
+when a valid CA is not configured.
 
 ## How a tool turn works
 
