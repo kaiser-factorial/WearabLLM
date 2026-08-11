@@ -60,7 +60,17 @@ const conversation = parseBridgeConversation({
   ],
   turns: [
     { id: 1, device_id: 'wearabllm-android', role: 'user', content: 'Hello', created_at: null },
-    { id: 2, device_id: 'local-bridge', role: 'assistant', content: 'Hi', created_at: null },
+    {
+      id: 2,
+      device_id: 'local-bridge',
+      role: 'assistant',
+      content: 'Hi',
+      metadata: {
+        sources: [{ title: 'Example', url: 'https://example.com/source' }],
+        tool_results: [{ name: 'memory_remember', ok: true, summary: 'Memory updated — Corina prefers direct replies.' }],
+      },
+      created_at: null,
+    },
   ],
 });
 if (conversation.devices.length !== 1 || conversation.devices[0].id !== 'wearabllm-android') {
@@ -68,6 +78,12 @@ if (conversation.devices.length !== 1 || conversation.devices[0].id !== 'wearabl
 }
 if (conversation.turns[1].device_id !== 'web-console') {
   throw new Error(`Expected legacy local-bridge turn to map to web-console, got ${conversation.turns[1].device_id}`);
+}
+if (conversation.turns[1].sources[0]?.url !== 'https://example.com/source') {
+  throw new Error(`Expected assistant source metadata to parse, got ${JSON.stringify(conversation.turns[1])}`);
+}
+if (conversation.turns[1].tool_results[0]?.summary !== 'Memory updated — Corina prefers direct replies.') {
+  throw new Error(`Expected tool activity metadata to parse, got ${JSON.stringify(conversation.turns[1])}`);
 }
 if (conversation.session?.id !== 'session-1' || conversation.sessions.length !== 2) {
   throw new Error(`Expected conversation sessions to parse, got ${JSON.stringify(conversation.sessions)}`);

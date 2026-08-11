@@ -162,6 +162,18 @@ class LocalConversationStoreTest(unittest.TestCase):
         self.assertEqual(self.store.turns(second["id"]), [])
         self.assertEqual(len(self.store.list_sessions()), 2)
 
+    def test_end_session_preserves_turns_without_archiving(self):
+        first = self.store.create_session()
+        self.store.append(first["id"], "web-console", "user", "Keep this thread visible.")
+
+        self.assertEqual(self.store.end_session(first), 1)
+
+        ended = next(item for item in self.store.list_sessions() if item["id"] == first["id"])
+        self.assertTrue(ended["ended_at"])
+        self.assertIsNone(ended["archived_at"])
+        self.assertEqual(self.store.turns(first["id"])[0]["content"], "Keep this thread visible.")
+        self.assertIsNone(self.store.active_session())
+
     def test_rename_and_archive_are_persistent_and_archive_is_idempotent(self):
         session = self.store.create_session()
         renamed = self.store.rename(session["id"], "Dinner plans")
@@ -235,6 +247,20 @@ class SupabaseConversationStoreTest(unittest.TestCase):
         self.assertIn("wearabllm_conversation_archive", requests[1].full_url)
         self.assertIn("wearabllm_conversation_sessions", requests[2].full_url)
         self.assertIn("wearabllm_conversation_turns", requests[3].full_url)
+
+    @patch("durable_memory.urllib.request.urlopen")
+    def test_end_session_preserves_primary_turns_and_does_not_archive(self, urlopen):
+        urlopen.return_value = self.response([{"id": "session-1"}])
+
+        self.store.end_session({"id": "session-1"})
+
+        self.assertEqual(urlopen.call_count, 1)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_method(), "PATCH")
+        self.assertIn("wearabllm_conversation_sessions", request.full_url)
+        update = json.loads(request.data)
+        self.assertIn("ended_at", update)
+        self.assertNotIn("archived_at", update)
 
 
 if __name__ == "__main__":

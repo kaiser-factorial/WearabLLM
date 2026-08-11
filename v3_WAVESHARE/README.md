@@ -37,7 +37,7 @@ hosted conversations. The dashboard is still served locally.
 | `hosted_agent/` | Hugging Face Docker Space |
 | `protocol/` | Shared HTTP/command contract |
 | `scripts/` | Build, flash, deploy, smoke, and bring-up tooling |
-| `docs/` | Architecture, pin map, bring-up, and current status |
+| `docs/` | Architecture, model tools, pin map, bring-up, and current status |
 
 ## Current hosted defaults
 
@@ -156,18 +156,19 @@ JDK/SDK and release-build details.
 
 ## Verification
 
-As of 2026-08-09:
+As of 2026-08-11:
 
 - the user confirmed a physical Waveshare voice interaction works
 - hosted query/TLS and Supabase queue polling are live
 - dashboard-to-Waveshare display/TTS delivery works
 - Android connects to hosted Sphere and shares conversation state
-- all 79 bridge tests pass
+- all 131 bridge tests pass on Python 3.12
 - Android typechecking and protocol tests pass
 - firmware builds, passes the image gate, flashes, and boots on hardware
 
 See `docs/STATUS.md` for the current verified/not-yet-verified boundary and
-`docs/PINMAP.md` for hardware wiring.
+`docs/PINMAP.md` for hardware wiring. See `docs/TOOLS.md` for every model tool,
+its authorization boundary, and the deferred deployment decisions.
 
 ## Security
 
@@ -185,4 +186,5 @@ See `docs/STATUS.md` for the current verified/not-yet-verified boundary and
 2. Add signed/versioned Android distribution.
 3. Add dual-slot authenticated OTA firmware updates.
 4. Add per-device credentials and richer delivery diagnostics.
-5. Build the separate Supabase-backed household-memory tool and review UI.
+5. Build the household-memory review UI and monitor exact-scan vector latency
+   before deciding whether the small corpus needs an HNSW index.

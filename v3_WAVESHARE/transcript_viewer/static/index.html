@@ -52,6 +52,14 @@
           <div id="device-list" class="device-list" role="list" aria-label="Body statuses"></div>
         </section>
 
+        <section id="expression-banner" class="expression-banner" aria-live="polite" hidden>
+          <span id="expression-glow" class="expression-glow" aria-hidden="true"></span>
+          <div>
+            <p id="expression-meta" class="expression-meta"></p>
+            <p id="expression-text" class="expression-text"></p>
+          </div>
+        </section>
+
         <section id="chat-view" class="view active">
           <section id="thread" class="thread" aria-live="polite"></section>
 
@@ -151,6 +159,13 @@
         <section class="settings-section tts-settings">
           <label for="cfg-tts-instructions">TTS delivery instructions</label>
           <textarea id="cfg-tts-instructions" rows="6" maxlength="4000" required></textarea>
+          <label class="browser-speech-setting" for="allow-browser-speech">
+            <input id="allow-browser-speech" type="checkbox">
+            <span>
+              <strong>Automatic Sphere speech in this browser</strong>
+              <small>Targeted expressions always render visually. Speech is opt-in on this body.</small>
+            </span>
+          </label>
         </section>
 
         <section class="provider-controls" aria-labelledby="provider-controls-title">

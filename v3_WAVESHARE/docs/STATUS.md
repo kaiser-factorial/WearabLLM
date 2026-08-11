@@ -1,6 +1,6 @@
 # v3 Status
 
-Last verified: 2026-08-09
+Last verified: 2026-08-11
 
 ## Verified on hardware
 
@@ -43,11 +43,11 @@ Do not publish it or distribute compiled binaries from a private deployment.
 
 ## Verified software
 
-- 79 bridge unit tests pass
+- 131 bridge unit tests pass on Python 3.12
 - Android TypeScript and protocol tests pass
 - hosted `/health` reports OpenAI + Supabase backends ready
 - OpenAI model catalog and live query work through the Space
-- all Supabase migrations through `20260809030000` match remote
+- all Supabase migrations through `20260810030000` match remote
 - conversation create/read/new-session behavior works across bodies
 - conversation rename and archive endpoints/UI are implemented
 - one 12-turn local session was recovered into Supabase without replaying it
@@ -66,13 +66,40 @@ Do not publish it or distribute compiled binaries from a private deployment.
   React Native upgrade, so it is tracked as a dedicated upgrade rather than
   forced into this hardware-verified release.
 - Android and Waveshare currently share one device token.
-- The richer `wearabllm_memory_records` schema is not yet connected to a
-  model-facing memory tool or user review/correction UI.
+- The ten Sphere tools are live on the private hosted bridge: built-in web
+  search, read-only passive status, hybrid memory search, safe automatic
+  remember, sensitive yes/no confirmation, explicit correct/forget, and
+  cross-body expression plus read-only source listing/reading. The memory
+  review UI remains unimplemented.
+- Every tool call now persists a concise in-chat activity summary. Memory
+  mutations show a bounded content prefix; source reads show only path and line
+  range in the audit row.
+- Web search is offered only for explicit or clearly time-sensitive current
+  requests; prior web-search intent and citations cannot leak into later
+  memory turns.
+- Dashboard `+` now ends and preserves the current nonempty conversation in
+  the normal history list. Explicit Archive remains the only action that moves
+  turns into archive storage.
+- Hybrid memory uses `text-embedding-3-small` at 512 dimensions behind a
+  service-role-only, principal-scoped Supabase RPC. The 2026-08-11 live probe
+  retrieved “cobalt lantern” from the synonym query “blue lamp,” then soft-
+  forgot the disposable record.
 - Archive restore/unarchive and deletion are not implemented.
 - Boot logs emit an I2C pull-up-resistance warning even though both codecs
   initialize and physical audio works; investigate if hardware is intermittent.
 - Long-response retry, lease-expiry, reboot, and power-loss behavior need a
   recorded regression matrix.
+
+## Explicitly tabled on 2026-08-11
+
+The following adjacent work remains deliberately tabled:
+
+- Android/browser background push delivery
+- choosing local per-device speech versus one hosted Sphere voice
+- the dedicated memory review/restore/permanent-delete UI
+
+The implementation and limitations of each tool are documented in
+`TOOLS.md`.
 
 ## Current verification commands
 

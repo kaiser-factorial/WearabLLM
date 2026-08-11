@@ -277,6 +277,43 @@ body {
 .body-status.wearable .device-dot { color: var(--wearable); background: var(--wearable); }
 .body-status.custom .device-dot { color: var(--accent-2); background: var(--accent-2); }
 
+.expression-banner {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  gap: 12px;
+  margin: 0 24px 12px;
+  overflow: hidden;
+  border: 1px solid var(--expression-color, var(--accent-2));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--expression-color, var(--accent-2)) 9%, var(--bg-elevated));
+  box-shadow: 0 0 36px color-mix(in srgb, var(--expression-color, var(--accent-2)) 22%, transparent);
+}
+.expression-banner[hidden] { display: none; }
+.expression-glow { background: var(--expression-color, var(--accent-2)); }
+.expression-banner > div { padding: 10px 14px 10px 0; }
+.expression-meta {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font: 600 0.64rem/1.2 "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.expression-text { margin: 0; color: var(--text); font-size: 0.92rem; line-height: 1.35; }
+
+.browser-speech-setting {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+.browser-speech-setting input { width: auto; margin-top: 3px; }
+.browser-speech-setting span { display: grid; gap: 3px; }
+.browser-speech-setting strong { color: var(--text); font-size: 0.82rem; }
+.browser-speech-setting small { color: var(--muted); font-size: 0.72rem; font-weight: 400; }
+
 .device-card {
   display: grid;
   grid-template-columns: 14px 1fr auto;
@@ -664,6 +701,46 @@ body {
   white-space: pre-wrap;
   line-height: 1.55;
   font-size: 1.02rem;
+}
+.bubble-tools {
+  display: grid;
+  gap: 5px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+}
+.bubble-tool {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.bubble-tool::before {
+  content: "↳ ";
+  color: var(--accent);
+}
+.bubble-tool.failed { color: var(--danger); }
+.bubble-sources {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+}
+.bubble-sources strong {
+  color: var(--muted);
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.bubble-sources a {
+  max-width: 640px;
+  overflow: hidden;
+  color: var(--web);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .thinking-bubble {
   border-color: rgba(124, 240, 194, 0.3);

@@ -21,6 +21,7 @@ const DEVICE_DISPLAY_SELF_TEST_KEY = 'wearabllm_v3_device_display_self_test';
 const DEFAULT_BRIDGE_URL = 'https://brick-factorial-wearabllm-agent.hf.space';
 const APP_DEVICE_ID_KEY = 'wearabllm_v3_app_device_id';
 const ANDROID_BODY_DEVICE_ID = 'wearabllm-android';
+const ALLOW_AUTOMATIC_SPEECH_KEY = 'wearabllm_v3_allow_automatic_speech';
 
 export async function loadAppDeviceId(): Promise<string> {
   const existing = await SecureStore.getItemAsync(APP_DEVICE_ID_KEY);
@@ -45,6 +46,14 @@ export async function loadBridgeToken(): Promise<string> {
 
 export async function saveBridgeToken(token: string): Promise<void> {
   await SecureStore.setItemAsync(BRIDGE_TOKEN_KEY, token.trim());
+}
+
+export async function loadAllowAutomaticSpeech(): Promise<boolean> {
+  return (await SecureStore.getItemAsync(ALLOW_AUTOMATIC_SPEECH_KEY)) === 'true';
+}
+
+export async function saveAllowAutomaticSpeech(enabled: boolean): Promise<void> {
+  await SecureStore.setItemAsync(ALLOW_AUTOMATIC_SPEECH_KEY, String(enabled));
 }
 
 export interface DeviceWifiSettings {

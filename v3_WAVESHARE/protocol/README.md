@@ -181,6 +181,12 @@ Bridge returns:
   "transcript": "Recognized user speech.",
   "audio_bytes": 123456,
   "saved_wav": null,
+  "sources": [
+    {"title": "Public source title", "url": "https://example.com/source"}
+  ],
+  "tool_results": [
+    {"name": "memory_search", "ok": true, "match_count": 2}
+  ],
   "wav_info": {
     "valid": true,
     "sample_rate": 16000,
@@ -213,8 +219,44 @@ firmware or the Android app.
 | `audio_bytes` | number | yes | debugging capture/upload |
 | `saved_wav` | string or null | yes | bridge-side audio debugging |
 | `wav_info` | object or null | yes | bridge-side audio format debugging |
+| `sources` | array | yes | visual clients; never read aloud automatically |
+| `tool_results` | array | yes | bounded tool audit plus visual activity summary; memory mutations include a short content prefix |
 
 For `/v1/query_text`, `audio_bytes` is `0`, `saved_wav` is `null`, and `wav_info` is `null`.
+
+## Cross-body expressions
+
+All active bodies claim the same device-neutral action shape from:
+
+```http
+GET /v1/devices/<device-id>/actions
+X-WearabLLM-Device-Id: <same device-id>
+```
+
+```json
+{
+  "id": "...",
+  "action_type": "expression",
+  "command": "GP",
+  "reply": "Dinner is ready.",
+  "expression": {
+    "version": 1,
+    "command": "GP",
+    "text": "Dinner is ready.",
+    "channels": ["visual", "display", "audio"]
+  },
+  "status": "dispatched",
+  "expires_at": "2026-08-11T01:02:03Z"
+}
+```
+
+Top-level `command` and `reply` mirror the expression for compatibility with
+the currently flashed Waveshare firmware. Android and Web render the semantic
+command themselves and honor local speech preferences. A body reports progress
+to `POST /v1/devices/<device-id>/actions/<action-id>/ack` with one of
+`delivered`, `rendered`, `tts_started`, `completed`, `played`, or `failed`.
+Only `completed`, `played`, `failed`, and server-generated `expired` are
+terminal. One action row belongs to exactly one target.
 
 Error responses from bridge API endpoints are JSON:
 

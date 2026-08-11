@@ -1,6 +1,10 @@
 const els = {
   status: document.querySelector("#status"),
   deviceList: document.querySelector("#device-list"),
+  expressionBanner: document.querySelector("#expression-banner"),
+  expressionGlow: document.querySelector("#expression-glow"),
+  expressionMeta: document.querySelector("#expression-meta"),
+  expressionText: document.querySelector("#expression-text"),
   conversationList: document.querySelector("#conversation-list"),
   newConversation: document.querySelector("#new-conversation"),
   archiveToggle: document.querySelector("#archive-toggle"),
@@ -32,6 +36,7 @@ const els = {
   cfgTtsModel: document.querySelector("#cfg-tts-model"),
   cfgTtsVoice: document.querySelector("#cfg-tts-voice"),
   cfgTtsInstructions: document.querySelector("#cfg-tts-instructions"),
+  allowBrowserSpeech: document.querySelector("#allow-browser-speech"),
   cfgUpdated: document.querySelector("#cfg-updated"),
   deployRepo: document.querySelector("#deploy-repo"),
   deployBridge: document.querySelector("#deploy-bridge"),
@@ -63,6 +68,16 @@ const state = {
   agentConfig: null,
   modelCatalog: null,
   showArchived: false,
+  receivingBodyAction: false,
+  expressionTimer: null,
+};
+
+const EXPRESSION_COLORS = {
+  G: "#22c55e",
+  R: "#ef4444",
+  Y: "#eab308",
+  B: "#3b82f6",
+  P: "#a855f7",
 };
 
 function setStatus(kind, text) {
@@ -161,7 +176,7 @@ function devicesSignature(devices) {
 }
 
 function turnsSignature(turns) {
-  return `${turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${t.created_at}`).join("\n")}|thinking:${state.thinking}`;
+  return `${turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${JSON.stringify(t.metadata || {})}|${t.created_at}`).join("\n")}|thinking:${state.thinking}`;
 }
 
 function nearBottom(el, px = 96) {
@@ -395,6 +410,37 @@ function renderThread({ force = false } = {}) {
       <p></p>
     `;
     article.querySelector("p").textContent = turn.content || "";
+    const toolResults = Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [];
+    if (toolResults.length) {
+      const activity = document.createElement("div");
+      activity.className = "bubble-tools";
+      for (const result of toolResults) {
+        if (!result || typeof result !== "object" || !result.summary) continue;
+        const row = document.createElement("div");
+        row.className = `bubble-tool ${result.ok ? "ok" : "failed"}`;
+        row.textContent = String(result.summary);
+        activity.append(row);
+      }
+      if (activity.children.length) article.append(activity);
+    }
+    const sources = Array.isArray(turn.metadata?.sources) ? turn.metadata.sources : [];
+    if (sources.length) {
+      const list = document.createElement("div");
+      list.className = "bubble-sources";
+      const label = document.createElement("strong");
+      label.textContent = "Sources";
+      list.append(label);
+      for (const [index, source] of sources.entries()) {
+        if (!source || typeof source !== "object" || !source.url) continue;
+        const link = document.createElement("a");
+        link.href = String(source.url);
+        link.target = "_blank";
+        link.rel = "noreferrer noopener";
+        link.textContent = `${index + 1}. ${source.title || source.url}`;
+        list.append(link);
+      }
+      if (list.querySelector("a")) article.append(list);
+    }
     fragment.append(article);
   }
   if (state.thinking) {
@@ -468,6 +514,66 @@ async function sendHeartbeat() {
   }
 }
 
+function normalizedExpression(action) {
+  const expression = action?.expression && typeof action.expression === "object" ? action.expression : {};
+  return {
+    command: String(expression.command || action?.command || "BS").toUpperCase(),
+    text: String(expression.text || action?.reply || ""),
+    channels: Array.isArray(expression.channels) ? expression.channels.map(String) : ["visual", "display", "audio"],
+  };
+}
+
+function renderExpression(action) {
+  const expression = normalizedExpression(action);
+  const color = EXPRESSION_COLORS[expression.command[0]] || EXPRESSION_COLORS.B;
+  els.expressionBanner.style.setProperty("--expression-color", color);
+  els.expressionMeta.textContent = `Sphere · ${expression.command} · ${expression.channels.join(" + ")}`;
+  els.expressionText.textContent = expression.text;
+  els.expressionBanner.hidden = false;
+  if (state.expressionTimer) clearTimeout(state.expressionTimer);
+  state.expressionTimer = setTimeout(() => { els.expressionBanner.hidden = true; }, 8000);
+}
+
+async function acknowledgeBodyAction(actionId, status, error = "") {
+  return fetchJson(`/api/body-actions/${encodeURIComponent(actionId)}/ack`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, error: error || undefined }),
+  });
+}
+
+async function receiveBodyAction() {
+  if (state.receivingBodyAction || document.hidden) return;
+  state.receivingBodyAction = true;
+  try {
+    const payload = await fetchJson("/api/body-actions/next");
+    const action = payload.action;
+    if (!action) return;
+    const expression = normalizedExpression(action);
+    renderExpression(action);
+    await acknowledgeBodyAction(action.id, "delivered");
+    await acknowledgeBodyAction(action.id, "rendered");
+    const speechEnabled = els.allowBrowserSpeech.checked && expression.channels.includes("audio");
+    if (!speechEnabled || !("speechSynthesis" in window)) {
+      await acknowledgeBodyAction(action.id, "completed");
+      return;
+    }
+    await new Promise((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(expression.text);
+      utterance.onstart = () => { void acknowledgeBodyAction(action.id, "tts_started"); };
+      utterance.onend = () => { void acknowledgeBodyAction(action.id, "played").finally(resolve); };
+      utterance.onerror = (event) => {
+        void acknowledgeBodyAction(action.id, "failed", event.error || "Browser speech failed").finally(resolve);
+      };
+      window.speechSynthesis.speak(utterance);
+    });
+  } catch (error) {
+    console.warn("body action", error);
+  } finally {
+    state.receivingBodyAction = false;
+  }
+}
+
 async function refreshConversation({ forceRender = false } = {}) {
   if (state.polling) return;
   if (state.pausePolling && !forceRender) return;
@@ -525,7 +631,7 @@ async function refreshLatestAction() {
     if (!payload.action) return;
     const action = payload.action;
     renderActionDelivery(action);
-    if (action.status === "played" || action.status === "failed") state.latestActionId = "";
+    if (["completed", "played", "failed", "expired"].includes(action.status)) state.latestActionId = "";
   } catch (error) {
     els.composerStatus.textContent = `Could not check Waveshare delivery: ${error.message || "unknown error"}`;
   }
@@ -538,8 +644,10 @@ function renderActionDelivery(action) {
     delivered: "Waveshare acknowledged receipt. Render and playback are unverified by that firmware.",
     rendered: "Waveshare reported its display/LED update. Audio completion is not confirmed yet.",
     tts_started: "Waveshare reported TTS playback started.",
+    completed: "The target body completed its requested non-audio expression.",
     played: "Waveshare reported TTS playback completed.",
     failed: `Waveshare reported delivery failure${action.error ? `: ${action.error}` : "."}`,
+    expired: "This expression expired before the target body could render it.",
   };
   els.composerStatus.textContent = messages[action.status] || `Waveshare action state: ${action.status || "unknown"}`;
   const target = action.target_device_id || "unknown";
@@ -748,6 +856,7 @@ async function bootstrap() {
   els.deployRepo.textContent = payload.hf_space_repo || "—";
   els.deployBridge.textContent = payload.bridge_configured ? "configured" : "missing";
   els.deployAvailability.textContent = payload.deploy_available ? "available" : "disabled";
+  els.allowBrowserSpeech.checked = localStorage.getItem("wearabllm.allowBrowserSpeech") === "true";
   if (!payload.bridge_configured) {
     setStatus("offline", "Bridge missing");
     els.composerStatus.textContent = "Configure WEARABLLM_BRIDGE_URL in firmware sdkconfig.";
@@ -770,6 +879,10 @@ els.cfgTtsModel?.addEventListener("change", () => {
   const voices = voicesForTtsModel(els.cfgTtsModel.value);
   const selected = voices.includes(els.cfgTtsVoice.value) ? els.cfgTtsVoice.value : voices[0] || "";
   fillSelect(els.cfgTtsVoice, voices, selected);
+});
+els.allowBrowserSpeech?.addEventListener("change", () => {
+  localStorage.setItem("wearabllm.allowBrowserSpeech", String(els.allowBrowserSpeech.checked));
+  if (!els.allowBrowserSpeech.checked && "speechSynthesis" in window) window.speechSynthesis.cancel();
 });
 els.deployDry?.addEventListener("click", () => runDeploy({ dryRun: true }));
 els.deployLive?.addEventListener("click", () => runDeploy({ dryRun: false }));
@@ -836,7 +949,18 @@ els.replyForm.addEventListener("submit", async (event) => {
     els.composerStatus.textContent = error.message || "Send failed";
     setStatus("offline", "Send failed");
     state.thinking = false;
-    await refreshConversation({ forceRender: true });
+    state.turns = [
+      ...state.turns,
+      {
+        id: `send-error-${Date.now()}`,
+        device_id: "web-console",
+        role: "assistant",
+        content:
+          "I couldn’t reach Sphere. Your message is still shown here, but it may not have reached the shared conversation. Please try again.",
+        created_at: new Date().toISOString(),
+      },
+    ];
+    renderThread({ force: true });
   } finally {
     state.sending = false;
     state.pausePolling = document.activeElement === els.replyInput;
@@ -882,6 +1006,7 @@ bootstrap()
   .then(async () => {
     await sendHeartbeat();
     await refreshConversation({ forceRender: true });
+    await receiveBodyAction();
   })
   .catch((error) => {
     console.error(error);
@@ -891,6 +1016,7 @@ bootstrap()
 setInterval(() => {
   if (document.hidden) return;
   refreshLatestAction();
+  receiveBodyAction();
   if (state.pausePolling) return;
   refreshConversation();
 }, 4000);

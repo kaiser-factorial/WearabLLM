@@ -53,6 +53,21 @@ from durable_memory import (
     SupabaseMemoryStore,
     parse_memory_candidates,
 )
+from household_memory import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, SupabaseHouseholdMemoryStore
+from source_code import DEFAULT_SOURCE_BUNDLE, SourceCodeStore
+from sphere_tools import (
+    PendingMemoryConfirmationStore,
+    TOOL_INSTRUCTIONS,
+    SphereToolExecutor,
+    explicit_web_search_requested,
+    forced_memory_mutation_tool_for_turn,
+    function_tools,
+    memory_confirmation_decision_for_turn,
+    memory_mutation_tools_for_turn,
+    parse_function_arguments,
+    sensitive_memory_candidate_for_turn,
+    web_search_requested_for_turn,
+)
 
 try:
     from openai import OpenAI
@@ -232,12 +247,20 @@ class BridgeState:
         self.args = args
         self.openai_client = None
         if OpenAI and args.provider == "openai":
-            self.openai_client = OpenAI()
+            try:
+                self.openai_client = OpenAI()
+            except Exception:
+                if os.environ.get("OPENAI_API_KEY"):
+                    raise
         elif OpenAI and args.provider == "openrouter":
-            self.openai_client = OpenAI(
-                api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-                base_url=OPENROUTER_BASE_URL,
-            )
+            try:
+                self.openai_client = OpenAI(
+                    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+                    base_url=OPENROUTER_BASE_URL,
+                )
+            except Exception:
+                if os.environ.get("OPENROUTER_API_KEY"):
+                    raise
         self.whisper_model: Any | None = None
         self.capture_count = 0
         self.latest_capture: dict[str, Any] | None = None
@@ -304,6 +327,40 @@ class BridgeState:
                 self.memory_store = SupabaseMemoryStore.from_environment()
             else:
                 self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
+        self.household_memory_store = None
+        self.embedding_model = str(getattr(args, "embedding_model", EMBEDDING_MODEL))
+        self.embedding_dimensions = int(getattr(args, "embedding_dimensions", EMBEDDING_DIMENSIONS))
+        if self.memory_backend == "supabase":
+            try:
+                embedding_provider = (
+                    self._embed_household_text
+                    if self.openai_client is not None and args.provider == "openai"
+                    else None
+                )
+                self.household_memory_store = SupabaseHouseholdMemoryStore.from_environment(
+                    embedding_provider=embedding_provider,
+                    embedding_model=self.embedding_model,
+                    embedding_dimensions=self.embedding_dimensions,
+                )
+                if self.household_memory_store.hybrid_enabled:
+                    try:
+                        backfilled = self.household_memory_store.backfill_missing_embeddings(limit=50)
+                        if backfilled:
+                            print(f"Backfilled {backfilled} household-memory embeddings")
+                    except Exception as exc:
+                        print(f"WARNING: household-memory embedding backfill failed: {exc}")
+            except ValueError as exc:
+                print(f"WARNING: rich household memory tools are unavailable: {exc}")
+        self.web_search_enabled = bool(getattr(args, "web_search", False))
+        self.max_tool_rounds = max(1, min(int(getattr(args, "max_tool_rounds", 4)), 8))
+        self.pending_memory_confirmations = PendingMemoryConfirmationStore(ttl_seconds=300)
+        self.source_store = None
+        source_bundle = Path(os.environ.get("WEARABLLM_SOURCE_BUNDLE", str(DEFAULT_SOURCE_BUNDLE)))
+        if source_bundle.is_file():
+            try:
+                self.source_store = SourceCodeStore(source_bundle)
+            except ValueError as exc:
+                print(f"WARNING: Sphere source tools are unavailable: {exc}")
 
     def current_agent_config(self) -> AgentConfig:
         """Return live settings, with a lightweight fallback for focused unit tests."""
@@ -318,6 +375,24 @@ class BridgeState:
             llm_model=getattr(self.args, "llm_model", "gpt-5.4-mini"),
             source="test-fallback",
         )
+
+    def _embed_household_text(self, text: str) -> list[float]:
+        """Generate one normalized-size vector without exposing it outside the bridge."""
+        if self.args.provider != "openai" or not self.openai_client:
+            raise RuntimeError("Household-memory embeddings require the OpenAI provider")
+        response = self.openai_client.embeddings.create(
+            model=self.embedding_model,
+            input=text,
+            dimensions=self.embedding_dimensions,
+            encoding_format="float",
+        )
+        data = getattr(response, "data", None)
+        if not data:
+            raise RuntimeError("OpenAI returned no household-memory embedding")
+        embedding = getattr(data[0], "embedding", None)
+        if not isinstance(embedding, list):
+            raise RuntimeError("OpenAI returned an invalid household-memory embedding")
+        return embedding
 
     def touch_device(self, device_id: str) -> None:
         if device_id in INFRASTRUCTURE_DEVICE_IDS:
@@ -467,6 +542,23 @@ class BridgeState:
             "memory_backend": self.memory_backend if self.durable_memory_enabled else None,
             "durable_memory_records": len(self.memory_store.list()) if self.memory_store else 0,
             "memory_retrieval_limit": self.memory_retrieval_limit,
+            "household_memory_tools": bool(self.household_memory_store),
+            "household_memory_retrieval": (
+                "hybrid"
+                if self.household_memory_store
+                and bool(getattr(self.household_memory_store, "hybrid_enabled", False))
+                else "lexical"
+                if self.household_memory_store
+                else "unavailable"
+            ),
+            "embedding_model": (
+                getattr(self.household_memory_store, "embedding_model", None)
+                if self.household_memory_store
+                else None
+            ),
+            "web_search": self.web_search_enabled,
+            "source_code_tools": bool(self.source_store),
+            "max_tool_rounds": self.max_tool_rounds,
             "device_auth_required": bool(getattr(self.args, "device_token", "")),
             "action_queue": {
                 "backend": "supabase" if self.action_backend == "supabase" else "local-json",
@@ -478,6 +570,112 @@ class BridgeState:
         if bool(getattr(self.args, "allow_device_config", False)):
             config["firmware_config"] = self.firmware_config_status()
         return config
+
+    def sphere_status_snapshot(
+        self,
+        target_device_ids: list[str],
+        *,
+        include_recent_actions: bool,
+    ) -> dict[str, Any]:
+        """Return model-safe control-plane observations, never raw private payloads."""
+        known_ids = {str(body["id"]) for body in KNOWN_DEVICE_BODIES}
+        targets: list[str] = []
+        for raw_target in target_device_ids:
+            target = validate_device_id(str(raw_target))
+            if target not in known_ids:
+                raise ValueError(f"Unknown Sphere body: {target}")
+            if target not in targets:
+                targets.append(target)
+        requested = targets or [str(body["id"]) for body in KNOWN_DEVICE_BODIES]
+        catalog = {str(body["id"]): body for body in self._device_catalog(set())}
+        bodies = []
+        capability_map = {
+            "home": ["audio_input", "audio_output", "display", "visual"],
+            "phone": ["audio_input", "audio_output", "display", "visual"],
+            "web": ["text_input", "audio_output", "display", "visual"],
+            "wearable": ["planned"],
+        }
+        for device_id in requested:
+            body = catalog[device_id]
+            bodies.append(
+                {
+                    "id": device_id,
+                    "label": body.get("label"),
+                    "kind": body.get("kind"),
+                    "status": body.get("status"),
+                    "capabilities": capability_map.get(str(body.get("kind")), []),
+                    "online": bool(body.get("online")),
+                    "last_seen_at": body.get("last_seen_at"),
+                }
+            )
+
+        recent_actions: list[dict[str, Any]] = []
+        if include_recent_actions:
+            for device_id in requested:
+                actions = self.action_queue.list(target_device_id=device_id, limit=1)
+                if not actions:
+                    continue
+                action = actions[0]
+                expression = action.get("expression") if isinstance(action.get("expression"), dict) else {}
+                recent_actions.append(
+                    {
+                        "id": action.get("id"),
+                        "target_device_id": device_id,
+                        "status": action.get("status"),
+                        "command": action.get("command"),
+                        "channels": expression.get("channels", []),
+                        "delivery_attempts": action.get(
+                            "delivery_attempts", action.get("attempts", 0)
+                        ),
+                        "created_at": action.get("created_at"),
+                        "updated_at": action.get("updated_at"),
+                        "expires_at": action.get("expires_at"),
+                        "error": str(action.get("error") or "")[:240] or None,
+                    }
+                )
+
+        memory = getattr(self, "household_memory_store", None)
+        available_tools = [
+            str(tool["name"])
+            for tool in function_tools()
+            if (memory or not str(tool["name"]).startswith("memory_"))
+            and (getattr(self, "source_store", None) or not str(tool["name"]).startswith("source_"))
+        ]
+        if getattr(self, "web_search_enabled", False):
+            available_tools.append("web_search")
+        return {
+            "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "observation_kind": "passive_control_plane",
+            "physical_state_verified": False,
+            "observation_limits": (
+                "Online means the bridge saw a request within the heartbeat window. "
+                "Action status is a client acknowledgement, not sensor proof of light or sound."
+            ),
+            "bodies": bodies,
+            "services": {
+                "provider": getattr(self.args, "provider", "unknown"),
+                "conversation_backend": getattr(self, "conversation_backend", "local"),
+                "action_backend": getattr(self, "action_backend", "local"),
+                "memory": {
+                    "enabled": bool(memory),
+                    "retrieval": (
+                        "hybrid"
+                        if memory and bool(getattr(memory, "hybrid_enabled", False))
+                        else "lexical"
+                        if memory
+                        else "unavailable"
+                    ),
+                    "embedding_model": getattr(memory, "embedding_model", None) if memory else None,
+                },
+                "web_search": {"enabled": bool(getattr(self, "web_search_enabled", False))},
+                "source_code": {
+                    "enabled": bool(getattr(self, "source_store", None)),
+                    "scope": "build_time_allowlist",
+                },
+            },
+            "available_tools": available_tools,
+            "recent_actions": recent_actions,
+        }
 
     def firmware_config_status(self) -> dict[str, Any]:
         if not CONFIGURE_FIRMWARE.exists():
@@ -625,6 +823,20 @@ class BridgeState:
         device_id: str = "wearabllm-unknown",
         response_device_id: str | None = None,
     ) -> tuple[str, str]:
+        command, reply, _ = self.ask_llm_with_metadata(
+            transcript,
+            device_id=device_id,
+            response_device_id=response_device_id,
+        )
+        return command, reply
+
+    def ask_llm_with_metadata(
+        self,
+        transcript: str,
+        *,
+        device_id: str = "wearabllm-unknown",
+        response_device_id: str | None = None,
+    ) -> tuple[str, str, dict[str, Any]]:
         response_device = response_device_id or device_id
         if self.args.dry_run:
             command = self.next_dry_run_command()
@@ -638,7 +850,7 @@ class BridgeState:
                         ]
                     )
                     self.history = self.history[-(self.history_turns * 2):]
-            return command, reply
+            return command, reply, {"sources": [], "tool_results": []}
 
         if self.args.provider not in ("openai", "openrouter"):
             raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
@@ -678,12 +890,33 @@ class BridgeState:
                     "use it only when relevant, and prefer the user's current statement if it conflicts:\n"
                     f"{memory_context}"
                 )
-            raw = self._generate_text(
-                instructions,
-                input_messages,
-                max_output_tokens=self.max_output_tokens,
-                model=agent.llm_model,
-            )
+            metadata: dict[str, Any] = {"sources": [], "tool_results": []}
+            try:
+                if self.args.provider == "openai":
+                    raw, metadata = self._generate_agent_text(
+                        instructions + TOOL_INSTRUCTIONS,
+                        input_messages,
+                        max_output_tokens=self.max_output_tokens,
+                        model=agent.llm_model,
+                        origin_device_id=device_id,
+                        user_transcript=transcript,
+                    )
+                else:
+                    raw = self._generate_text(
+                        instructions,
+                        input_messages,
+                        max_output_tokens=self.max_output_tokens,
+                        model=agent.llm_model,
+                    )
+            except Exception as exc:
+                # A model/provider failure must not make an accepted user turn vanish.
+                # Convert it into an ordinary, persistable assistant turn while keeping
+                # the full diagnostic server-side.
+                print(f"ERROR: assistant generation failed: {exc}")
+                raw = (
+                    "RF\nI hit an internal error before I could finish that request. "
+                    "Please try again."
+                )
             command, reply = parse_llm_response(raw)
             if self.history_turns:
                 self.history.extend(
@@ -697,12 +930,31 @@ class BridgeState:
                 try:
                     if active_session_id:
                         self.conversation_store.append(active_session_id, device_id, "user", transcript)
-                        self.conversation_store.append(active_session_id, response_device, "assistant", reply)
+                        public_metadata = {
+                            key: value
+                            for key, value in {
+                                "sources": metadata.get("sources", []),
+                                "tool_results": metadata.get("tool_results", []),
+                            }.items()
+                            if value
+                        }
+                        if public_metadata:
+                            self.conversation_store.append(
+                                active_session_id,
+                                response_device,
+                                "assistant",
+                                reply,
+                                metadata=public_metadata,
+                            )
+                        else:
+                            self.conversation_store.append(
+                                active_session_id, response_device, "assistant", reply
+                            )
                 except Exception as exc:  # Preserve a live reply if storage is temporarily unavailable.
                     print(f"WARNING: conversation persistence failed: {exc}")
         if self.conversation_backend != "supabase":
             self.extract_and_store_memories(transcript, reply)
-        return command, reply
+        return command, reply, metadata
 
     def _prepare_active_session(self) -> str:
         if not self.conversation_store:
@@ -785,6 +1037,297 @@ class BridgeState:
             return str(content or "").strip()
         raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
 
+    def _generate_agent_text(
+        self,
+        instructions: str,
+        input_messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int,
+        model: str,
+        origin_device_id: str,
+        user_transcript: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Run a bounded Responses tool loop for normal assistant turns only."""
+        if not self.openai_client:
+            raise RuntimeError("openai package is not installed")
+        tools = function_tools()
+        memory_mutation_tools = memory_mutation_tools_for_turn(user_transcript)
+        forced_memory_mutation_tool = forced_memory_mutation_tool_for_turn(user_transcript)
+        if explicit_web_search_requested(user_transcript):
+            # A combined research-and-remember request must be allowed to research first.
+            forced_memory_mutation_tool = None
+        confirmation_decision = memory_confirmation_decision_for_turn(user_transcript)
+        force_memory_confirmation = bool(
+            getattr(self, "pending_memory_confirmations", None)
+            and self.pending_memory_confirmations.has_pending()
+            and confirmation_decision is not None
+        )
+        force_sensitive_stage = bool(
+            not force_memory_confirmation
+            and not memory_mutation_tools
+            and sensitive_memory_candidate_for_turn(user_transcript)
+        )
+        if force_memory_confirmation:
+            tools = [tool for tool in tools if tool.get("name") == "memory_confirm"]
+        elif force_sensitive_stage:
+            tools = [tool for tool in tools if tool.get("name") == "memory_remember"]
+        elif memory_mutation_tools:
+            tools = [
+                tool
+                for tool in tools
+                if tool.get("type") == "function" and tool.get("name") in memory_mutation_tools
+            ]
+        if not self.household_memory_store:
+            tools = [tool for tool in tools if not str(tool.get("name", "")).startswith("memory_")]
+        if not getattr(self, "source_store", None):
+            tools = [tool for tool in tools if not str(tool.get("name", "")).startswith("source_")]
+        web_search_for_turn = self.web_search_enabled and web_search_requested_for_turn(
+            user_transcript
+        )
+        if web_search_for_turn:
+            tools.append({"type": "web_search"})
+        executor = SphereToolExecutor(
+            memory_store=self.household_memory_store,
+            action_queue=self.action_queue,
+            status_provider=self.sphere_status_snapshot,
+            source_store=getattr(self, "source_store", None),
+            pending_memory_confirmations=getattr(self, "pending_memory_confirmations", None),
+            origin_device_id=origin_device_id,
+            user_transcript=user_transcript,
+        )
+        metadata: dict[str, Any] = {"sources": [], "tool_results": []}
+        request_options: dict[str, Any] = {
+            "model": model,
+            "instructions": instructions,
+            "input": input_messages,
+            "tools": tools,
+            "parallel_tool_calls": False,
+            "max_output_tokens": max_output_tokens,
+        }
+        if force_memory_confirmation:
+            request_options["tool_choice"] = {"type": "function", "name": "memory_confirm"}
+        elif force_sensitive_stage:
+            request_options["tool_choice"] = {"type": "function", "name": "memory_remember"}
+        elif forced_memory_mutation_tool:
+            request_options["tool_choice"] = {
+                "type": "function",
+                "name": forced_memory_mutation_tool,
+            }
+        if web_search_for_turn:
+            request_options["include"] = ["web_search_call.action.sources"]
+        try:
+            response = self.openai_client.responses.create(
+                **request_options,
+            )
+        except Exception as exc:
+            print(f"ERROR: initial agent response failed: {exc}")
+            return (
+                "RF\nI hit an internal error before I could finish that request. Please try again.",
+                metadata,
+            )
+        self._collect_response_sources(response, metadata["sources"])
+        self._record_web_search_activity(response, metadata)
+        for _ in range(self.max_tool_rounds):
+            calls = [item for item in getattr(response, "output", []) if self._item_field(item, "type") == "function_call"]
+            if not calls:
+                return str(getattr(response, "output_text", "") or "").strip(), metadata
+            outputs: list[dict[str, Any]] = []
+            for call in calls:
+                name = str(self._item_field(call, "name") or "")
+                call_id = str(self._item_field(call, "call_id") or self._item_field(call, "id") or "")
+                arguments: dict[str, Any] = {}
+                try:
+                    arguments = parse_function_arguments(self._item_field(call, "arguments"))
+                    result = executor.execute(name, arguments, call_id=call_id)
+                except Exception as exc:  # Return bounded tool errors so Sphere can explain them.
+                    result = {"ok": False, "error": str(exc)}
+                metadata["tool_results"].append(
+                    self._public_tool_result(name, result, arguments)
+                )
+                outputs.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(result, ensure_ascii=False, default=str),
+                    }
+                )
+            followup_options = {
+                **request_options,
+                "previous_response_id": str(getattr(response, "id", "")),
+                "input": outputs,
+            }
+            if force_memory_confirmation or force_sensitive_stage or forced_memory_mutation_tool:
+                followup_options["tool_choice"] = "auto"
+            try:
+                response = self.openai_client.responses.create(**followup_options)
+            except Exception as exc:
+                print(f"ERROR: agent follow-up after tool use failed: {exc}")
+                return (
+                    "RF\nI completed the tool attempts shown above, but hit an internal error "
+                    "before I could finish replying. Please try again.",
+                    metadata,
+                )
+            self._collect_response_sources(response, metadata["sources"])
+            self._record_web_search_activity(response, metadata)
+        print("WARNING: Sphere reached the configured tool-call round limit")
+        return (
+            "RF\nI completed the tool attempts shown above, but reached my per-message "
+            "tool limit before I could finish replying. Send a short follow-up and I’ll continue.",
+            metadata,
+        )
+
+    @staticmethod
+    def _public_tool_result(
+        name: str,
+        result: dict[str, Any],
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return audit metadata without leaking private memory contents to clients."""
+        arguments = arguments or {}
+        summary: dict[str, Any] = {
+            "name": name,
+            "ok": bool(result.get("ok")),
+            "summary": BridgeState._tool_activity_summary(name, result, arguments),
+        }
+        if "created" in result:
+            summary["created"] = bool(result.get("created"))
+        if "saved" in result:
+            summary["saved"] = bool(result.get("saved"))
+        if result.get("confirmation_required"):
+            summary["confirmation_required"] = True
+            summary["sensitive_categories"] = list(result.get("sensitive_categories", []))
+        memory = result.get("memory")
+        if isinstance(memory, dict) and memory.get("id"):
+            summary["memory_id"] = str(memory["id"])
+        memories = result.get("memories")
+        if isinstance(memories, list):
+            summary["match_count"] = len(memories)
+        actions = result.get("actions")
+        if isinstance(actions, list):
+            summary["action_ids"] = [
+                str(item.get("action", {}).get("id"))
+                for item in actions
+                if isinstance(item, dict)
+                and isinstance(item.get("action"), dict)
+                and item["action"].get("id")
+            ]
+        bodies = result.get("bodies")
+        if name == "sphere_status" and isinstance(bodies, list):
+            summary["body_count"] = len(bodies)
+        if not summary["ok"] and result.get("error"):
+            summary["error"] = BridgeState._public_tool_error(name, result.get("error"))
+        return summary
+
+    @staticmethod
+    def _public_tool_error(name: str, error: Any) -> str:
+        text = " ".join(str(error or "").split()).strip()
+        lowered = text.lower()
+        if "supabase" in lowered:
+            return "The private data backend rejected the request."
+        if "source" in name and ("not found" in lowered or "path" in lowered):
+            return "That path is not available in Sphere's published source manifest."
+        if "permission" in lowered or "explicit" in lowered or "intent" in lowered:
+            return "The current message did not authorize that operation."
+        return f"{name} failed." if text else "Tool failed."
+
+    @staticmethod
+    def _tool_activity_summary(
+        name: str,
+        result: dict[str, Any],
+        arguments: dict[str, Any],
+    ) -> str:
+        def clip(value: Any, limit: int = 96) -> str:
+            text = " ".join(str(value or "").split()).strip()
+            return f"{text[:limit]}…" if len(text) > limit else text
+
+        if not result.get("ok"):
+            return BridgeState._public_tool_error(name, result.get("error"))
+        memory = result.get("memory") if isinstance(result.get("memory"), dict) else {}
+        preview = clip(result.get("memory_preview") or memory.get("content"))
+        if name == "memory_search":
+            count = len(result.get("memories", [])) if isinstance(result.get("memories"), list) else 0
+            return f"Memory searched — {count} match{'es' if count != 1 else ''} for “{clip(arguments.get('query'), 64)}”"
+        if name == "memory_remember":
+            if result.get("confirmation_required"):
+                return f"Memory needs confirmation — {preview}"
+            if result.get("created") is False:
+                return f"Memory already present — {preview}"
+            return f"Memory updated — {preview}"
+        if name == "memory_confirm":
+            return f"Memory updated — {preview}" if result.get("saved") else f"Memory not saved — {preview}"
+        if name == "memory_correct":
+            if result.get("confirmation_required"):
+                return f"Memory correction needs confirmation — {preview}"
+            return f"Memory updated — {preview}"
+        if name == "memory_forget":
+            return f"Memory forgotten — {preview}"
+        if name == "sphere_status":
+            bodies = result.get("bodies", [])
+            count = len(bodies) if isinstance(bodies, list) else 0
+            return f"Sphere state checked — {count} bod{'y' if count == 1 else 'ies'}"
+        if name == "send_to_body":
+            targets = [str(value) for value in arguments.get("target_device_ids", [])]
+            return f"Expression queued — {', '.join(targets) or 'no target'}"
+        if name == "source_list":
+            entries = result.get("entries", [])
+            count = len(entries) if isinstance(entries, list) else 0
+            return f"Source listed — {clip(arguments.get('path') or '/', 72)} ({count} entries)"
+        if name == "source_read":
+            file = result.get("file") if isinstance(result.get("file"), dict) else {}
+            return (
+                f"Source read — {clip(file.get('path') or arguments.get('path'), 72)} "
+                f"(lines {file.get('start_line', '?')}–{file.get('end_line', '?')})"
+            )
+        if name == "web_search":
+            count = int(result.get("source_count", 0))
+            return f"Web searched — {count} source{'s' if count != 1 else ''}"
+        return f"Tool used — {name}"
+
+    @classmethod
+    def _record_web_search_activity(
+        cls,
+        response: Any,
+        metadata: dict[str, Any],
+    ) -> None:
+        calls = sum(
+            1
+            for item in getattr(response, "output", []) or []
+            if cls._item_field(item, "type") == "web_search_call"
+        )
+        for _ in range(calls):
+            metadata["tool_results"].append(
+                cls._public_tool_result(
+                    "web_search",
+                    {"ok": True, "source_count": len(metadata.get("sources", []))},
+                    {},
+                )
+            )
+
+    @staticmethod
+    def _item_field(item: Any, field: str) -> Any:
+        return item.get(field) if isinstance(item, dict) else getattr(item, field, None)
+
+    @classmethod
+    def _collect_response_sources(cls, response: Any, destination: list[dict[str, str]]) -> None:
+        seen = {source.get("url") for source in destination}
+        for item in getattr(response, "output", []) or []:
+            if cls._item_field(item, "type") == "web_search_call":
+                action = cls._item_field(item, "action")
+                sources = cls._item_field(action, "sources") or []
+                for source in sources:
+                    url = str(cls._item_field(source, "url") or "").strip()
+                    if url and url not in seen:
+                        destination.append({"url": url, "title": str(cls._item_field(source, "title") or url)})
+                        seen.add(url)
+            for content in cls._item_field(item, "content") or []:
+                for annotation in cls._item_field(content, "annotations") or []:
+                    url = str(cls._item_field(annotation, "url") or "").strip()
+                    if url and url not in seen:
+                        destination.append(
+                            {"url": url, "title": str(cls._item_field(annotation, "title") or url)}
+                        )
+                        seen.add(url)
+
     def clear_history(self) -> None:
         with self.history_lock:
             if self.conversation_store:
@@ -792,17 +1335,33 @@ class BridgeState:
             self.history.clear()
 
     def start_new_conversation(self) -> dict[str, Any]:
-        """Archive the active thread and create the replacement immediately."""
+        """End and preserve a nonempty active thread, then create its replacement."""
+        ended_session_id = None
+        saved_turns = 0
         with self.history_lock:
             if self.conversation_store:
-                self.conversation_store.clear()
-                session = self.conversation_store.create_session()
+                active = self.conversation_store.active_session()
+                active_turns = (
+                    self.conversation_store.turns(str(active["id"])) if active else []
+                )
+                if active and active_turns:
+                    self.conversation_store.end_session(active)
+                    ended_session_id = str(active["id"])
+                    saved_turns = len(active_turns)
+                    session = self.conversation_store.create_session()
+                elif active:
+                    # Repeated + clicks on an empty thread should not create clutter.
+                    session = active
+                else:
+                    session = self.conversation_store.create_session()
             else:  # Focused tests may construct BridgeState without the full store.
                 session = None
             self.history.clear()
         return {
             "ok": True,
             "history_messages": 0,
+            "ended_session_id": ended_session_id,
+            "saved_turns": saved_turns,
             "active_session_id": str(session["id"]) if session else None,
             "session": session,
         }
@@ -996,7 +1555,7 @@ class BridgeState:
         saved_wav: Path | None = None,
         wav_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        command, reply = self.ask_llm(
+        command, reply, metadata = self.ask_llm_with_metadata(
             transcript,
             device_id=device_id,
             response_device_id=response_device_id,
@@ -1008,6 +1567,8 @@ class BridgeState:
             "audio_bytes": audio_bytes,
             "saved_wav": str(saved_wav) if saved_wav else None,
             "wav_info": wav_info,
+            "sources": metadata.get("sources", []),
+            "tool_results": metadata.get("tool_results", []),
         }
 
     def create_interaction(
@@ -1991,6 +2552,29 @@ def parse_args() -> argparse.Namespace:
         "--memory-model",
         default=os.environ.get("WEARABLLM_MEMORY_MODEL", os.environ.get("WEARABLLM_LLM_MODEL", "gpt-5.4-mini")),
         help="Model used for automatic memory extraction.",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=os.environ.get("WEARABLLM_EMBEDDING_MODEL", EMBEDDING_MODEL),
+        help="OpenAI embedding model used by hybrid household-memory retrieval.",
+    )
+    parser.add_argument(
+        "--embedding-dimensions",
+        type=int,
+        default=int(os.environ.get("WEARABLLM_EMBEDDING_DIMENSIONS", str(EMBEDDING_DIMENSIONS))),
+        help=f"Household-memory vector width (schema-fixed at {EMBEDDING_DIMENSIONS}).",
+    )
+    parser.add_argument(
+        "--web-search",
+        action="store_true",
+        default=os.environ.get("WEARABLLM_WEB_SEARCH", "") == "1",
+        help="Expose OpenAI's built-in web search to normal Sphere turns.",
+    )
+    parser.add_argument(
+        "--max-tool-rounds",
+        type=int,
+        default=int(os.environ.get("WEARABLLM_MAX_TOOL_ROUNDS", "4")),
+        help="Maximum custom-tool response rounds per user turn (clamped to 1..8).",
     )
     parser.add_argument(
         "--device-token",

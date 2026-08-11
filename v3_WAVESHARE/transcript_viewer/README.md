@@ -14,9 +14,15 @@ Opens `http://127.0.0.1:8787`.
   (`wearabllm-esp32` Waveshare, `wearabllm-android`, `web-console`, future `wearabllm-wearable`)
 - Shows live body presence horizontally across the top
 - Lets you reply from the browser, continuing the same shared thread
-- Keeps active conversation history in the side panel with a `+` new-session
-  action
+- Receives targeted Sphere expressions as a semantic color/text treatment;
+  optional browser speech is disabled by default
+- Shows durable web-search sources under assistant turns
+- Keeps conversation history in the side panel. `+` ends and preserves the
+  current nonempty conversation in the normal list, then starts a new one;
+  repeated clicks on an empty conversation do not create empty history items.
 - Moves archived conversations behind a compact bottom Archive control
+- Only the explicit Archive action moves a conversation behind that control;
+  starting a new conversation no longer archives or clears the previous one.
 - Places Rename and Archive behind each conversation's `...` menu
 - Keeps a secondary **device event feed** from private Supabase transcript rows
   (command + mic transcript log)
@@ -59,6 +65,8 @@ python3 v3_WAVESHARE/transcript_viewer/server.py \
 | POST | `/api/sessions/<id>/archive` | bridge session archive |
 | POST | `/api/reply` | bridge `POST /v1/query_text` |
 | GET | `/api/interactions[/<id>]` | bridge action queue status |
+| GET | `/api/body-actions/next` | claim the next `web-console` expression |
+| POST | `/api/body-actions/<id>/ack` | report browser rendering/playback state |
 | POST | `/api/session/reset` | bridge `POST /v1/session/reset` |
 | GET/POST | `/api/admin/config` | bridge `GET/POST /v1/admin/config` |
 | GET | `/api/admin/catalog` | bridge live OpenAI model catalog |

@@ -80,6 +80,630 @@ class ParseLLMResponseTest(unittest.TestCase):
 
 
 class BridgeStateTest(unittest.TestCase):
+    def test_malformed_function_arguments_return_bounded_tool_error(self):
+        first = SimpleNamespace(
+            id="resp-tool",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="memory_search",
+                    call_id="call-tool",
+                    arguments="{not-json",
+                )
+            ],
+            output_text="",
+        )
+        second = SimpleNamespace(id="resp-final", output=[], output_text="BS\nI could not search memory.")
+        create = Mock(side_effect=[first, second])
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = Mock()
+        state.web_search_enabled = False
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = wearabllm_bridge.PendingMemoryConfirmationStore()
+
+        raw, metadata = state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "Do you remember my preference?"}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="Do you remember my preference?",
+        )
+
+        self.assertEqual(raw, "BS\nI could not search memory.")
+        self.assertEqual(metadata["tool_results"][0]["name"], "memory_search")
+        self.assertFalse(metadata["tool_results"][0]["ok"])
+        self.assertEqual(create.call_count, 2)
+
+    def test_tool_round_limit_returns_fallback_with_completed_activity(self):
+        responses = [
+            SimpleNamespace(
+                id=f"resp-{index}",
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name="memory_remember",
+                        call_id=f"call-{index}",
+                        arguments=json.dumps(
+                            {
+                                "subject": "principal",
+                                "kind": "preference",
+                                "content": f"Disposable preference {index}.",
+                                "tags": ["test"],
+                                "importance": 1,
+                                "expires_at": "",
+                            }
+                        ),
+                    )
+                ],
+                output_text="",
+            )
+            for index in range(5)
+        ]
+        create = Mock(side_effect=responses)
+        memory = Mock()
+        memory.remember.side_effect = [
+            ({"id": f"memory-{index}", "content": f"Disposable preference {index}."}, True)
+            for index in range(4)
+        ]
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = memory
+        state.web_search_enabled = False
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = wearabllm_bridge.PendingMemoryConfirmationStore()
+
+        raw, metadata = state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "Remember several disposable preferences."}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="Remember several disposable preferences.",
+        )
+
+        self.assertTrue(raw.startswith("RF\n"))
+        self.assertIn("tool limit", raw)
+        self.assertEqual(len(metadata["tool_results"]), 4)
+        self.assertEqual(create.call_count, 5)
+
+    def test_generation_failure_is_persisted_as_user_and_assistant_turns(self):
+        state = BridgeState.__new__(BridgeState)
+        state.args = Namespace(dry_run=False, provider="openai")
+        state.openai_client = object()
+        state.memory_store = None
+        state.household_memory_store = Mock()
+        state.memory_retrieval_limit = 3
+        state.history_lock = threading.Lock()
+        state.history = []
+        state.history_turns = 10
+        state.conversation_store = Mock()
+        state.conversation_store.history.return_value = []
+        state._prepare_active_session = Mock(return_value="session-1")
+        state.current_agent_config = Mock(
+            return_value=SimpleNamespace(system_prompt="Be helpful.", llm_model="gpt-5.4-mini")
+        )
+        state.max_output_tokens = 256
+        state.conversation_backend = "supabase"
+        state._generate_agent_text = Mock(side_effect=RuntimeError("provider unavailable"))
+
+        command, reply, metadata = state.ask_llm_with_metadata(
+            "Remember several things about me.",
+            device_id="web-console",
+        )
+
+        self.assertEqual(command, "RF")
+        self.assertIn("internal error", reply)
+        self.assertEqual(metadata, {"sources": [], "tool_results": []})
+        self.assertEqual(state.conversation_store.append.call_count, 2)
+        self.assertEqual(
+            state.conversation_store.append.call_args_list[0],
+            call("session-1", "web-console", "user", "Remember several things about me."),
+        )
+        self.assertEqual(
+            state.conversation_store.append.call_args_list[1],
+            call("session-1", "web-console", "assistant", reply),
+        )
+
+    def test_memory_mutation_withholds_web_search_even_after_prior_web_turn(self):
+        first = SimpleNamespace(
+            id="resp-memory",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="memory_remember",
+                    call_id="call-memory",
+                    arguments=json.dumps(
+                        {
+                            "subject": "principal",
+                            "kind": "fact",
+                            "content": "The amber key is kept in the north drawer.",
+                            "tags": ["temporary-verification"],
+                            "importance": 1,
+                            "expires_at": "",
+                        }
+                    ),
+                )
+            ],
+            output_text="",
+        )
+        second = SimpleNamespace(id="resp-final", output=[], output_text="GC\nRemembered.")
+        create = Mock(side_effect=[first, second])
+        memory = Mock()
+        memory.remember.return_value = ({"id": "memory-1"}, True)
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = memory
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+
+        _text, metadata = state._generate_agent_text(
+            "instructions",
+            [
+                {"role": "user", "content": "Use web search for the OpenAI embeddings guide."},
+                {"role": "assistant", "content": "The guide says 1536 dimensions by default."},
+                {"role": "user", "content": "Remember that the amber key is in the north drawer."},
+            ],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="Remember that the amber key is in the north drawer.",
+        )
+
+        self.assertEqual(metadata["sources"], [])
+        for request in create.call_args_list:
+            tool_types = [tool["type"] for tool in request.kwargs["tools"]]
+            self.assertNotIn("web_search", tool_types)
+        followup_names = {
+            tool.get("name")
+            for tool in create.call_args_list[1].kwargs["tools"]
+            if tool.get("type") == "function"
+        }
+        self.assertTrue(followup_names)
+        self.assertTrue(all(name.startswith("memory_") for name in followup_names))
+
+    def test_memory_mutation_can_include_web_only_when_current_turn_explicitly_requests_both(self):
+        create = Mock(return_value=SimpleNamespace(id="resp-final", output=[], output_text="BS\nDone."))
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = Mock()
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+
+        state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "Search the web for the current result, then remember it."}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="Search the web for the current result, then remember it.",
+        )
+
+        self.assertIn("web_search", [tool["type"] for tool in create.call_args.kwargs["tools"]])
+
+    def test_safe_profile_statement_exposes_memory_without_eager_web_search(self):
+        create = Mock(return_value=SimpleNamespace(id="resp-final", output=[], output_text="BS\nGot it."))
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = Mock()
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = wearabllm_bridge.PendingMemoryConfirmationStore()
+
+        state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "I prefer a curious, direct, playful tone."}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="I prefer a curious, direct, playful tone.",
+        )
+
+        tools = create.call_args.kwargs["tools"]
+        self.assertNotIn("web_search", [tool["type"] for tool in tools])
+        self.assertIn("memory_remember", {tool.get("name") for tool in tools})
+
+    def test_current_information_turn_exposes_web_search(self):
+        create = Mock(return_value=SimpleNamespace(id="resp-final", output=[], output_text="BS\nChecking."))
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = Mock()
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = wearabllm_bridge.PendingMemoryConfirmationStore()
+
+        state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "What's the latest OpenAI model today?"}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="What's the latest OpenAI model today?",
+        )
+
+        self.assertIn("web_search", [tool["type"] for tool in create.call_args.kwargs["tools"]])
+
+    def test_pending_no_is_forced_through_memory_confirm_then_returns_to_auto(self):
+        first = SimpleNamespace(
+            id="resp-confirm",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="memory_confirm",
+                    call_id="call-confirm",
+                    arguments=json.dumps({"save": False}),
+                )
+            ],
+            output_text="",
+        )
+        second = SimpleNamespace(id="resp-final", output=[], output_text="BS\nDiscarded.")
+        create = Mock(side_effect=[first, second])
+        pending = wearabllm_bridge.PendingMemoryConfirmationStore()
+        pending.stage(
+            {
+                "subject": "principal",
+                "kind": "fact",
+                "content": "The user lives at 987 Test Lane.",
+                "tags": [],
+                "importance": 4,
+                "expires_at": "",
+            },
+            source_device_id="web-console",
+            sensitive_categories=["precise_address"],
+        )
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = Mock()
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = pending
+
+        _text, metadata = state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "No, do not save it."}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="No, do not save it.",
+        )
+
+        self.assertEqual(
+            create.call_args_list[0].kwargs["tool_choice"],
+            {"type": "function", "name": "memory_confirm"},
+        )
+        self.assertEqual(create.call_args_list[1].kwargs["tool_choice"], "auto")
+        self.assertEqual(metadata["tool_results"][0]["saved"], False)
+        self.assertFalse(pending.has_pending())
+
+    def test_personal_address_claim_is_forced_through_staging_tool(self):
+        first = SimpleNamespace(
+            id="resp-stage",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="memory_remember",
+                    call_id="call-stage",
+                    arguments=json.dumps(
+                        {
+                            "subject": "principal",
+                            "kind": "fact",
+                            "content": "The user's home address is 985 Test Lane.",
+                            "tags": ["address"],
+                            "importance": 4,
+                            "expires_at": "",
+                        }
+                    ),
+                )
+            ],
+            output_text="",
+        )
+        second = SimpleNamespace(id="resp-final", output=[], output_text="BS\nShould I save it?")
+        create = Mock(side_effect=[first, second])
+        pending = wearabllm_bridge.PendingMemoryConfirmationStore()
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = Mock()
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = pending
+
+        _text, metadata = state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "My home address is 985 Test Lane."}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="My home address is 985 Test Lane.",
+        )
+
+        self.assertEqual(
+            create.call_args_list[0].kwargs["tool_choice"],
+            {"type": "function", "name": "memory_remember"},
+        )
+        self.assertEqual(create.call_args_list[1].kwargs["tool_choice"], "auto")
+        self.assertTrue(metadata["tool_results"][0]["confirmation_required"])
+        self.assertTrue(pending.has_pending())
+
+    def test_explicit_forget_with_id_is_forced_before_success_reply(self):
+        memory_id = "6536beea-014a-48a8-b8af-43b0e8dc3cf2"
+        first = SimpleNamespace(
+            id="resp-forget",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="memory_forget",
+                    call_id="call-forget",
+                    arguments=json.dumps({"memory_id": memory_id}),
+                )
+            ],
+            output_text="",
+        )
+        second = SimpleNamespace(id="resp-final", output=[], output_text="BS\nForgotten.")
+        create = Mock(side_effect=[first, second])
+        memory = Mock()
+        memory.forget.return_value = {"id": memory_id, "status": "forgotten"}
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = memory
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = wearabllm_bridge.PendingMemoryConfirmationStore()
+
+        _text, metadata = state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": f"Forget the memory with ID {memory_id}."}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript=f"Forget the memory with ID {memory_id}.",
+        )
+
+        self.assertEqual(
+            create.call_args_list[0].kwargs["tool_choice"],
+            {"type": "function", "name": "memory_forget"},
+        )
+        self.assertEqual(create.call_args_list[1].kwargs["tool_choice"], "auto")
+        self.assertEqual(metadata["tool_results"][0]["memory_id"], memory_id)
+        memory.forget.assert_called_once_with(memory_id)
+
+    def test_new_conversation_ends_and_preserves_nonempty_active_session(self):
+        store = Mock()
+        active = {"id": "old-session", "title": "Saved discussion"}
+        store.active_session.return_value = active
+        store.turns.return_value = [{"id": 1, "role": "user", "content": "Keep this."}]
+        store.create_session.return_value = {"id": "new-session"}
+        state = BridgeState.__new__(BridgeState)
+        state.conversation_store = store
+        state.history = [{"role": "user", "content": "Keep this."}]
+        state.history_lock = threading.Lock()
+
+        result = state.start_new_conversation()
+
+        store.end_session.assert_called_once_with(active)
+        store.archive.assert_not_called()
+        store.clear.assert_not_called()
+        store.create_session.assert_called_once_with()
+        self.assertEqual(result["ended_session_id"], "old-session")
+        self.assertEqual(result["saved_turns"], 1)
+        self.assertEqual(result["active_session_id"], "new-session")
+        self.assertEqual(state.history, [])
+
+    def test_new_conversation_does_not_create_another_empty_session(self):
+        store = Mock()
+        active = {"id": "empty-session"}
+        store.active_session.return_value = active
+        store.turns.return_value = []
+        state = BridgeState.__new__(BridgeState)
+        state.conversation_store = store
+        state.history = []
+        state.history_lock = threading.Lock()
+
+        result = state.start_new_conversation()
+
+        store.end_session.assert_not_called()
+        store.create_session.assert_not_called()
+        self.assertEqual(result["active_session_id"], "empty-session")
+        self.assertEqual(result["saved_turns"], 0)
+
+    def test_sphere_status_snapshot_is_sanitized_passive_observation(self):
+        state = BridgeState.__new__(BridgeState)
+        state.args = Namespace(provider="openai")
+        state.device_presence = {
+            "wearabllm-esp32": {"monotonic": 100.0, "last_seen_at": "2026-08-11T12:00:00Z"}
+        }
+        state.device_presence_lock = threading.Lock()
+        state.conversation_backend = "supabase"
+        state.action_backend = "supabase"
+        state.household_memory_store = SimpleNamespace(
+            hybrid_enabled=True,
+            embedding_model="text-embedding-3-small",
+        )
+        state.web_search_enabled = True
+        state.action_queue = Mock()
+        state.action_queue.list.return_value = [
+            {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "target_device_id": "wearabllm-esp32",
+                "command": "GC",
+                "reply": "private spoken content",
+                "transcript": "private user transcript",
+                "status": "completed",
+                "expression": {"channels": ["audio", "visual"], "text": "private"},
+                "created_at": "2026-08-11T11:59:00Z",
+                "updated_at": "2026-08-11T12:00:00Z",
+                "error": None,
+            }
+        ]
+
+        with patch("wearabllm_bridge.time.monotonic", return_value=110.0):
+            snapshot = state.sphere_status_snapshot(
+                ["wearabllm-esp32"],
+                include_recent_actions=True,
+            )
+
+        self.assertEqual([body["id"] for body in snapshot["bodies"]], ["wearabllm-esp32"])
+        self.assertTrue(snapshot["bodies"][0]["online"])
+        self.assertEqual(snapshot["observation_kind"], "passive_control_plane")
+        self.assertFalse(snapshot["physical_state_verified"])
+        self.assertEqual(snapshot["recent_actions"][0]["command"], "GC")
+        serialized = json.dumps(snapshot)
+        for private_value in ("private spoken content", "private user transcript", '"text": "private"'):
+            self.assertNotIn(private_value, serialized)
+        self.assertNotIn("system_prompt", serialized)
+        self.assertEqual(snapshot["services"]["memory"]["retrieval"], "hybrid")
+
+    def test_sphere_status_snapshot_rejects_unknown_target_before_queue_read(self):
+        state = BridgeState.__new__(BridgeState)
+        state.action_queue = Mock()
+        with self.assertRaises(ValueError):
+            state.sphere_status_snapshot(["attacker-body"], include_recent_actions=True)
+        state.action_queue.list.assert_not_called()
+
+    def test_openai_agent_tool_loop_executes_function_and_returns_final_text(self):
+        first = SimpleNamespace(
+            id="resp-first",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="send_to_body",
+                    call_id="call-send-1",
+                    arguments=json.dumps(
+                        {
+                            "target_device_ids": ["wearabllm-esp32"],
+                            "text": "Dinner is ready.",
+                            "command": "GC",
+                            "channels": ["visual", "display", "audio"],
+                            "expires_in_seconds": 300,
+                        }
+                    ),
+                )
+            ],
+            output_text="",
+        )
+        second = SimpleNamespace(id="resp-second", output=[], output_text="GC\nSent to Waveshare.")
+        create = Mock(side_effect=[first, second])
+        action_queue = Mock()
+        action_queue.create.return_value = (
+            {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "target_device_id": "wearabllm-esp32",
+                "status": "queued",
+            },
+            True,
+        )
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = None
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = action_queue
+
+        text, metadata = state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "Send this to Waveshare."}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="Send this to Waveshare.",
+        )
+
+        self.assertEqual(text, "GC\nSent to Waveshare.")
+        self.assertEqual(metadata["tool_results"][0]["name"], "send_to_body")
+        self.assertEqual(
+            metadata["tool_results"][0]["summary"],
+            "Expression queued — wearabllm-esp32",
+        )
+        self.assertEqual(
+            metadata["tool_results"][0]["action_ids"],
+            ["11111111-1111-4111-8111-111111111111"],
+        )
+        self.assertNotIn("result", metadata["tool_results"][0])
+        self.assertEqual(create.call_args_list[1].kwargs["previous_response_id"], "resp-first")
+        self.assertEqual(create.call_args_list[1].kwargs["input"][0]["type"], "function_call_output")
+        action_queue.create.assert_called_once()
+
+    def test_public_tool_activity_includes_memory_content_prefix(self):
+        summary = BridgeState._public_tool_result(
+            "memory_remember",
+            {
+                "ok": True,
+                "saved": True,
+                "created": True,
+                "memory": {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "content": "Corina prefers curious, direct, playful replies with concrete evidence.",
+                },
+            },
+            {"content": "Corina prefers curious, direct, playful replies with concrete evidence."},
+        )
+
+        self.assertEqual(
+            summary["summary"],
+            "Memory updated — Corina prefers curious, direct, playful replies with concrete evidence.",
+        )
+        self.assertNotIn("memory", summary)
+
+    def test_public_tool_failure_hides_raw_backend_details(self):
+        summary = BridgeState._public_tool_result(
+            "memory_remember",
+            {
+                "ok": False,
+                "error": (
+                    'Supabase POST failed (400): {"details":"Failing row contains '
+                    '(secret private content and internal record identifiers)"}'
+                ),
+            },
+            {},
+        )
+
+        self.assertEqual(summary["summary"], "The private data backend rejected the request.")
+        self.assertEqual(summary["error"], "The private data backend rejected the request.")
+        self.assertNotIn("secret private content", json.dumps(summary))
+
+    def test_builtin_web_search_gets_visible_tool_activity(self):
+        response = SimpleNamespace(
+            id="resp-web",
+            output=[
+                SimpleNamespace(
+                    type="web_search_call",
+                    action=SimpleNamespace(
+                        sources=[SimpleNamespace(url="https://example.com", title="Example")]
+                    ),
+                )
+            ],
+            output_text="BS\nCurrent answer.",
+        )
+        create = Mock(return_value=response)
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = None
+        state.source_store = None
+        state.web_search_enabled = True
+        state.max_tool_rounds = 4
+        state.action_queue = Mock()
+
+        _text, metadata = state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "What's the weather today?"}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="What's the weather today?",
+        )
+
+        self.assertEqual(metadata["tool_results"][0]["name"], "web_search")
+        self.assertEqual(metadata["tool_results"][0]["summary"], "Web searched — 1 source")
+
     def test_device_presence_expires_after_heartbeat_ttl(self):
         state = BridgeState.__new__(BridgeState)
         state.device_presence = {}

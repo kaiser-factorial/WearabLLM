@@ -26,8 +26,12 @@ from typing import Any
 DEVICE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,80}")
 ACTION_ID_RE = re.compile(r"[a-f0-9-]{36}")
 IDEMPOTENCY_RE = re.compile(r"[A-Za-z0-9._-]{1,120}")
-VALID_STATUSES = {"queued", "dispatched", "delivered", "rendered", "tts_started", "played", "failed"}
-TERMINAL_STATUSES = {"played", "failed"}
+VALID_STATUSES = {"queued", "dispatched", "delivered", "rendered", "tts_started", "completed", "played", "failed", "expired"}
+TERMINAL_STATUSES = {"completed", "played", "failed", "expired"}
+IN_PROGRESS_STATUSES = {"dispatched", "delivered", "rendered", "tts_started"}
+STATUS_ORDER = {"dispatched": 0, "delivered": 1, "rendered": 2, "tts_started": 3}
+LED_COMMANDS = {"GS", "GP", "GC", "RS", "RF", "YP", "BS", "PS", "PP"}
+EXPRESSION_CHANNELS = {"visual", "display", "audio"}
 
 
 def now_iso() -> str:
@@ -57,6 +61,54 @@ def validate_idempotency_key(value: str) -> str:
     if not IDEMPOTENCY_RE.fullmatch(cleaned):
         raise ValueError("Invalid idempotency key")
     return cleaned
+
+
+def normalize_expression(
+    command: str,
+    reply: str,
+    expression: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the device-neutral Sphere expression carried by every action.
+
+    ``command`` and ``reply`` remain mirrored as top-level fields so the current
+    ESP32 firmware can consume new actions without a coordinated flash.
+    """
+    clean_command = command.strip().upper()
+    clean_reply = reply.strip()
+    if clean_command not in LED_COMMANDS:
+        raise ValueError("Invalid command")
+    if not clean_reply:
+        raise ValueError("Missing reply")
+    value = dict(expression or {})
+    channels = value.get("channels", ["visual", "display", "audio"])
+    if not isinstance(channels, list):
+        raise ValueError("Expression channels must be a list")
+    normalized_channels: list[str] = []
+    for channel in channels:
+        clean_channel = str(channel).strip().lower()
+        if clean_channel not in EXPRESSION_CHANNELS:
+            raise ValueError(f"Unsupported expression channel: {clean_channel}")
+        if clean_channel not in normalized_channels:
+            normalized_channels.append(clean_channel)
+    if not normalized_channels:
+        raise ValueError("Expression requires at least one channel")
+    return {
+        "version": 1,
+        "command": clean_command,
+        "text": clean_reply,
+        "channels": normalized_channels,
+    }
+
+
+def normalize_expiry(expires_at: str | None) -> str | None:
+    if not expires_at:
+        return None
+    parsed = parse_iso(str(expires_at))
+    if parsed.tzinfo is None:
+        raise ValueError("Action expiry must include a timezone")
+    if parsed <= datetime.now(timezone.utc):
+        raise ValueError("Action expiry must be in the future")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class JsonActionQueue:
@@ -114,6 +166,8 @@ class JsonActionQueue:
         command: str,
         reply: str,
         idempotency_key: str = "",
+        expression: dict[str, Any] | None = None,
+        expires_at: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         origin = validate_device_id(origin_device_id)
         target = validate_device_id(target_device_id)
@@ -122,10 +176,8 @@ class JsonActionQueue:
         clean_reply = reply.strip()
         if not clean_transcript:
             raise ValueError("Missing transcript")
-        if not clean_command or len(clean_command) != 2:
-            raise ValueError("Invalid command")
-        if not clean_reply:
-            raise ValueError("Missing reply")
+        normalized_expression = normalize_expression(clean_command, clean_reply, expression)
+        normalized_expiry = normalize_expiry(expires_at)
         if len(clean_transcript) > 8000 or len(clean_reply) > 4000:
             raise ValueError("Action text is too long")
         key = validate_idempotency_key(idempotency_key) if idempotency_key else ""
@@ -150,12 +202,15 @@ class JsonActionQueue:
                 "transcript": clean_transcript,
                 "command": clean_command,
                 "reply": clean_reply,
+                "action_type": "expression",
+                "expression": normalized_expression,
                 "status": "queued",
                 "idempotency_key": key or None,
                 "attempts": 0,
                 "created_at": timestamp,
                 "updated_at": timestamp,
                 "leased_until": None,
+                "expires_at": normalized_expiry,
                 "error": None,
             }
             self._actions.append(action)
@@ -167,6 +222,21 @@ class JsonActionQueue:
         target = validate_device_id(target_device_id)
         now = datetime.now(timezone.utc)
         with self._lock:
+            changed = False
+            for item in self._actions:
+                expiry = item.get("expires_at")
+                if (
+                    item.get("target_device_id") == target
+                    and item.get("status") not in TERMINAL_STATUSES
+                    and expiry
+                    and parse_iso(str(expiry)) <= now
+                ):
+                    item["status"] = "expired"
+                    item["leased_until"] = None
+                    item["updated_at"] = now_iso()
+                    changed = True
+            if changed:
+                self._persist_locked()
             candidate = next(
                 (
                     item
@@ -175,9 +245,11 @@ class JsonActionQueue:
                     and (
                         item.get("status") == "queued"
                         or (
-                            item.get("status") == "dispatched"
-                            and item.get("leased_until")
-                            and parse_iso(str(item["leased_until"])) <= now
+                            item.get("status") in IN_PROGRESS_STATUSES
+                            and (
+                                not item.get("leased_until")
+                                or parse_iso(str(item["leased_until"])) <= now
+                            )
                         )
                     )
                 ),
@@ -195,7 +267,7 @@ class JsonActionQueue:
     def acknowledge(self, target_device_id: str, action_id: str, status: str, error: str = "") -> dict[str, Any]:
         target = validate_device_id(target_device_id)
         action_key = validate_action_id(action_id)
-        if status not in {"delivered", "rendered", "tts_started", "played", "failed"}:
+        if status not in {"delivered", "rendered", "tts_started", "completed", "played", "failed"}:
             raise ValueError("Invalid action acknowledgement status")
         clean_error = error.strip()
         if len(clean_error) > 500:
@@ -205,14 +277,26 @@ class JsonActionQueue:
             if not action or action.get("target_device_id") != target:
                 raise LookupError("Action not found")
             current = str(action.get("status", ""))
-            if current in TERMINAL_STATUSES and current != status:
+            if current in TERMINAL_STATUSES:
                 return deepcopy(action)
-            if current == "played" and status == "played":
+            if (
+                status in STATUS_ORDER
+                and current in STATUS_ORDER
+                and STATUS_ORDER[status] <= STATUS_ORDER[current]
+            ):
                 return deepcopy(action)
             action["status"] = status
-            action["leased_until"] = None
+            action["leased_until"] = (
+                None
+                if status in TERMINAL_STATUSES
+                else (datetime.now(timezone.utc) + timedelta(seconds=self.lease_seconds))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
             action["updated_at"] = now_iso()
             action["error"] = clean_error or None
+            if status == "completed":
+                action["completed_at"] = action["updated_at"]
             self._persist_locked()
             return deepcopy(action)
 
@@ -300,12 +384,20 @@ class SupabaseActionQueue:
             "transcript": str(record.get("transcript", "")),
             "command": str(record.get("command", "")),
             "reply": str(record.get("reply", "")),
+            "action_type": str(record.get("action_type", "expression")),
+            "expression": normalize_expression(
+                str(record.get("command", "")),
+                str(record.get("reply", "")),
+                record.get("expression") if isinstance(record.get("expression"), dict) else None,
+            ),
             "status": str(record.get("status", "queued")),
             "idempotency_key": record.get("idempotency_key"),
             "attempts": int(record.get("delivery_attempts", 0)),
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
             "leased_until": record.get("lease_expires_at"),
+            "expires_at": record.get("expires_at"),
+            "completed_at": record.get("completed_at"),
             "error": record.get("error"),
         }
 
@@ -330,6 +422,8 @@ class SupabaseActionQueue:
         command: str,
         reply: str,
         idempotency_key: str = "",
+        expression: dict[str, Any] | None = None,
+        expires_at: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         origin = validate_device_id(origin_device_id)
         target = validate_device_id(target_device_id)
@@ -339,10 +433,8 @@ class SupabaseActionQueue:
         key = validate_idempotency_key(idempotency_key) if idempotency_key else ""
         if not clean_transcript:
             raise ValueError("Missing transcript")
-        if not clean_command or len(clean_command) != 2:
-            raise ValueError("Invalid command")
-        if not clean_reply:
-            raise ValueError("Missing reply")
+        normalized_expression = normalize_expression(clean_command, clean_reply, expression)
+        normalized_expiry = normalize_expiry(expires_at)
         if len(clean_transcript) > 4000 or len(clean_reply) > 8000:
             raise ValueError("Action text is too long")
         if key:
@@ -359,8 +451,11 @@ class SupabaseActionQueue:
                 "transcript": clean_transcript,
                 "command": clean_command,
                 "reply": clean_reply,
+                "action_type": "expression",
+                "expression": normalized_expression,
                 "status": "queued",
                 "idempotency_key": key or None,
+                "expires_at": normalized_expiry,
             },
         )
         if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
@@ -383,7 +478,7 @@ class SupabaseActionQueue:
     def acknowledge(self, target_device_id: str, action_id: str, status: str, error: str = "") -> dict[str, Any]:
         target = validate_device_id(target_device_id)
         action_key = validate_action_id(action_id)
-        if status not in {"delivered", "rendered", "tts_started", "played", "failed"}:
+        if status not in {"delivered", "rendered", "tts_started", "completed", "played", "failed"}:
             raise ValueError("Invalid action acknowledgement status")
         clean_error = error.strip()
         if len(clean_error) > 500:
@@ -394,14 +489,32 @@ class SupabaseActionQueue:
         current = str(existing.get("status", ""))
         if current in TERMINAL_STATUSES:
             return existing
+        allowed_current = {
+            "delivered": ["dispatched", "delivered"],
+            "rendered": ["dispatched", "delivered", "rendered"],
+            "tts_started": ["dispatched", "delivered", "rendered", "tts_started"],
+            "completed": sorted(IN_PROGRESS_STATUSES),
+            "played": sorted(IN_PROGRESS_STATUSES),
+            "failed": sorted(IN_PROGRESS_STATUSES),
+        }[status]
+        if current not in allowed_current:
+            return existing
         update: dict[str, Any] = {
             "status": status,
-            "lease_expires_at": None,
+            "lease_expires_at": (
+                None
+                if status in TERMINAL_STATUSES
+                else (datetime.now(timezone.utc) + timedelta(seconds=self.lease_seconds))
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
             "error": clean_error or None,
         }
         timestamp = now_iso()
         if status == "delivered":
             update["delivered_at"] = timestamp
+        elif status == "completed":
+            update["completed_at"] = timestamp
         elif status == "played":
             update["played_at"] = timestamp
         elif status == "failed":
@@ -410,12 +523,17 @@ class SupabaseActionQueue:
         principal = urllib.parse.quote(self.principal_id, safe="")
         payload = self._request(
             "PATCH",
-            f"/rest/v1/wearabllm_device_actions?id=eq.{encoded_id}&principal_id=eq.{principal}",
+            f"/rest/v1/wearabllm_device_actions?id=eq.{encoded_id}&principal_id=eq.{principal}"
+            f"&target_device_id=eq.{urllib.parse.quote(target, safe='')}"
+            f"&status=in.({','.join(allowed_current)})",
             update,
         )
-        if not isinstance(payload, list) or not payload:
-            raise LookupError("Action not found")
-        return self._row(payload[0])
+        if isinstance(payload, list) and payload:
+            return self._row(payload[0])
+        latest = self.get(action_key)
+        if latest and latest.get("target_device_id") == target:
+            return latest
+        raise LookupError("Action not found")
 
     def get(self, action_id: str) -> dict[str, Any] | None:
         action_key = validate_action_id(action_id)

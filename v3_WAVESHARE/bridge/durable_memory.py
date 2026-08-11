@@ -544,7 +544,15 @@ class LocalConversationStore:
                 return []
             return [dict(record) for record in session.get("turns", []) if isinstance(record, dict)]
 
-    def append(self, session_id: str, device_id: str, role: str, content: str) -> None:
+    def append(
+        self,
+        session_id: str,
+        device_id: str,
+        role: str,
+        content: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         normalized_device_id = " ".join(device_id.split()).strip()
         normalized_content = " ".join(content.split()).strip()
         if role not in ("user", "assistant"):
@@ -567,6 +575,7 @@ class LocalConversationStore:
                 "device_id": normalized_device_id,
                 "role": role,
                 "content": normalized_content,
+                "metadata": dict(metadata or {}),
                 "created_at": now,
             }
             payload["next_turn_id"] = record["id"] + 1
@@ -592,6 +601,31 @@ class LocalConversationStore:
             stored["ended_at"] = now
             stored["archived_at"] = now
             stored["summary"] = summary or None
+            count = len(stored.get("turns", []))
+            self._save(payload)
+            return count
+
+    def end_session(self, session: dict[str, Any]) -> int:
+        """End a thread while keeping it visible and its turns in primary storage."""
+        session_id = str(session.get("id", "")).strip()
+        if not session_id:
+            raise ValueError("Conversation session is missing an ID")
+        with self.lock:
+            payload = self._load()
+            stored = next(
+                (
+                    item
+                    for item in payload["sessions"]
+                    if str(item.get("id")) == session_id
+                    and item.get("principal_id") == self.principal_id
+                ),
+                None,
+            )
+            if not stored:
+                raise LookupError("Conversation session not found")
+            if stored.get("ended_at") or stored.get("archived_at"):
+                return 0
+            stored["ended_at"] = self._now()
             count = len(stored.get("turns", []))
             self._save(payload)
             return count
@@ -768,7 +802,7 @@ class SupabaseConversationStore:
         payload = self._request(
             "GET",
             "/rest/v1/wearabllm_conversation_turns"
-            f"?session_id=eq.{encoded_session_id}&select=id,device_id,role,content,created_at"
+            f"?session_id=eq.{encoded_session_id}&select=id,device_id,role,content,metadata,created_at"
             "&order=created_at.asc,id.asc&limit=10000",
         )
         records = [record for record in payload or [] if isinstance(record, dict)]
@@ -778,7 +812,7 @@ class SupabaseConversationStore:
             "GET",
             "/rest/v1/wearabllm_conversation_archive"
             f"?session_id=eq.{encoded_session_id}"
-            "&select=original_turn_id,device_id,role,content,created_at"
+            "&select=original_turn_id,device_id,role,content,metadata,created_at"
             "&order=created_at.asc,id.asc&limit=10000",
         )
         return [
@@ -787,7 +821,15 @@ class SupabaseConversationStore:
             if isinstance(record, dict)
         ]
 
-    def append(self, session_id: str, device_id: str, role: str, content: str) -> None:
+    def append(
+        self,
+        session_id: str,
+        device_id: str,
+        role: str,
+        content: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         normalized_device_id = " ".join(device_id.split()).strip()
         normalized_content = " ".join(content.split()).strip()
         if role not in ("user", "assistant"):
@@ -805,6 +847,7 @@ class SupabaseConversationStore:
                 "device_id": normalized_device_id,
                 "role": role,
                 "content": normalized_content,
+                "metadata": dict(metadata or {}),
             },
         )
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -831,6 +874,7 @@ class SupabaseConversationStore:
                     "device_id": record["device_id"],
                     "role": record["role"],
                     "content": record["content"],
+                    "metadata": record.get("metadata") or {},
                     "created_at": record["created_at"],
                 }
                 for record in records
@@ -845,6 +889,24 @@ class SupabaseConversationStore:
         )
         self._request("DELETE", f"/rest/v1/wearabllm_conversation_turns?session_id=eq.{encoded_session_id}")
         return len(records)
+
+    def end_session(self, session: dict[str, Any]) -> int:
+        """End a thread without moving or deleting any of its conversation turns."""
+        session_id = str(session.get("id", "")).strip()
+        if not session_id:
+            raise ValueError("Conversation session is missing an ID")
+        if session.get("ended_at") or session.get("archived_at"):
+            return 0
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        encoded_session_id = urllib.parse.quote(session_id, safe="")
+        principal = urllib.parse.quote(self.principal_id, safe="")
+        payload = self._request(
+            "PATCH",
+            "/rest/v1/wearabllm_conversation_sessions"
+            f"?id=eq.{encoded_session_id}&principal_id=eq.{principal}&ended_at=is.null",
+            {"ended_at": now},
+        )
+        return 1 if isinstance(payload, list) and payload else 0
 
     def clear(self) -> int:
         session = self.active_session()

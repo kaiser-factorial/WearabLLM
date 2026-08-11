@@ -23,7 +23,9 @@ hold BOOT/PTT or say "Hi ESP"
 ```
 
 Android and the web dashboard participate in the same Sphere conversation.
-Either can optionally queue a response for the Waveshare to display and speak.
+Sphere can queue the same semantic expression for any explicit active target:
+the Waveshare maps it to LEDs/TFT/speaker, while Android and Web map it to a
+colored glow/text and optional local speech.
 Device heartbeats distinguish bodies that are online from bodies that are
 unplugged or inactive.
 
@@ -98,11 +100,13 @@ private and do not automatically return to active prompt context.
 The action queue makes physical delivery explicit:
 
 ```text
-queued -> dispatched -> played
-                    \-> failed
+queued -> dispatched -> delivered -> rendered -> completed
+                                      \-> tts_started -> played
+                                      \-> failed
 ```
 
-The UI must not claim `played` until the Waveshare acknowledges playback.
+Each target has its own action row, expiry, idempotency key, and terminal
+status. The UI must not claim `played` until that target acknowledges playback.
 
 ## Physical Response Language
 
@@ -120,6 +124,10 @@ WearabLLM preserves the original nine two-character response commands:
 | `PS` | Creative or imaginative | Purple solid |
 | `PP` | Deep or philosophical | Purple pulse |
 
+These codes are semantic rather than hardware-specific. Android and Web use
+the same code to color their Sphere expression surface; local speech on those
+bodies is disabled by default and must be opted into in settings.
+
 The TFT shows listening, sending, thinking, error, and response states. Longer
 answers are presented one sentence/chunk at a time while firmware prefetches
 the next TTS chunk to reduce pauses between cards.
@@ -136,6 +144,7 @@ the next TTS chunk to reduce pauses between cards.
 | [`v3_WAVESHARE/hosted_agent/`](v3_WAVESHARE/hosted_agent/) | Private Hugging Face Docker Space image |
 | [`v3_WAVESHARE/protocol/`](v3_WAVESHARE/protocol/) | Shared API and command contract |
 | [`v3_WAVESHARE/docs/`](v3_WAVESHARE/docs/) | Bring-up, architecture, pin map, and status notes |
+| [`v3_WAVESHARE/docs/TOOLS.md`](v3_WAVESHARE/docs/TOOLS.md) | Sphere model tools, safety boundaries, limitations, and deferred decisions |
 | [`supabase/`](supabase/) | Database migrations and private backend schema |
 | [`v1/`](v1/) | Historical Bluefruit and phone-app baseline |
 | [`v2_servo_bluefruit/`](v2_servo_bluefruit/) | Documented servo-era archive |
@@ -313,15 +322,18 @@ The current system is functional, but these items remain intentionally open:
   npm advisories without destabilizing the verified Android build
 - firmware updates still require USB; authenticated dual-slot OTA is planned
 - one shared device token should become per-device credentials
-- the richer household-memory schema is not yet exposed as a model tool or a
-  user review/correction/deletion interface
+- the richer household-memory schema is model-accessible for search, safe
+  durable remembering, sensitive yes/no confirmation, correction, and forget
+  operations, but still lacks a dedicated user
+  review interface
 - archived conversations cannot yet be restored or deleted from the UI
 - long-response playback, retries, lease expiry, and power-loss behavior need
   a recorded regression matrix
 
-Near-term priorities are to preserve and publish the verified clean-switch
-state, host the dashboard securely, add Android distribution and OTA, then
-build the separate Supabase-backed household-memory tool.
+The tool migrations and private hosted bridge were applied and live-smoked on
+2026-08-11. Near-term priorities are to preserve and publish the verified
+clean-switch state, add a memory review UI, host the dashboard securely, and
+add Android distribution and OTA.
 
 ## Development Guardrails
 

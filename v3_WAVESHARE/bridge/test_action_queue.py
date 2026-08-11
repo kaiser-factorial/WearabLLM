@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +30,8 @@ class JsonActionQueueTest(unittest.TestCase):
         )
         self.assertTrue(created)
         self.assertEqual(action["status"], "queued")
+        self.assertEqual(action["expression"]["command"], "GS")
+        self.assertEqual(action["expression"]["channels"], ["visual", "display", "audio"])
 
         duplicate, created = queue.create(
             origin_device_id="wearabllm-android",
@@ -49,12 +52,16 @@ class JsonActionQueueTest(unittest.TestCase):
 
         delivered = queue.acknowledge("wearabllm-esp32", str(action["id"]), "delivered")
         self.assertEqual(delivered["status"], "delivered")
+        self.assertIsNotNone(delivered["leased_until"])
         rendered = queue.acknowledge("wearabllm-esp32", str(action["id"]), "rendered")
         self.assertEqual(rendered["status"], "rendered")
         tts_started = queue.acknowledge("wearabllm-esp32", str(action["id"]), "tts_started")
         self.assertEqual(tts_started["status"], "tts_started")
+        stale_rendered = queue.acknowledge("wearabllm-esp32", str(action["id"]), "rendered")
+        self.assertEqual(stale_rendered["status"], "tts_started")
         played = queue.acknowledge("wearabllm-esp32", str(action["id"]), "played")
         self.assertEqual(played["status"], "played")
+        self.assertIsNone(played["leased_until"])
 
         reloaded = JsonActionQueue(self.path)
         persisted = reloaded.get(str(action["id"]))
@@ -72,6 +79,25 @@ class JsonActionQueueTest(unittest.TestCase):
         )
         with self.assertRaises(LookupError):
             queue.acknowledge("wearabllm-other", str(action["id"]), "played")
+
+    def test_expired_expression_is_not_claimed(self) -> None:
+        queue = JsonActionQueue(self.path)
+        expires_at = (datetime.now(timezone.utc) + timedelta(milliseconds=20)).isoformat()
+        action, _created = queue.create(
+            origin_device_id="web-console",
+            target_device_id="wearabllm-android",
+            transcript="Show this briefly on Android.",
+            command="PS",
+            reply="A fleeting purple thought.",
+            expression={"channels": ["visual", "display"]},
+            expires_at=expires_at,
+        )
+        import time
+        time.sleep(0.03)
+        self.assertIsNone(queue.claim_next("wearabllm-android"))
+        expired = queue.get(str(action["id"]))
+        assert expired is not None
+        self.assertEqual(expired["status"], "expired")
 
 
 class SupabaseActionQueueTest(unittest.TestCase):
@@ -158,6 +184,23 @@ class SupabaseActionQueueTest(unittest.TestCase):
         self.assertEqual(request.get_method(), "PATCH")
         self.assertIn(b'"status": "played"', request.data)
         self.assertIn(b'"lease_expires_at": null', request.data)
+        self.assertIn("status=in.", request.full_url)
+
+    @patch("action_queue.urllib.request.urlopen")
+    def test_nonterminal_acknowledgement_extends_lease(self, urlopen):
+        urlopen.side_effect = [
+            self.response([self.row(status="dispatched")]),
+            self.response([self.row(status="rendered", lease_expires_at="2026-08-09T12:01:00Z")]),
+        ]
+        action = self.queue.acknowledge(
+            "wearabllm-esp32",
+            "11111111-1111-4111-8111-111111111111",
+            "rendered",
+        )
+        self.assertEqual(action["status"], "rendered")
+        request = urlopen.call_args_list[1].args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertIsNotNone(body["lease_expires_at"])
 
 
 if __name__ == "__main__":
