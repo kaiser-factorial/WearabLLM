@@ -30,8 +30,20 @@ Opens `http://127.0.0.1:8787`.
   system prompt, live OpenAI LLM/TTS model choices, TTS voice + delivery
   instructions
 - **Deploy to Hugging Face** from the laptop (code upload only; secrets stay local)
+- **Sensor** tab for direct Web Bluetooth readings from the standalone Ducati
+  ESP32-S3 v6.2 temperature sensor; readings remain browser-local
 - Binds only to `127.0.0.1`; device tokens stay in the Python proxy and never
   reach browser JavaScript
+
+## Temperature sensor tab
+
+Open the dashboard in a Web Bluetooth-capable browser, select **Sensor**, and
+choose **Connect sensor**. The page connects directly to the BLE service
+advertised by `ducati_relay/v6.2_temperature_sensor`; no proxy endpoint, Wi-Fi,
+or cloud persistence is involved. Use **Take reading** in the page or press the
+physical sensor button for each new reading. The page writes command byte `0x01`
+to the v6.2 command characteristic, and the resulting measurement arrives through
+the same versioned notification packet used by physical button presses.
 
 ## Configuration
 

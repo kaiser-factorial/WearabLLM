@@ -21,6 +21,16 @@ const els = {
   actionDebug: document.querySelector("#action-debug"),
   chatView: document.querySelector("#chat-view"),
   commandView: document.querySelector("#command-view"),
+  sensorView: document.querySelector("#sensor-view"),
+  sensorConnect: document.querySelector("#sensor-connect"),
+  sensorTakeReading: document.querySelector("#sensor-take-reading"),
+  sensorConnectionBadge: document.querySelector("#sensor-connection-badge"),
+  sensorStatus: document.querySelector("#sensor-status"),
+  sensorCelsius: document.querySelector("#sensor-celsius"),
+  sensorFahrenheit: document.querySelector("#sensor-fahrenheit"),
+  sensorReadingMeta: document.querySelector("#sensor-reading-meta"),
+  sensorHistory: document.querySelector("#sensor-history"),
+  sensorClear: document.querySelector("#sensor-clear"),
   settingsModal: document.querySelector("#settings-modal"),
   settingsClose: document.querySelector("#settings-close"),
   configForm: document.querySelector("#config-form"),
@@ -70,7 +80,16 @@ const state = {
   showArchived: false,
   receivingBodyAction: false,
   expressionTimer: null,
+  sensorDevice: null,
+  sensorCharacteristic: null,
+  sensorCommandCharacteristic: null,
+  sensorReadings: [],
+  sensorLastSequence: null,
 };
+
+const SENSOR_SERVICE_UUID = "7b8f2b10-3a42-4d4e-9fd4-8b5b86d8a101";
+const SENSOR_READING_UUID = "7b8f2b11-3a42-4d4e-9fd4-8b5b86d8a101";
+const SENSOR_COMMAND_UUID = "7b8f2b12-3a42-4d4e-9fd4-8b5b86d8a101";
 
 const EXPRESSION_COLORS = {
   G: "#22c55e",
@@ -595,7 +614,9 @@ async function refreshConversation({ forceRender = false } = {}) {
     renderThread({ force: forceRender });
     const selected = state.sessions.find((item) => item.id === state.selectedSessionId) || state.session;
     const isCurrent = !state.selectedSessionId || state.selectedSessionId === state.activeSessionId;
-    els.threadTitle.textContent = conversationTitle(selected);
+    if (state.view === "chat") {
+      els.threadTitle.textContent = conversationTitle(selected);
+    }
     els.replyInput.disabled = !isCurrent;
     els.send.disabled = !isCurrent || state.sending;
     els.deliverWaveshare.disabled = !isCurrent;
@@ -662,23 +683,196 @@ function renderActionDelivery(action) {
 
 function setView(view) {
   state.view = view;
-  const isChat = view === "chat";
-  els.chatView.classList.toggle("active", isChat);
-  els.chatView.hidden = !isChat;
-  els.commandView.classList.toggle("active", !isChat);
-  els.commandView.hidden = isChat;
+  const views = {
+    chat: els.chatView,
+    command: els.commandView,
+    sensor: els.sensorView,
+  };
+  for (const [name, element] of Object.entries(views)) {
+    const active = name === view;
+    element.classList.toggle("active", active);
+    element.hidden = !active;
+  }
   document.querySelectorAll(".tab").forEach((tab) => {
     const active = tab.dataset.view === view;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", active ? "true" : "false");
   });
-  if (isChat) {
+  if (view === "chat") {
     els.viewEyebrow.textContent = "Conversation";
     const selected = state.sessions.find((item) => item.id === state.selectedSessionId) || state.session;
     els.threadTitle.textContent = conversationTitle(selected);
+  } else if (view === "sensor") {
+    els.viewEyebrow.textContent = "Local Bluetooth";
+    els.threadTitle.textContent = "Temperature sensor";
   } else {
     els.viewEyebrow.textContent = "Deployment";
     els.threadTitle.textContent = "Hugging Face Space";
+  }
+}
+
+function setSensorConnectionStatus(kind, label, detail) {
+  els.sensorConnectionBadge.className = `sensor-badge ${kind}`;
+  const dot = document.createElement("span");
+  dot.setAttribute("aria-hidden", "true");
+  els.sensorConnectionBadge.replaceChildren(dot, document.createTextNode(` ${label}`));
+  els.sensorStatus.textContent = detail;
+}
+
+function renderSensorHistory() {
+  els.sensorClear.disabled = state.sensorReadings.length === 0;
+  if (!state.sensorReadings.length) {
+    const row = document.createElement("tr");
+    row.className = "sensor-history-empty";
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = "No readings yet.";
+    row.append(cell);
+    els.sensorHistory.replaceChildren(row);
+    return;
+  }
+
+  els.sensorHistory.replaceChildren(
+    ...state.sensorReadings.map((reading) => {
+      const row = document.createElement("tr");
+      const values = [
+        reading.time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }),
+        `${reading.celsius.toFixed(2)} °C`,
+        `${reading.fahrenheit.toFixed(2)} °F`,
+        String(reading.rawAdc),
+      ];
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      return row;
+    })
+  );
+}
+
+function handleSensorPacket(dataView) {
+  const packet = window.WearabLLMSensorProtocol.decode(dataView);
+  if (packet.kind === "packet-error") {
+    setSensorConnectionStatus("error", "Packet error", "The board sent an incomplete reading. Press the button again.");
+    return;
+  }
+  if (packet.kind === "version-error") {
+    setSensorConnectionStatus("error", "Version error", `Unsupported sensor packet version ${packet.version}.`);
+    return;
+  }
+  if (packet.kind === "waiting") {
+    setSensorConnectionStatus("connected", "Connected", "Connected. Press the physical button to take a reading.");
+    return;
+  }
+  if (state.sensorLastSequence === packet.sequence) return;
+  state.sensorLastSequence = packet.sequence;
+
+  if (packet.kind === "sensor-error") {
+    setSensorConnectionStatus(
+      "error",
+      "Sensor error",
+      `Reading ${packet.sequence} was outside the valid range (raw ADC ${packet.rawAdc}). Check the thermistor connection.`,
+    );
+    els.sensorReadingMeta.textContent = `Invalid reading · raw ADC ${packet.rawAdc}`;
+    return;
+  }
+
+  const reading = { ...packet, time: new Date() };
+  state.sensorReadings = [reading, ...state.sensorReadings].slice(0, 20);
+  els.sensorCelsius.textContent = packet.celsius.toFixed(2);
+  els.sensorFahrenheit.textContent = `${packet.fahrenheit.toFixed(2)} °F`;
+  els.sensorReadingMeta.textContent = `Reading ${packet.sequence} · raw ADC ${packet.rawAdc} · board up ${Math.round(packet.uptimeMs / 1000)}s`;
+  setSensorConnectionStatus("connected", "Connected", "Reading received. Press the physical button whenever you want another.");
+  renderSensorHistory();
+}
+
+function onSensorValueChanged(event) {
+  handleSensorPacket(event.target.value);
+}
+
+function onSensorDisconnected(event) {
+  if (state.sensorCharacteristic) {
+    state.sensorCharacteristic.removeEventListener("characteristicvaluechanged", onSensorValueChanged);
+  }
+  event?.target?.removeEventListener("gattserverdisconnected", onSensorDisconnected);
+  state.sensorDevice = null;
+  state.sensorCharacteristic = null;
+  state.sensorCommandCharacteristic = null;
+  state.sensorLastSequence = null;
+  els.sensorConnect.textContent = "Connect sensor";
+  els.sensorTakeReading.disabled = true;
+  setSensorConnectionStatus("disconnected", "Disconnected", "Sensor disconnected. Reconnect when the board is powered and nearby.");
+}
+
+async function requestSensorReading() {
+  const characteristic = state.sensorCommandCharacteristic;
+  if (!characteristic || !state.sensorDevice?.gatt?.connected) {
+    setSensorConnectionStatus("disconnected", "Disconnected", "Connect the sensor before requesting a reading.");
+    return;
+  }
+
+  els.sensorTakeReading.disabled = true;
+  setSensorConnectionStatus("connected", "Connected", "Measurement requested. Waiting for the ESP32-S3…");
+  try {
+    const command = new Uint8Array([0x01]);
+    if (typeof characteristic.writeValueWithResponse === "function") {
+      await characteristic.writeValueWithResponse(command);
+    } else {
+      await characteristic.writeValue(command);
+    }
+  } catch (error) {
+    setSensorConnectionStatus("error", "Command error", `Could not request a reading: ${error?.message || "unknown Bluetooth error"}`);
+  } finally {
+    els.sensorTakeReading.disabled = !state.sensorDevice?.gatt?.connected;
+  }
+}
+
+async function toggleSensorConnection() {
+  if (state.sensorDevice?.gatt?.connected) {
+    state.sensorDevice.gatt.disconnect();
+    return;
+  }
+  if (!("bluetooth" in navigator)) {
+    setSensorConnectionStatus("error", "Unavailable", "Web Bluetooth is not available here. Open this page in desktop Chrome or Edge.");
+    return;
+  }
+
+  els.sensorConnect.disabled = true;
+  setSensorConnectionStatus("connecting", "Connecting", "Choose Ducati Temperature Sensor in the Bluetooth window.");
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SENSOR_SERVICE_UUID] }],
+    });
+    state.sensorDevice = device;
+    device.addEventListener("gattserverdisconnected", onSensorDisconnected);
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SENSOR_SERVICE_UUID);
+    const characteristic = await service.getCharacteristic(SENSOR_READING_UUID);
+    const commandCharacteristic = await service.getCharacteristic(SENSOR_COMMAND_UUID);
+    state.sensorCharacteristic = characteristic;
+    state.sensorCommandCharacteristic = commandCharacteristic;
+    state.sensorLastSequence = null;
+    characteristic.addEventListener("characteristicvaluechanged", onSensorValueChanged);
+    await characteristic.startNotifications();
+    els.sensorConnect.textContent = "Disconnect";
+    els.sensorTakeReading.disabled = false;
+    setSensorConnectionStatus("connected", "Connected", "Connected. Take a reading here or with the physical button.");
+    handleSensorPacket(await characteristic.readValue());
+  } catch (error) {
+    if (state.sensorDevice?.gatt?.connected) state.sensorDevice.gatt.disconnect();
+    state.sensorDevice = null;
+    state.sensorCharacteristic = null;
+    state.sensorCommandCharacteristic = null;
+    els.sensorTakeReading.disabled = true;
+    const cancelled = error?.name === "NotFoundError";
+    setSensorConnectionStatus(
+      "disconnected",
+      "Disconnected",
+      cancelled ? "Connection cancelled." : `Could not connect: ${error?.message || "unknown Bluetooth error"}`,
+    );
+  } finally {
+    els.sensorConnect.disabled = false;
   }
 }
 
@@ -886,6 +1080,12 @@ els.allowBrowserSpeech?.addEventListener("change", () => {
 });
 els.deployDry?.addEventListener("click", () => runDeploy({ dryRun: true }));
 els.deployLive?.addEventListener("click", () => runDeploy({ dryRun: false }));
+els.sensorConnect?.addEventListener("click", toggleSensorConnection);
+els.sensorTakeReading?.addEventListener("click", requestSensorReading);
+els.sensorClear?.addEventListener("click", () => {
+  state.sensorReadings = [];
+  renderSensorHistory();
+});
 
 els.deliverWaveshare.addEventListener("change", () => {
   state.deliverToWaveshare = els.deliverWaveshare.checked;
