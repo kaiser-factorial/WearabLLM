@@ -40,8 +40,10 @@ class SourceManifestTest(unittest.TestCase):
             dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("source_bundle.json", relative)
+        self.assertIn("bridge/bridge_contracts.py", relative)
         self.assertIn("bridge/source_code.py", relative)
         self.assertIn("bridge/observability.py", relative)
+        self.assertIn("COPY bridge/bridge_contracts.py ./bridge_contracts.py", dockerfile)
         self.assertIn("COPY bridge/observability.py ./observability.py", dockerfile)
 
 

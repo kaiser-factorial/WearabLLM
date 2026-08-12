@@ -15,6 +15,14 @@ from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
+from bridge_contracts import (
+    GeneratedModelText,
+    InteractionInput,
+    InteractionResult,
+    ModelActivity,
+    QueryInput,
+    QueryResult,
+)
 import wearabllm_bridge
 from wearabllm_bridge import (
     BridgeState,
@@ -228,7 +236,7 @@ class BridgeStateTest(unittest.TestCase):
         )
         state.max_output_tokens = 256
         state.conversation_backend = "supabase"
-        state._generate_agent_text = Mock(side_effect=RuntimeError("provider unavailable"))
+        state._generate_agent_result = Mock(side_effect=RuntimeError("provider unavailable"))
 
         command, reply, metadata = state.ask_llm_with_metadata(
             "Remember several things about me.",
@@ -839,7 +847,11 @@ class BridgeStateTest(unittest.TestCase):
                 max_audio_bytes=DEFAULT_MAX_AUDIO_BYTES,
             )
         )
-        payload = state.answer_transcript("should I test the bridge?", audio_bytes=12)
+        result = state.answer_query(
+            QueryInput(transcript="should I test the bridge?", audio_bytes=12)
+        )
+        self.assertIsInstance(result, QueryResult)
+        payload = result.to_legacy_dict()
         self.assertEqual(payload["command"], "BS")
         self.assertEqual(payload["transcript"], "should I test the bridge?")
         self.assertEqual(payload["audio_bytes"], 12)
@@ -868,8 +880,11 @@ class BridgeStateTest(unittest.TestCase):
             return_value=SimpleNamespace(system_prompt="Be helpful.", llm_model="test-model")
         )
         state.max_output_tokens = 1024
-        state._generate_agent_text = Mock(
-            return_value=("BS\nA long but useful RFC.", {"sources": [], "tool_results": []})
+        state._generate_agent_result = Mock(
+            return_value=GeneratedModelText(
+                raw_text="BS\nA long but useful RFC.",
+                activity=ModelActivity(),
+            )
         )
 
         payload = state.answer_transcript("Please write the RFC.", device_id="web-console")
@@ -1831,12 +1846,16 @@ class TargetedInteractionStateTest(unittest.TestCase):
                     agent_config_file=str(Path(tmpdir) / "agent_config.json"),
                 )
             )
-            created = state.create_interaction(
-                transcript="Tell the roomies that dinner is ready.",
-                origin_device_id="wearabllm-android",
-                target_device_id="wearabllm-esp32",
-                idempotency_key="dinner-ready-1",
+            result = state.create_interaction_result(
+                InteractionInput(
+                    transcript="Tell the roomies that dinner is ready.",
+                    origin_device_id="wearabllm-android",
+                    target_device_id="wearabllm-esp32",
+                    idempotency_key="dinner-ready-1",
+                )
             )
+            self.assertIsInstance(result, InteractionResult)
+            created = result.to_legacy_dict()
             action = created["action"]
             self.assertTrue(created["action_created"])
             self.assertEqual(action["command"], "GP")
