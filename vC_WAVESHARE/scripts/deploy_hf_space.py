@@ -98,6 +98,7 @@ def staged_space(destination: Path) -> list[Path]:
     files = [
         "action_queue.py",
         "agent_config.py",
+        "bridge_contracts.py",
         "durable_memory.py",
         "household_memory.py",
         "observability.py",

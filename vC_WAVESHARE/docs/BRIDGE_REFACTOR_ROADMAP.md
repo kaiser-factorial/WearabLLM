@@ -422,3 +422,9 @@ Phase 0 evidence is recorded in:
 - `../bridge/contract_fixtures/v1/golden_shapes.json`
 - `../bridge/test_bridge_contracts.py`
 - `../bridge/test_observability.py`
+
+Phase 1 implementation and verification evidence is recorded in:
+
+- `BRIDGE_PHASE1_CONTRACTS.md`
+- `../bridge/bridge_contracts.py`
+- `../bridge/test_bridge_internal_contracts.py`

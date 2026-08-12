@@ -41,6 +41,21 @@ from typing import Any
 
 from action_queue import JsonActionQueue, SupabaseActionQueue, normalize_sensor_manifest, validate_device_id
 from agent_config import AgentConfig, AgentConfigStore
+from bridge_contracts import (
+    AssistantResult,
+    GeneratedModelText,
+    InteractionInput,
+    InteractionResult,
+    ModelActivity,
+    ModelToolContext,
+    ParsedModelReply,
+    PersistenceResult,
+    PersistenceStatus,
+    QueryInput,
+    QueryResult,
+    SourceReference,
+    ToolActivity,
+)
 from durable_memory import (
     DEFAULT_CONVERSATION_FILE,
     DEFAULT_MEMORY_FILE,
@@ -891,12 +906,12 @@ class BridgeState:
         device_id: str = "wearabllm-unknown",
         response_device_id: str | None = None,
     ) -> tuple[str, str]:
-        command, reply, _ = self.ask_llm_with_metadata(
+        result = self.generate_assistant_result(
             transcript,
             device_id=device_id,
             response_device_id=response_device_id,
         )
-        return command, reply
+        return result.command, result.reply
 
     def ask_llm_with_metadata(
         self,
@@ -905,32 +920,55 @@ class BridgeState:
         device_id: str = "wearabllm-unknown",
         response_device_id: str | None = None,
     ) -> tuple[str, str, dict[str, Any]]:
+        """Compatibility adapter for callers that still consume tuple/dict results."""
+        result = self.generate_assistant_result(
+            transcript,
+            device_id=device_id,
+            response_device_id=response_device_id,
+        )
+        return result.command, result.reply, result.to_legacy_metadata()
+
+    def generate_assistant_result(
+        self,
+        transcript: str,
+        *,
+        device_id: str = "wearabllm-unknown",
+        response_device_id: str | None = None,
+    ) -> AssistantResult:
         response_device = response_device_id or device_id
         if self.args.dry_run:
-            command = self.next_dry_run_command()
-            reply = f"Dry run transcript: {transcript or '(empty audio)'}"
+            parsed = ParsedModelReply(
+                command=self.next_dry_run_command(),
+                reply=f"Dry run transcript: {transcript or '(empty audio)'}",
+            )
             if self.history_turns:
                 with self.history_lock:
                     self.history.extend(
                         [
                             {"role": "user", "content": transcript, "device_id": device_id},
-                            {"role": "assistant", "content": reply, "device_id": response_device},
+                            {
+                                "role": "assistant",
+                                "content": parsed.reply,
+                                "device_id": response_device,
+                            },
                         ]
                     )
                     self.history = self.history[-(self.history_turns * 2):]
-            return command, reply, {
-                "sources": [],
-                "tool_results": [],
-                "persistence": self._persistence_result("skipped"),
-            }
+            return AssistantResult(
+                parsed=parsed,
+                activity=ModelActivity(),
+                persistence=self._make_persistence_result(PersistenceStatus.SKIPPED),
+            )
 
         if self.args.provider not in ("openai", "openrouter"):
             raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
 
-        persistence = self._persistence_result(
-            "pending" if self.conversation_store else "not_configured"
+        persistence = self._make_persistence_result(
+            PersistenceStatus.PENDING
+            if self.conversation_store
+            else PersistenceStatus.NOT_CONFIGURED
         )
         memories: list[str] = []
         if self.memory_store:
@@ -945,11 +983,11 @@ class BridgeState:
             if self.conversation_store:
                 try:
                     active_session_id = self._prepare_active_session()
-                    persistence["session_id"] = active_session_id or None
+                    persistence = persistence.with_session(active_session_id)
                     persisted_history = self.conversation_store.history(active_session_id, self.history_turns * 2)
                 except Exception as exc:  # Conversation storage must not break a voice interaction.
                     self._emit_exception("bridge.conversation_retrieval_failed", exc, level="warning")
-                    persistence = self._persistence_result("failed")
+                    persistence = self._make_persistence_result(PersistenceStatus.FAILED)
             input_messages = [
                 {
                     "role": str(message.get("role", "user")),
@@ -967,10 +1005,10 @@ class BridgeState:
                     "use it only when relevant, and prefer the user's current statement if it conflicts:\n"
                     f"{memory_context}"
                 )
-            metadata: dict[str, Any] = {"sources": [], "tool_results": []}
+            generated = GeneratedModelText(raw_text="", activity=ModelActivity())
             try:
                 if self.args.provider == "openai":
-                    raw, metadata = self._generate_agent_text(
+                    generated = self._generate_agent_result(
                         instructions + TOOL_INSTRUCTIONS,
                         input_messages,
                         max_output_tokens=self.max_output_tokens,
@@ -979,64 +1017,81 @@ class BridgeState:
                         user_transcript=transcript,
                     )
                 else:
-                    raw = self._generate_text(
-                        instructions,
-                        input_messages,
-                        max_output_tokens=self.max_output_tokens,
-                        model=agent.llm_model,
+                    generated = GeneratedModelText(
+                        raw_text=self._generate_text(
+                            instructions,
+                            input_messages,
+                            max_output_tokens=self.max_output_tokens,
+                            model=agent.llm_model,
+                        )
                     )
             except Exception as exc:
                 # A model/provider failure must not make an accepted user turn vanish.
                 # Convert it into an ordinary, persistable assistant turn while keeping
                 # the full diagnostic server-side.
                 self._emit_exception("bridge.assistant_generation_failed", exc)
-                raw = (
-                    "RF\nI hit an internal error before I could finish that request. "
-                    "Please try again."
+                generated = GeneratedModelText(
+                    raw_text=(
+                        "RF\nI hit an internal error before I could finish that request. "
+                        "Please try again."
+                    )
                 )
-            command, reply = parse_llm_response(raw)
+            parsed = parse_model_reply(generated.raw_text)
             if self.history_turns:
                 self.history.extend(
                     [
                         {"role": "user", "content": transcript, "device_id": device_id},
-                        {"role": "assistant", "content": reply, "device_id": response_device},
+                        {
+                            "role": "assistant",
+                            "content": parsed.reply,
+                            "device_id": response_device,
+                        },
                     ]
                 )
                 self.history = self.history[-(self.history_turns * 2):]
             if self.conversation_store:
                 try:
                     if active_session_id:
-                        stored_metadata = {
-                            key: value
-                            for key, value in {
-                                "sources": metadata.get("sources", []),
-                                "tool_results": metadata.get("tool_results", []),
-                                "model_tool_context": metadata.get("model_tool_context", []),
-                            }.items()
-                            if value
-                        }
+                        stored_metadata = generated.activity.to_storage_metadata()
                         self.conversation_store.append_exchange(
                             active_session_id,
                             device_id,
                             transcript,
                             response_device,
-                            reply,
+                            parsed.reply,
                             assistant_metadata=stored_metadata or None,
                         )
-                        persistence = self._persistence_result(
-                            "persisted", session_id=active_session_id
+                        persistence = self._make_persistence_result(
+                            PersistenceStatus.PERSISTED,
+                            session_id=active_session_id,
                         )
-                    elif persistence.get("status") != "failed":
-                        persistence = self._persistence_result("failed")
+                    elif persistence.status is not PersistenceStatus.FAILED:
+                        persistence = self._make_persistence_result(PersistenceStatus.FAILED)
                 except Exception as exc:  # Preserve a live reply if storage is temporarily unavailable.
                     self._emit_exception("bridge.conversation_persistence_failed", exc, level="warning")
-                    persistence = self._persistence_result(
-                        "failed", session_id=active_session_id
+                    persistence = self._make_persistence_result(
+                        PersistenceStatus.FAILED,
+                        session_id=active_session_id,
                     )
-            metadata["persistence"] = persistence
         if self.conversation_backend != "supabase":
-            self.extract_and_store_memories(transcript, reply)
-        return command, reply, metadata
+            self.extract_and_store_memories(transcript, parsed.reply)
+        return AssistantResult(
+            parsed=parsed,
+            activity=generated.activity,
+            persistence=persistence,
+        )
+
+    def _make_persistence_result(
+        self,
+        status: PersistenceStatus | str,
+        *,
+        session_id: str = "",
+    ) -> PersistenceResult:
+        return PersistenceResult.create(
+            status,
+            backend=getattr(self, "conversation_backend", "local"),
+            session_id=session_id or None,
+        )
 
     def _persistence_result(
         self,
@@ -1044,26 +1099,8 @@ class BridgeState:
         *,
         session_id: str = "",
     ) -> dict[str, Any]:
-        result: dict[str, Any] = {
-            "status": status,
-            "backend": getattr(self, "conversation_backend", "local"),
-            "session_id": session_id or None,
-        }
-        if status == "failed":
-            result.update(
-                {
-                    "error_code": "conversation_write_failed",
-                    "message": (
-                        "Sphere answered, but this exchange could not be saved. "
-                        "Copy anything important and retry."
-                    ),
-                }
-            )
-        elif status == "skipped":
-            result["message"] = "Conversation persistence is skipped in dry-run mode."
-        elif status == "not_configured":
-            result["message"] = "Conversation persistence is not configured."
-        return result
+        """Compatibility adapter for legacy response construction and tests."""
+        return self._make_persistence_result(status, session_id=session_id).to_legacy_dict()
 
     def _prepare_active_session(self) -> str:
         if not self.conversation_store:
@@ -1156,6 +1193,26 @@ class BridgeState:
         origin_device_id: str,
         user_transcript: str,
     ) -> tuple[str, dict[str, Any]]:
+        """Compatibility adapter for the former raw-text/dict model handoff."""
+        return self._generate_agent_result(
+            instructions,
+            input_messages,
+            max_output_tokens=max_output_tokens,
+            model=model,
+            origin_device_id=origin_device_id,
+            user_transcript=user_transcript,
+        ).to_legacy_tuple()
+
+    def _generate_agent_result(
+        self,
+        instructions: str,
+        input_messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int,
+        model: str,
+        origin_device_id: str,
+        user_transcript: str,
+    ) -> GeneratedModelText:
         """Run a bounded Responses tool loop for normal assistant turns only."""
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
@@ -1212,7 +1269,7 @@ class BridgeState:
             origin_device_id=origin_device_id,
             user_transcript=user_transcript,
         )
-        metadata: dict[str, Any] = {"sources": [], "tool_results": []}
+        activity = ModelActivity()
         request_options: dict[str, Any] = {
             "model": model,
             "instructions": instructions,
@@ -1240,16 +1297,19 @@ class BridgeState:
             )
         except Exception as exc:
             self._emit_exception("bridge.initial_agent_response_failed", exc)
-            return (
-                "RF\nI hit an internal error before I could finish that request. Please try again.",
-                metadata,
+            return GeneratedModelText(
+                raw_text="RF\nI hit an internal error before I could finish that request. Please try again.",
+                activity=activity,
             )
-        self._collect_response_sources(response, metadata["sources"])
-        self._record_web_search_activity(response, metadata)
+        self._collect_response_sources(response, activity.sources)
+        self._record_web_search_activity(response, activity)
         for _ in range(self.max_tool_rounds):
             calls = [item for item in getattr(response, "output", []) if self._item_field(item, "type") == "function_call"]
             if not calls:
-                return str(getattr(response, "output_text", "") or "").strip(), metadata
+                return GeneratedModelText(
+                    raw_text=str(getattr(response, "output_text", "") or "").strip(),
+                    activity=activity,
+                )
             outputs: list[dict[str, Any]] = []
             for call in calls:
                 name = str(self._item_field(call, "name") or "")
@@ -1260,11 +1320,9 @@ class BridgeState:
                     result = executor.execute(name, arguments, call_id=call_id)
                 except Exception as exc:  # Return bounded tool errors so Sphere can explain them.
                     result = {"ok": False, "error": str(exc)}
-                metadata["tool_results"].append(
-                    self._public_tool_result(name, result, arguments)
-                )
-                metadata.setdefault("model_tool_context", []).append(
-                    self._private_tool_context(name, result, arguments)
+                activity.tool_results.append(self._public_tool_activity(name, result, arguments))
+                activity.model_tool_context.append(
+                    self._model_tool_context(name, result, arguments)
                 )
                 outputs.append(
                     {
@@ -1284,22 +1342,26 @@ class BridgeState:
                 response = self.openai_client.responses.create(**followup_options)
             except Exception as exc:
                 self._emit_exception("bridge.agent_followup_failed", exc)
-                return (
-                    "RF\nI completed the tool attempts shown above, but hit an internal error "
-                    "before I could finish replying. Please try again.",
-                    metadata,
+                return GeneratedModelText(
+                    raw_text=(
+                        "RF\nI completed the tool attempts shown above, but hit an internal error "
+                        "before I could finish replying. Please try again."
+                    ),
+                    activity=activity,
                 )
-            self._collect_response_sources(response, metadata["sources"])
-            self._record_web_search_activity(response, metadata)
+            self._collect_response_sources(response, activity.sources)
+            self._record_web_search_activity(response, activity)
         self._emit_event(
             "bridge.tool_round_limit_reached",
             level="warning",
             count=self.max_tool_rounds,
         )
-        return (
-            "RF\nI completed the tool attempts shown above, but reached my per-message "
-            "tool limit before I could finish replying. Send a short follow-up and I’ll continue.",
-            metadata,
+        return GeneratedModelText(
+            raw_text=(
+                "RF\nI completed the tool attempts shown above, but reached my per-message "
+                "tool limit before I could finish replying. Send a short follow-up and I’ll continue."
+            ),
+            activity=activity,
         )
 
     @staticmethod
@@ -1308,14 +1370,23 @@ class BridgeState:
         result: dict[str, Any],
         arguments: dict[str, Any],
     ) -> dict[str, str]:
+        """Compatibility adapter for persisted legacy metadata."""
+        return BridgeState._model_tool_context(name, result, arguments).to_legacy_dict()
+
+    @staticmethod
+    def _model_tool_context(
+        name: str,
+        result: dict[str, Any],
+        arguments: dict[str, Any],
+    ) -> ModelToolContext:
         """Persist exactly the bounded data already shown to the model this turn."""
         arguments_json = json.dumps(arguments, ensure_ascii=False, default=str)
         output_json = json.dumps(result, ensure_ascii=False, default=str)
-        return {
-            "name": name[:80],
-            "arguments": arguments_json[:4_000],
-            "output": output_json[:32_000],
-        }
+        return ModelToolContext(
+            name=name[:80],
+            arguments=arguments_json[:4_000],
+            output=output_json[:32_000],
+        )
 
     @staticmethod
     def _public_tool_result(
@@ -1323,29 +1394,35 @@ class BridgeState:
         result: dict[str, Any],
         arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Compatibility adapter for legacy tool-activity dictionaries."""
+        return BridgeState._public_tool_activity(name, result, arguments).to_legacy_dict()
+
+    @staticmethod
+    def _public_tool_activity(
+        name: str,
+        result: dict[str, Any],
+        arguments: dict[str, Any] | None = None,
+    ) -> ToolActivity:
         """Return audit metadata without leaking private memory contents to clients."""
         arguments = arguments or {}
-        summary: dict[str, Any] = {
-            "name": name,
-            "ok": bool(result.get("ok")),
-            "summary": BridgeState._tool_activity_summary(name, result, arguments),
-        }
+        ok = bool(result.get("ok"))
+        details: dict[str, Any] = {}
         if "created" in result:
-            summary["created"] = bool(result.get("created"))
+            details["created"] = bool(result.get("created"))
         if "saved" in result:
-            summary["saved"] = bool(result.get("saved"))
+            details["saved"] = bool(result.get("saved"))
         if result.get("confirmation_required"):
-            summary["confirmation_required"] = True
-            summary["sensitive_categories"] = list(result.get("sensitive_categories", []))
+            details["confirmation_required"] = True
+            details["sensitive_categories"] = list(result.get("sensitive_categories", []))
         memory = result.get("memory")
         if isinstance(memory, dict) and memory.get("id"):
-            summary["memory_id"] = str(memory["id"])
+            details["memory_id"] = str(memory["id"])
         memories = result.get("memories")
         if isinstance(memories, list):
-            summary["match_count"] = len(memories)
+            details["match_count"] = len(memories)
         actions = result.get("actions")
         if isinstance(actions, list):
-            summary["action_ids"] = [
+            details["action_ids"] = [
                 str(item.get("action", {}).get("id"))
                 for item in actions
                 if isinstance(item, dict)
@@ -1354,10 +1431,15 @@ class BridgeState:
             ]
         bodies = result.get("bodies")
         if name == "sphere_status" and isinstance(bodies, list):
-            summary["body_count"] = len(bodies)
-        if not summary["ok"] and result.get("error"):
-            summary["error"] = BridgeState._public_tool_error(name, result.get("error"))
-        return summary
+            details["body_count"] = len(bodies)
+        if not ok and result.get("error"):
+            details["error"] = BridgeState._public_tool_error(name, result.get("error"))
+        return ToolActivity(
+            name=name,
+            ok=ok,
+            summary=BridgeState._tool_activity_summary(name, result, arguments),
+            details=details,
+        )
 
     @staticmethod
     def _public_tool_error(name: str, error: Any) -> str:
@@ -1445,7 +1527,7 @@ class BridgeState:
     def _record_web_search_activity(
         cls,
         response: Any,
-        metadata: dict[str, Any],
+        activity: ModelActivity,
     ) -> None:
         calls = sum(
             1
@@ -1453,17 +1535,20 @@ class BridgeState:
             if cls._item_field(item, "type") == "web_search_call"
         )
         for _ in range(calls):
-            metadata["tool_results"].append(
-                cls._public_tool_result(
+            activity.tool_results.append(
+                cls._public_tool_activity(
                     "web_search",
-                    {"ok": True, "source_count": len(metadata.get("sources", []))},
+                    {"ok": True, "source_count": len(activity.sources)},
                     {},
                 )
             )
-            metadata.setdefault("model_tool_context", []).append(
-                cls._private_tool_context(
+            activity.model_tool_context.append(
+                cls._model_tool_context(
                     "web_search",
-                    {"ok": True, "sources": metadata.get("sources", [])},
+                    {
+                        "ok": True,
+                        "sources": [source.to_legacy_dict() for source in activity.sources],
+                    },
                     {},
                 )
             )
@@ -1473,8 +1558,12 @@ class BridgeState:
         return item.get(field) if isinstance(item, dict) else getattr(item, field, None)
 
     @classmethod
-    def _collect_response_sources(cls, response: Any, destination: list[dict[str, str]]) -> None:
-        seen = {source.get("url") for source in destination}
+    def _collect_response_sources(
+        cls,
+        response: Any,
+        destination: list[SourceReference],
+    ) -> None:
+        seen = {source.url for source in destination}
         for item in getattr(response, "output", []) or []:
             if cls._item_field(item, "type") == "web_search_call":
                 action = cls._item_field(item, "action")
@@ -1482,14 +1571,22 @@ class BridgeState:
                 for source in sources:
                     url = str(cls._item_field(source, "url") or "").strip()
                     if url and url not in seen:
-                        destination.append({"url": url, "title": str(cls._item_field(source, "title") or url)})
+                        destination.append(
+                            SourceReference(
+                                url=url,
+                                title=str(cls._item_field(source, "title") or url),
+                            )
+                        )
                         seen.add(url)
             for content in cls._item_field(item, "content") or []:
                 for annotation in cls._item_field(content, "annotations") or []:
                     url = str(cls._item_field(annotation, "url") or "").strip()
                     if url and url not in seen:
                         destination.append(
-                            {"url": url, "title": str(cls._item_field(annotation, "title") or url)}
+                            SourceReference(
+                                url=url,
+                                title=str(cls._item_field(annotation, "title") or url),
+                            )
                         )
                         seen.add(url)
 
@@ -1761,28 +1858,44 @@ class BridgeState:
         saved_wav: Path | None = None,
         wav_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        command, reply, metadata = self.ask_llm_with_metadata(
-            transcript,
-            device_id=device_id,
-            response_device_id=response_device_id,
+        """Compatibility adapter for callers that still consume a response dictionary."""
+        return self.answer_query(
+            QueryInput(
+                transcript=transcript,
+                device_id=device_id,
+                response_device_id=response_device_id,
+                audio_bytes=audio_bytes,
+                saved_wav=saved_wav,
+                wav_info=wav_info,
+            )
+        ).to_legacy_dict()
+
+    def answer_query(self, query: QueryInput) -> QueryResult:
+        """Answer one validated query using typed model and persistence results."""
+        if not isinstance(query, QueryInput):
+            raise TypeError("query must be a QueryInput")
+        assistant = self.generate_assistant_result(
+            query.transcript,
+            device_id=query.device_id,
+            response_device_id=query.response_device_id,
         )
-        response_device = response_device_id or device_id
+        response_device = query.response_device_id or query.device_id
         transport_reply = (
-            markdown_to_plain_text(reply) if response_device == "wearabllm-esp32" else reply
+            markdown_to_plain_text(assistant.reply)
+            if response_device == "wearabllm-esp32"
+            else assistant.reply
         )
-        return {
-            "command": command,
-            "reply": transport_reply,
-            "transcript": transcript,
-            "audio_bytes": audio_bytes,
-            "saved_wav": str(saved_wav) if saved_wav else None,
-            "wav_info": wav_info,
-            "sources": metadata.get("sources", []),
-            "tool_results": metadata.get("tool_results", []),
-            "persistence": metadata.get(
-                "persistence", self._persistence_result("not_configured")
-            ),
-        }
+        return QueryResult(
+            command=assistant.command,
+            reply=transport_reply,
+            transcript=query.transcript,
+            audio_bytes=query.audio_bytes,
+            saved_wav=str(query.saved_wav) if query.saved_wav else None,
+            wav_info=query.wav_info,
+            sources=tuple(assistant.activity.sources),
+            tool_results=tuple(assistant.activity.tool_results),
+            persistence=assistant.persistence,
+        )
 
     def create_interaction(
         self,
@@ -1793,28 +1906,48 @@ class BridgeState:
         idempotency_key: str = "",
         response_device_id: str | None = None,
     ) -> dict[str, Any]:
+        """Compatibility adapter for callers that still consume a response dictionary."""
+        return self.create_interaction_result(
+            InteractionInput(
+                transcript=transcript,
+                origin_device_id=origin_device_id,
+                target_device_id=target_device_id,
+                idempotency_key=idempotency_key,
+                response_device_id=response_device_id,
+            )
+        ).to_legacy_dict()
+
+    def create_interaction_result(self, request: InteractionInput) -> InteractionResult:
         """Answer a prompt once, then queue the physical response for its target."""
-        origin = validate_device_id(origin_device_id)
-        target = validate_device_id(target_device_id)
-        response_device = validate_device_id(response_device_id) if response_device_id else origin
-        payload = self.answer_transcript(
-            transcript,
-            device_id=origin,
-            response_device_id=response_device,
+        if not isinstance(request, InteractionInput):
+            raise TypeError("request must be an InteractionInput")
+        origin = validate_device_id(request.origin_device_id)
+        target = validate_device_id(request.target_device_id)
+        response_device = (
+            validate_device_id(request.response_device_id)
+            if request.response_device_id
+            else origin
+        )
+        query = self.answer_query(
+            QueryInput(
+                transcript=request.transcript,
+                device_id=origin,
+                response_device_id=response_device,
+            )
         )
         action, created = self.action_queue.create(
             origin_device_id=origin,
             target_device_id=target,
-            transcript=str(payload["transcript"]),
-            command=str(payload["command"]),
+            transcript=query.transcript,
+            command=query.command,
             reply=(
-                markdown_to_plain_text(str(payload["reply"]))
+                markdown_to_plain_text(query.reply)
                 if target == "wearabllm-esp32"
-                else str(payload["reply"])
+                else query.reply
             ),
-            idempotency_key=idempotency_key,
+            idempotency_key=request.idempotency_key,
         )
-        return {**payload, "action": action, "action_created": created}
+        return InteractionResult(query=query, action=action, action_created=created)
 
     def synthesize_tts_wav(self, text: str) -> bytes:
         text = markdown_to_plain_text(text)
@@ -1949,31 +2082,40 @@ class BridgeState:
 
 
 def parse_llm_response(raw: str) -> tuple[str, str]:
+    """Compatibility adapter for the former tuple parser contract."""
+    return parse_model_reply(raw).to_legacy_tuple()
+
+
+def parse_model_reply(raw: str) -> ParsedModelReply:
+    """Parse provider output into the bridge's validated model reply contract."""
     stripped = strip_markdown_fence(raw.strip())
     json_response = parse_json_llm_response(stripped)
     if json_response:
-        return json_response
+        return ParsedModelReply.from_legacy_tuple(json_response)
     json_response = parse_embedded_json_llm_response(stripped)
     if json_response:
-        return json_response
+        return ParsedModelReply.from_legacy_tuple(json_response)
 
     raw_lines = stripped.splitlines()
     first_index = next((index for index, line in enumerate(raw_lines) if line.strip()), None)
     if first_index is None:
-        return "BS", stripped
+        return ParsedModelReply(command="BS", reply=stripped)
 
     first = normalize_labeled_value(raw_lines[first_index].strip())
     if first.upper() in LED_COMMANDS:
-        return first.upper(), clean_reply("\n".join(raw_lines[first_index + 1 :])) or stripped
+        return ParsedModelReply(
+            command=first.upper(),
+            reply=clean_reply("\n".join(raw_lines[first_index + 1 :])) or stripped,
+        )
 
     match = re.search(r"\b(GS|GP|GC|RS|RF|YP|BS|PS|PP)\b", stripped.upper())
     if match:
         command = match.group(1)
         cleaned = clean_reply(re.sub(r"\b(GS|GP|GC|RS|RF|YP|BS|PS|PP)\b", "", stripped, count=1))
         cleaned = re.sub(r"\b(?:led|command|code)\s*[:=-]\s*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return command, cleaned or stripped
+        return ParsedModelReply(command=command, reply=cleaned or stripped)
 
-    return "BS", stripped
+    return ParsedModelReply(command="BS", reply=stripped)
 
 
 def normalize_led_command(raw: str) -> str:
@@ -2522,19 +2664,22 @@ def make_handler(
                 saved_path = state.save_debug_wav(wav_bytes)
                 wav_info = inspect_wav(wav_bytes)
                 transcript = state.transcribe(wav_bytes)
-                payload = state.answer_transcript(
-                    transcript,
-                    device_id=device_id,
-                    audio_bytes=len(wav_bytes),
-                    saved_wav=saved_path,
-                    wav_info=wav_info,
+                result = state.answer_query(
+                    QueryInput(
+                        transcript=transcript,
+                        device_id=device_id,
+                        audio_bytes=len(wav_bytes),
+                        saved_wav=saved_path,
+                        wav_info=wav_info,
+                    )
                 )
+                payload = result.to_legacy_dict()
                 state.record_capture(
                     wav_bytes=len(wav_bytes),
                     saved_wav=saved_path,
                     wav_info=wav_info,
                     transcript=transcript,
-                    command=str(payload.get("command", "")),
+                    command=result.command,
                 )
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
@@ -2579,11 +2724,14 @@ def make_handler(
                     response_device = validate_device_id(response_device)
                 device_id = self._device_id()
                 state.touch_device(device_id)
-                payload = state.answer_transcript(
-                    transcript,
-                    device_id=device_id,
-                    response_device_id=response_device,
+                result = state.answer_query(
+                    QueryInput(
+                        transcript=transcript,
+                        device_id=device_id,
+                        response_device_id=response_device,
+                    )
                 )
+                payload = result.to_legacy_dict()
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -2620,13 +2768,18 @@ def make_handler(
                 return
             try:
                 state.touch_device(origin)
-                payload = state.create_interaction(
-                    transcript=transcript,
-                    origin_device_id=origin,
-                    target_device_id=target,
-                    idempotency_key=str(request.get("idempotency_key", "")),
-                    response_device_id=str(request.get("response_device_id", "")).strip() or None,
+                result = state.create_interaction_result(
+                    InteractionInput(
+                        transcript=transcript,
+                        origin_device_id=origin,
+                        target_device_id=target,
+                        idempotency_key=str(request.get("idempotency_key", "")),
+                        response_device_id=(
+                            str(request.get("response_device_id", "")).strip() or None
+                        ),
+                    )
                 )
+                payload = result.to_legacy_dict()
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
