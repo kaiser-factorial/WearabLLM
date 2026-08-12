@@ -500,7 +500,31 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(sorted(invalid_wifi), ["error"])
 
-        self.state.configure_device_wifi = Mock(
+        preview_ssid = "preview-private-network"
+        preview_password = "preview-private-password"
+        status, _, preview = self.request_json(
+            "POST",
+            "/v1/device_wifi",
+            body=json.dumps(
+                {
+                    "ssid": preview_ssid,
+                    "password": preview_password,
+                    "preview": True,
+                    "display_enabled": True,
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(preview["preview"])
+        self.assertTrue(preview["ssid_set"])
+        self.assertTrue(preview["password_set"])
+        self.assertNotIn(preview_ssid, json.dumps(preview))
+        self.assertNotIn(preview_password, json.dumps(preview))
+        self.assertNotIn(preview_ssid, "\n".join(self.events))
+        self.assertNotIn(preview_password, "\n".join(self.events))
+
+        self.state.configure_device_wifi_request = Mock(
             return_value={
                 "ok": True,
                 "ssid": wifi_name,

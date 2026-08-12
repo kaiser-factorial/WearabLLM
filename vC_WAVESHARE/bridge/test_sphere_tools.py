@@ -232,12 +232,18 @@ class SphereToolExecutorTest(unittest.TestCase):
         fake_api_key = "sk-proj-" + ("a" * 32)
         memory = Mock()
         pending = PendingMemoryConfirmationStore()
+        audits: list[dict[str, object]] = []
+
+        def audit(operation: str, outcome: str, **fields: object) -> None:
+            audits.append({"operation": operation, "outcome": outcome, **fields})
+
         executor = SphereToolExecutor(
             memory_store=memory,
             action_queue=Mock(),
             pending_memory_confirmations=pending,
             origin_device_id="web-console",
             user_transcript=f"My API key is {fake_api_key}.",
+            audit_sink=audit,
         )
 
         with self.assertRaisesRegex(PermissionError, "credentials"):
@@ -256,6 +262,9 @@ class SphereToolExecutorTest(unittest.TestCase):
 
         memory.remember.assert_not_called()
         self.assertFalse(pending.has_pending())
+        self.assertNotIn(fake_api_key, repr(audits))
+        self.assertEqual(audits[0]["operation"], "memory_mutation")
+        self.assertEqual(audits[0]["outcome"], "rejected")
 
     def test_precise_address_requires_bound_yes_confirmation(self) -> None:
         memory = Mock()

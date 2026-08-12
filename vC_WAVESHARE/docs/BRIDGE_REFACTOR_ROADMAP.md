@@ -440,3 +440,12 @@ Phase 3 implementation and verification evidence is recorded in:
 - `BRIDGE_PHASE3_SERVICE.md`
 - `../bridge/bridge_service.py`
 - `../bridge/test_bridge_service.py`
+
+Phase 4 implementation and verification evidence is recorded in:
+
+- `BRIDGE_PHASE4_POLICY_DEVICE_CONFIG.md`
+- `../bridge/bridge_policy.py`
+- `../bridge/privileged_service.py`
+- `../bridge/device_config.py`
+- `../bridge/test_bridge_policy.py`
+- `../bridge/test_device_config.py`

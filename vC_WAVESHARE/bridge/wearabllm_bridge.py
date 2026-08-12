@@ -37,7 +37,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from action_queue import JsonActionQueue, SupabaseActionQueue, normalize_sensor_manifest, validate_device_id
+from action_queue import JsonActionQueue, SupabaseActionQueue, validate_device_id
 from agent_config import AgentConfig, AgentConfigStore
 from bridge_contracts import (
     AssistantResult,
@@ -55,6 +55,15 @@ from bridge_contracts import (
     ToolActivity,
 )
 from bridge_service import BridgeService
+from bridge_policy import (
+    AuthPrincipal,
+    BridgePolicy,
+    MemoryMutationOutcome,
+    PolicyGrant,
+    PrivilegedOperation,
+    operation_from_value,
+)
+from device_config import DeviceConfigExecutor
 from durable_memory import (
     DEFAULT_CONVERSATION_FILE,
     DEFAULT_MEMORY_FILE,
@@ -74,6 +83,7 @@ from observability import (
     emit_event,
     emit_exception,
 )
+from privileged_service import PrivilegedMutationService
 from source_code import DEFAULT_SOURCE_BUNDLE, SourceCodeStore
 from sphere_tools import (
     PendingMemoryConfirmationStore,
@@ -83,6 +93,7 @@ from sphere_tools import (
     forced_memory_mutation_tool_for_turn,
     function_tools,
     memory_confirmation_decision_for_turn,
+    memory_sensitivity,
     memory_mutation_tools_for_turn,
     parse_function_arguments,
     sensitive_memory_candidate_for_turn,
@@ -277,6 +288,7 @@ class BridgeState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.event_sink = getattr(args, "event_sink", None)
+        self.policy = BridgePolicy(shared_token_grants_admin=True)
         self.openai_client = None
         if OpenAI and args.provider == "openai":
             try:
@@ -482,8 +494,83 @@ class BridgeState:
     def public_agent_config(self) -> dict[str, Any]:
         return self.agent_config.snapshot().public_dict()
 
-    def update_agent_config(self, patch: dict[str, Any]) -> AgentConfig:
-        return self.agent_config.update(patch)
+    def resolve_principal(
+        self,
+        device_id: str,
+        *,
+        authenticated: bool,
+    ) -> AuthPrincipal:
+        return self.policy.principal(device_id, authenticated=authenticated)
+
+    def authorize_admin_operation(
+        self,
+        principal: AuthPrincipal,
+        operation: str | PrivilegedOperation,
+    ) -> PolicyGrant:
+        return self.policy.authorize_admin(principal, operation_from_value(operation))
+
+    def authorize_target_access(
+        self,
+        principal: AuthPrincipal,
+        target_device_id: str,
+        *,
+        operation: PrivilegedOperation = PrivilegedOperation.TARGET_BODY_ACCESS,
+    ) -> PolicyGrant:
+        return self.policy.authorize_target(
+            principal,
+            target_device_id,
+            operation=operation,
+        )
+
+    @staticmethod
+    def _grant_or_internal(
+        grant: PolicyGrant | None,
+        operation: PrivilegedOperation,
+    ) -> PolicyGrant:
+        return grant or BridgePolicy.system_grant(operation)
+
+    def _audit_privileged(
+        self,
+        operation: str,
+        outcome: str,
+        *,
+        device_id: str | None = None,
+        error_code: str | None = None,
+        action_status: str | None = None,
+    ) -> None:
+        self._emit_event(
+            "audit.privileged_operation",
+            level="info" if outcome in {"accepted", "previewed"} else "warning",
+            operation=operation,
+            outcome=outcome,
+            device_id=device_id,
+            error_code=error_code,
+            action_status=action_status,
+        )
+
+    def _privileged_service(self) -> PrivilegedMutationService:
+        return PrivilegedMutationService(
+            config_updater=self.agent_config.update,
+            api_key_replacer=self._replace_openai_api_key_unchecked,
+            device_executor_factory=lambda: DeviceConfigExecutor(
+                helper_path=CONFIGURE_FIRMWARE,
+                working_directory=V3_DIR,
+                runner=subprocess.run,
+            ),
+            audit=self._audit_privileged,
+        )
+
+    def update_agent_config(
+        self,
+        patch: dict[str, Any],
+        *,
+        grant: PolicyGrant | None = None,
+    ) -> AgentConfig:
+        approved = self._grant_or_internal(
+            grant,
+            PrivilegedOperation.ADMIN_CONFIG_UPDATE,
+        )
+        return self._privileged_service().update_agent_config(approved, patch)
 
     def _embed_household_text(self, text: str) -> list[float]:
         """Generate one normalized-size vector without exposing it outside the bridge."""
@@ -567,7 +654,16 @@ class BridgeState:
         model_ids = self._model_ids(self.openai_client.models.list())
         return self._catalog_from_model_ids(model_ids)
 
-    def replace_openai_api_key(self, api_key: str) -> dict[str, Any]:
+    def replace_openai_api_key(
+        self,
+        api_key: str,
+        *,
+        grant: PolicyGrant | None = None,
+    ) -> dict[str, Any]:
+        approved = self._grant_or_internal(grant, PrivilegedOperation.API_KEY_UPDATE)
+        return self._privileged_service().replace_api_key(approved, api_key)
+
+    def _replace_openai_api_key_unchecked(self, api_key: str) -> dict[str, Any]:
         """Validate a new local OpenAI key, retain it in Keychain, and hot-swap the client."""
         if self.args.provider != "openai":
             raise ValueError("API key updates are available only for the OpenAI provider")
@@ -1165,7 +1261,31 @@ class BridgeState:
                 model=getattr(self.args, "memory_model", self.args.llm_model),
             )
             candidates = parse_memory_candidates(raw)
-            return sum(1 for candidate in candidates if self.memory_store.add(candidate))
+            stored = 0
+            policy = getattr(self, "policy", BridgePolicy())
+            for candidate in candidates:
+                blocked, confirmation = memory_sensitivity(candidate)
+                decision = policy.decide_memory_mutation(blocked, confirmation)
+                if decision.outcome is not MemoryMutationOutcome.ALLOW:
+                    self._audit_privileged(
+                        PrivilegedOperation.MEMORY_MUTATION.value,
+                        "rejected",
+                        device_id="local-bridge",
+                        error_code=(
+                            "sensitive_memory_blocked"
+                            if decision.outcome is MemoryMutationOutcome.BLOCK
+                            else "sensitive_memory_confirmation_required"
+                        ),
+                    )
+                    continue
+                if self.memory_store.add(candidate):
+                    stored += 1
+                    self._audit_privileged(
+                        PrivilegedOperation.MEMORY_MUTATION.value,
+                        "accepted",
+                        device_id="local-bridge",
+                    )
+            return stored
         except Exception as exc:  # Durable memory must not break the voice loop.
             self._emit_exception("bridge.durable_extraction_failed", exc, level="warning")
         return 0
@@ -1256,22 +1376,23 @@ class BridgeState:
             and not memory_mutation_tools
             and source_read_requested_for_turn(user_transcript)
         )
-        if force_memory_confirmation:
-            tools = [tool for tool in tools if tool.get("name") == "memory_confirm"]
-        elif force_sensitive_stage:
-            tools = [tool for tool in tools if tool.get("name") == "memory_remember"]
-        elif memory_mutation_tools:
-            tools = [
-                tool
+        policy = getattr(self, "policy", BridgePolicy())
+        eligible_names = policy.eligible_tool_names(
+            (
+                str(tool.get("name"))
                 for tool in tools
-                if tool.get("type") == "function" and tool.get("name") in memory_mutation_tools
-            ]
-        if not self.household_memory_store:
-            tools = [tool for tool in tools if not str(tool.get("name", "")).startswith("memory_")]
-        if not getattr(self, "source_store", None):
-            tools = [tool for tool in tools if not str(tool.get("name", "")).startswith("source_")]
-        web_search_for_turn = self.web_search_enabled and web_search_requested_for_turn(
-            user_transcript
+                if tool.get("type") == "function" and tool.get("name")
+            ),
+            memory_available=bool(self.household_memory_store),
+            source_available=bool(getattr(self, "source_store", None)),
+            memory_mutation_tool_names=memory_mutation_tools,
+            force_memory_confirmation=force_memory_confirmation,
+            force_sensitive_stage=force_sensitive_stage,
+        )
+        tools = [tool for tool in tools if str(tool.get("name")) in eligible_names]
+        web_search_for_turn = policy.web_search_eligible(
+            configured=self.web_search_enabled,
+            requested_for_turn=web_search_requested_for_turn(user_transcript),
         )
         if web_search_for_turn:
             tools.append({"type": "web_search"})
@@ -1284,6 +1405,8 @@ class BridgeState:
             pending_memory_confirmations=getattr(self, "pending_memory_confirmations", None),
             origin_device_id=origin_device_id,
             user_transcript=user_transcript,
+            policy=policy,
+            audit_sink=self._audit_privileged,
         )
         activity = ModelActivity()
         request_options: dict[str, Any] = {
@@ -1631,24 +1754,90 @@ class BridgeState:
         *,
         requesting_device_id: str,
         target_device_id: str,
+        grant: PolicyGrant | None = None,
     ) -> dict[str, Any] | None:
+        approved = grant or self.policy.authorize_target(
+            self.policy.principal(requesting_device_id, authenticated=True),
+            target_device_id,
+        )
+        BridgePolicy.require_grant(
+            approved,
+            PrivilegedOperation.TARGET_BODY_ACCESS,
+        )
         return self._service().claim_action(
-            requesting_device_id=requesting_device_id,
             target_device_id=target_device_id,
         )
 
-    def acknowledge_action(self, **kwargs: Any) -> dict[str, Any]:
-        return self._service().acknowledge_action(**kwargs)
+    def acknowledge_action(
+        self,
+        *,
+        requesting_device_id: str,
+        target_device_id: str,
+        action_id: str,
+        status: str,
+        error: str = "",
+        result: dict[str, Any] | None = None,
+        grant: PolicyGrant | None = None,
+    ) -> dict[str, Any]:
+        approved = grant or self.policy.authorize_target(
+            self.policy.principal(requesting_device_id, authenticated=True),
+            target_device_id,
+            operation=PrivilegedOperation.ACTION_ACKNOWLEDGE,
+        )
+        BridgePolicy.require_grant(
+            approved,
+            PrivilegedOperation.ACTION_ACKNOWLEDGE,
+        )
+        try:
+            action = self._service().acknowledge_action(
+                target_device_id=target_device_id,
+                action_id=action_id,
+                status=status,
+                error=error,
+                result=result,
+            )
+        except LookupError:
+            self._audit_privileged(
+                PrivilegedOperation.ACTION_ACKNOWLEDGE.value,
+                "rejected",
+                device_id=approved.principal_id,
+                error_code="action_not_found",
+            )
+            raise
+        except ValueError:
+            self._audit_privileged(
+                PrivilegedOperation.ACTION_ACKNOWLEDGE.value,
+                "rejected",
+                device_id=approved.principal_id,
+                error_code="invalid_acknowledgement",
+            )
+            raise
+        except Exception:
+            self._audit_privileged(
+                PrivilegedOperation.ACTION_ACKNOWLEDGE.value,
+                "failed",
+                device_id=approved.principal_id,
+                error_code="action_acknowledgement_failed",
+            )
+            raise
+        self._audit_privileged(
+            PrivilegedOperation.ACTION_ACKNOWLEDGE.value,
+            "accepted",
+            device_id=approved.principal_id,
+            action_status=str(action.get("status", "")),
+        )
+        return action
 
     def assert_target_device(
         self,
         requesting_device_id: str,
         target_device_id: str,
     ) -> str:
-        return self._service().assert_target_device(
-            requesting_device_id,
+        grant = self.policy.authorize_target(
+            self.policy.principal(requesting_device_id, authenticated=True),
             target_device_id,
         )
+        return str(grant.target_device_id)
 
     def start_new_conversation(self) -> dict[str, Any]:
         """Compatibility facade for service-owned conversation rotation."""
@@ -1784,92 +1973,58 @@ class BridgeState:
         led_self_test: bool | None = None,
         display_enabled: bool | None = None,
         display_self_test: bool | None = None,
+        *,
+        grant: PolicyGrant | None = None,
     ) -> dict[str, Any]:
-        if not getattr(self.args, "allow_device_config", False):
-            raise PermissionError("device Wi-Fi config endpoint is disabled")
-        if not ssid or not password:
-            raise ValueError("ssid and password are required")
-        if ptt_active_level is not None and ptt_active_level not in (0, 1):
-            raise ValueError("ptt_active_level must be 0 or 1")
-        if ptt_debounce_ms is not None and not 0 <= ptt_debounce_ms <= 250:
-            raise ValueError("ptt_debounce_ms must be between 0 and 250")
-        if ptt_pull and ptt_pull not in ("none", "up", "down"):
-            raise ValueError("ptt_pull must be one of: none, up, down")
-        if audio_out_volume is not None and not 0 <= audio_out_volume <= 100:
-            raise ValueError("audio_out_volume must be between 0 and 100")
-        if tts_max_bytes is not None and not 4096 <= tts_max_bytes <= 1048576:
-            raise ValueError("tts_max_bytes must be between 4096 and 1048576")
-        if not CONFIGURE_FIRMWARE.exists():
-            raise RuntimeError(f"configure helper not found: {CONFIGURE_FIRMWARE}")
-
-        env = os.environ.copy()
-        env["WEARABLLM_WIFI_SSID"] = ssid
-        env["WEARABLLM_WIFI_PASSWORD"] = password
-        if bssid:
-            env["WEARABLLM_WIFI_BSSID"] = bssid
-        command = [str(CONFIGURE_FIRMWARE)]
-        if ptt_gpio is not None:
-            command.extend(["--ptt-gpio", str(ptt_gpio)])
-        if ptt_active_level is not None:
-            command.extend(["--ptt-active-level", str(ptt_active_level)])
-        if ptt_debounce_ms is not None:
-            command.extend(["--ptt-debounce-ms", str(ptt_debounce_ms)])
-        if ptt_pull:
-            command.extend(["--ptt-pull", ptt_pull])
-        if audio_out_enabled is True:
-            command.append("--enable-audio-out")
-        elif audio_out_enabled is False:
-            command.append("--disable-audio-out")
-        if audio_out_volume is not None:
-            command.extend(["--audio-out-volume", str(audio_out_volume)])
-        if tts_enabled is True:
-            command.append("--enable-tts")
-        elif tts_enabled is False:
-            command.append("--disable-tts")
-        if tts_max_bytes is not None:
-            command.extend(["--tts-max-bytes", str(tts_max_bytes)])
-        if led_self_test is True:
-            command.append("--enable-led-self-test")
-        elif led_self_test is False:
-            command.append("--disable-led-self-test")
-        if display_enabled is True:
-            command.append("--enable-display")
-        elif display_enabled is False:
-            command.append("--disable-display")
-        if display_self_test is True:
-            command.append("--enable-display-self-test")
-        elif display_self_test is False:
-            command.append("--disable-display-self-test")
-        result = subprocess.run(
-            command,
-            cwd=str(V3_DIR),
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
+        return self.configure_device_wifi_request(
+            {
+                "ssid": ssid,
+                "password": password,
+                "bssid": bssid,
+                "ptt_gpio": ptt_gpio,
+                "ptt_active_level": ptt_active_level,
+                "ptt_debounce_ms": ptt_debounce_ms,
+                "ptt_pull": ptt_pull,
+                "audio_out_enabled": audio_out_enabled,
+                "audio_out_volume": audio_out_volume,
+                "tts_enabled": tts_enabled,
+                "tts_max_bytes": tts_max_bytes,
+                "led_self_test": led_self_test,
+                "display_enabled": display_enabled,
+                "display_self_test": display_self_test,
+            },
+            grant=grant,
+            preview=False,
         )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            raise RuntimeError(detail or f"configure_firmware.py exited {result.returncode}")
 
-        return {
-            "ok": True,
-            "ssid": ssid,
-            "bssid": bssid or None,
-            "password_set": True,
-            "ptt_gpio": ptt_gpio,
-            "ptt_active_level": ptt_active_level,
-            "ptt_debounce_ms": ptt_debounce_ms,
-            "ptt_pull": ptt_pull or None,
-            "audio_out_enabled": audio_out_enabled,
-            "audio_out_volume": audio_out_volume,
-            "tts_enabled": tts_enabled,
-            "tts_max_bytes": tts_max_bytes,
-            "led_self_test": led_self_test,
-            "display_enabled": display_enabled,
-            "display_self_test": display_self_test,
-            "message": "Updated ignored firmware/sdkconfig. Rebuild and flash firmware for changes to take effect.",
-        }
+    def configure_device_wifi_request(
+        self,
+        payload: dict[str, Any],
+        *,
+        grant: PolicyGrant | None = None,
+        preview: bool = False,
+    ) -> dict[str, Any]:
+        approved = self._grant_or_internal(
+            grant,
+            PrivilegedOperation.DEVICE_CONFIG_UPDATE,
+        )
+        BridgePolicy.require_grant(
+            approved,
+            PrivilegedOperation.DEVICE_CONFIG_UPDATE,
+        )
+        if not preview and not getattr(self.args, "allow_device_config", False):
+            self._audit_privileged(
+                PrivilegedOperation.DEVICE_CONFIG_UPDATE.value,
+                "denied",
+                device_id=approved.principal_id,
+                error_code="device_config_disabled",
+            )
+            raise PermissionError("device Wi-Fi config endpoint is disabled")
+        return self._privileged_service().configure_device(
+            approved,
+            payload,
+            preview=preview,
+        )
 
 
 def parse_llm_response(raw: str) -> tuple[str, str]:

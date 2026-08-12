@@ -94,6 +94,9 @@ class TransportBoundaryTest(unittest.TestCase):
         self.assertNotIn("json.loads(self.rfile", bridge)
         self.assertNotIn("state.action_queue", transport)
         self.assertNotIn("state.conversation_store", transport)
+        self.assertNotIn("subprocess", transport)
+        self.assertIn("authorize_admin_operation", transport)
+        self.assertIn("authorize_target_access", transport)
 
 
 if __name__ == "__main__":

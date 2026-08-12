@@ -19,6 +19,7 @@ from typing import Any, Pattern
 
 from action_queue import validate_device_id
 from bridge_contracts import InteractionInput, QueryInput
+from bridge_policy import PrivilegedOperation
 from observability import (
     REQUEST_ID_HEADER,
     emit_debug_content,
@@ -32,6 +33,7 @@ from observability import (
 class Route:
     endpoint: str
     auth_required: bool = True
+    privileged_operation: PrivilegedOperation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +41,7 @@ class PatternRoute:
     pattern: Pattern[str]
     endpoint: str
     auth_required: bool = True
+    privileged_operation: PrivilegedOperation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +49,19 @@ class RouteMatch:
     endpoint: str
     path_arguments: tuple[str, ...] = ()
     auth_required: bool = True
+    privileged_operation: PrivilegedOperation | None = None
 
 
 GET_ROUTES = {
     "/health": Route("_handle_health", auth_required=False),
-    "/v1/admin/config": Route("_handle_get_admin_config"),
-    "/v1/admin/catalog": Route("_handle_admin_catalog"),
+    "/v1/admin/config": Route(
+        "_handle_get_admin_config",
+        privileged_operation=PrivilegedOperation.ADMIN_READ,
+    ),
+    "/v1/admin/catalog": Route(
+        "_handle_admin_catalog",
+        privileged_operation=PrivilegedOperation.ADMIN_READ,
+    ),
     "/v1/interactions": Route("_handle_list_interactions"),
     "/v1/sensors": Route("_handle_list_sensors"),
     "/v1/conversation": Route("_handle_conversation_snapshot"),
@@ -71,10 +81,19 @@ POST_ROUTES = {
     "/v1/tts": Route("_handle_tts"),
     "/v1/heartbeat": Route("_handle_heartbeat"),
     "/v1/session/reset": Route("_handle_session_reset"),
-    "/v1/device_wifi": Route("_handle_device_wifi"),
+    "/v1/device_wifi": Route(
+        "_handle_device_wifi",
+        privileged_operation=PrivilegedOperation.DEVICE_CONFIG_UPDATE,
+    ),
     "/v1/interactions": Route("_handle_interaction"),
-    "/v1/admin/config": Route("_handle_admin_config"),
-    "/v1/admin/api-key": Route("_handle_admin_api_key"),
+    "/v1/admin/config": Route(
+        "_handle_admin_config",
+        privileged_operation=PrivilegedOperation.ADMIN_CONFIG_UPDATE,
+    ),
+    "/v1/admin/api-key": Route(
+        "_handle_admin_api_key",
+        privileged_operation=PrivilegedOperation.API_KEY_UPDATE,
+    ),
 }
 POST_PATTERN_ROUTES = (
     PatternRoute(
@@ -108,7 +127,11 @@ def match_route(method: str, path: str) -> RouteMatch | None:
     )
     route = routes.get(path)
     if route:
-        return RouteMatch(route.endpoint, auth_required=route.auth_required)
+        return RouteMatch(
+            route.endpoint,
+            auth_required=route.auth_required,
+            privileged_operation=route.privileged_operation,
+        )
     for candidate in pattern_routes:
         matched = candidate.pattern.fullmatch(path)
         if matched:
@@ -116,6 +139,7 @@ def match_route(method: str, path: str) -> RouteMatch | None:
                 candidate.endpoint,
                 path_arguments=matched.groups(),
                 auth_required=candidate.auth_required,
+                privileged_operation=candidate.privileged_operation,
             )
     return None
 
@@ -175,6 +199,9 @@ def make_handler(
             self._request_route = urllib.parse.urlsplit(self.path).path
             length_raw = self.headers.get("Content-Length", "")
             self._request_bytes = int(length_raw) if length_raw.isdecimal() else None
+            self._request_authenticated = False
+            self._request_principal = None
+            self._privilege_grant = None
 
         def _emit_event(self, event: str, *, level: str = "info", **fields: Any) -> None:
             emit_event(event, level=level, sink=event_sink, **fields)
@@ -260,8 +287,10 @@ def make_handler(
         def _dispatch_route(self, method: str) -> None:
             parsed = urllib.parse.urlsplit(self.path)
             matched = match_route(method, parsed.path)
+            authorized = self._is_authorized()
+            self._request_authenticated = authorized
             if matched is None:
-                if method == "POST" and not self._is_authorized():
+                if method == "POST" and not authorized:
                     self._send_error_json(
                         HTTPStatus.UNAUTHORIZED,
                         "Invalid or missing device token",
@@ -269,14 +298,42 @@ def make_handler(
                     return
                 self._send_error_json(HTTPStatus.NOT_FOUND, "Unknown endpoint")
                 return
-            if matched.auth_required and not self._is_authorized():
+            if matched.auth_required and not authorized:
                 self._send_error_json(
                     HTTPStatus.UNAUTHORIZED,
                     "Invalid or missing device token",
                 )
                 return
+            if matched.privileged_operation is not None:
+                try:
+                    self._privilege_grant = state.authorize_admin_operation(
+                        self._principal(),
+                        matched.privileged_operation,
+                    )
+                except PermissionError as exc:
+                    self._audit(
+                        matched.privileged_operation.value,
+                        "denied",
+                        status=HTTPStatus.FORBIDDEN,
+                        error_code="policy_denied",
+                    )
+                    self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
+                    return
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
             endpoint = getattr(self, matched.endpoint)
             endpoint(parsed, *matched.path_arguments)
+
+        def _principal(self) -> Any:
+            principal = getattr(self, "_request_principal", None)
+            if principal is None:
+                principal = state.resolve_principal(
+                    self._device_id(),
+                    authenticated=bool(getattr(self, "_request_authenticated", False)),
+                )
+                self._request_principal = principal
+            return principal
 
         def _handle_health(self, _parsed: urllib.parse.SplitResult) -> None:
             self._send_json(
@@ -350,9 +407,14 @@ def make_handler(
             target_device_id: str,
         ) -> None:
             try:
+                grant = state.authorize_target_access(
+                    self._principal(),
+                    target_device_id,
+                )
                 action = state.claim_action(
                     requesting_device_id=self._device_id(),
                     target_device_id=target_device_id,
+                    grant=grant,
                 )
             except PermissionError as exc:
                 self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
@@ -414,16 +476,14 @@ def make_handler(
             target_device_id: str,
         ) -> None:
             try:
-                if self._device_id() != target_device_id:
-                    self._send_error_json(
-                        HTTPStatus.FORBIDDEN,
-                        "Device ID does not match manifest target",
-                    )
-                    return
+                state.authorize_target_access(self._principal(), target_device_id)
                 request = self._read_json_request(max_bytes=16_384)
                 if request is None:
                     return
                 manifest = state.register_sensor_manifest(target_device_id, request)
+            except PermissionError as exc:
+                self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
+                return
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -638,7 +698,11 @@ def make_handler(
         ) -> None:
             try:
                 requesting_device_id = self._device_id()
-                state.assert_target_device(requesting_device_id, target_device_id)
+                grant = state.authorize_target_access(
+                    self._principal(),
+                    target_device_id,
+                    operation=PrivilegedOperation.ACTION_ACKNOWLEDGE,
+                )
             except PermissionError as exc:
                 self._audit(
                     "action_acknowledge",
@@ -678,6 +742,7 @@ def make_handler(
                         if isinstance(request.get("result"), dict)
                         else None
                     ),
+                    grant=grant,
                 )
             except PermissionError as exc:
                 self._audit(
@@ -725,7 +790,10 @@ def make_handler(
                 )
                 return
             try:
-                config = state.update_agent_config(request)
+                config = state.update_agent_config(
+                    request,
+                    grant=self._privilege_grant,
+                )
             except ValueError as exc:
                 self._audit(
                     "admin_config_update",
@@ -762,7 +830,10 @@ def make_handler(
                 )
                 return
             try:
-                payload = state.replace_openai_api_key(str(request.get("api_key", "")))
+                payload = state.replace_openai_api_key(
+                    str(request.get("api_key", "")),
+                    grant=self._privilege_grant,
+                )
             except ValueError as exc:
                 self._audit(
                     "api_key_update",
@@ -861,36 +932,14 @@ def make_handler(
                 )
                 return
 
-            ssid = str(request.get("ssid", "")).strip()
-            password = str(request.get("password", ""))
-            bssid = str(request.get("bssid", "")).strip()
-            ptt_gpio = request.get("ptt_gpio")
-            ptt_active_level = request.get("ptt_active_level")
-            ptt_debounce_ms = request.get("ptt_debounce_ms")
-            ptt_pull = str(request.get("ptt_pull", "")).strip()
-            audio_out_volume = request.get("audio_out_volume")
-            tts_max_bytes = request.get("tts_max_bytes")
             try:
-                audio_out_enabled = optional_bool(request.get("audio_out_enabled"))
-                tts_enabled = optional_bool(request.get("tts_enabled"))
-                led_self_test = optional_bool(request.get("led_self_test"))
-                display_enabled = optional_bool(request.get("display_enabled"))
-                display_self_test = optional_bool(request.get("display_self_test"))
-                payload = state.configure_device_wifi(
-                    ssid,
-                    password,
-                    bssid,
-                    int(ptt_gpio) if ptt_gpio not in (None, "") else None,
-                    int(ptt_active_level) if ptt_active_level not in (None, "") else None,
-                    int(ptt_debounce_ms) if ptt_debounce_ms not in (None, "") else None,
-                    ptt_pull,
-                    audio_out_enabled,
-                    int(audio_out_volume) if audio_out_volume not in (None, "") else None,
-                    tts_enabled,
-                    int(tts_max_bytes) if tts_max_bytes not in (None, "") else None,
-                    led_self_test,
-                    display_enabled,
-                    display_self_test,
+                preview = optional_bool(
+                    request.get("preview", request.get("dry_run"))
+                ) is True
+                payload = state.configure_device_wifi_request(
+                    request,
+                    grant=self._privilege_grant,
+                    preview=preview,
                 )
             except PermissionError as exc:
                 self._audit(
