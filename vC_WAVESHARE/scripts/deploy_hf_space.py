@@ -101,6 +101,7 @@ def staged_space(destination: Path) -> list[Path]:
         "bridge_contracts.py",
         "durable_memory.py",
         "household_memory.py",
+        "http_transport.py",
         "observability.py",
         "source_code.py",
         "sphere_tools.py",

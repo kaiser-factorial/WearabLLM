@@ -428,3 +428,9 @@ Phase 1 implementation and verification evidence is recorded in:
 - `BRIDGE_PHASE1_CONTRACTS.md`
 - `../bridge/bridge_contracts.py`
 - `../bridge/test_bridge_internal_contracts.py`
+
+Phase 2 implementation and verification evidence is recorded in:
+
+- `BRIDGE_PHASE2_HTTP_TRANSPORT.md`
+- `../bridge/http_transport.py`
+- `../bridge/test_http_transport.py`
