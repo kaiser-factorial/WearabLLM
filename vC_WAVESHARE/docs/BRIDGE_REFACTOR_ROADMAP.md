@@ -12,6 +12,10 @@ results, HTTP extraction, service extraction, policy and privileged-action
 isolation, model/tool pipeline cleanup, and configuration/adapters. A normalized
 response envelope is a later protocol-versioning project, not an early cleanup.
 
+Phase 7 completed that separately versioned edge. Remaining client migration
+and evidence-based cleanup are tracked in `BRIDGE_PROTOCOL_MIGRATION_ROADMAP.md`;
+they are not additional refactor phases.
+
 The refactor must preserve the working shared-Sphere system:
 
 ```text

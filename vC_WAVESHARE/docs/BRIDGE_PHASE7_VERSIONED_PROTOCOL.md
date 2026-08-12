@@ -76,3 +76,7 @@ runtime reached `RUNNING`; public legacy `/health`, normalized `/v2/health`, and
 the typed v2 unauthorized response passed. An authenticated live text mutation
 was deliberately skipped because the deployment shell did not expose a device
 token, and the rollout did not justify extracting one from firmware config.
+
+Post-refactor client migration, physical firmware gating, v1 usage evidence,
+and optional compatibility cleanup are defined separately in
+`BRIDGE_PROTOCOL_MIGRATION_ROADMAP.md`. They are not an eighth refactor phase.
