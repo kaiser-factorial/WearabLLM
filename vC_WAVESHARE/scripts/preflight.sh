@@ -117,6 +117,8 @@ step "Python compile checks"
     vC_WAVESHARE/scripts/validate_protocol.py \
     vC_WAVESHARE/scripts/verify_firmware_image.py \
     vC_WAVESHARE/bridge/bridge_contracts.py \
+    vC_WAVESHARE/bridge/bridge_config.py \
+    vC_WAVESHARE/bridge/bridge_ports.py \
     vC_WAVESHARE/bridge/bridge_policy.py \
     vC_WAVESHARE/bridge/bridge_service.py \
     vC_WAVESHARE/bridge/device_config.py \
@@ -124,6 +126,7 @@ step "Python compile checks"
     vC_WAVESHARE/bridge/model_pipeline.py \
     vC_WAVESHARE/bridge/model_protocol.py \
     vC_WAVESHARE/bridge/privileged_service.py \
+    vC_WAVESHARE/bridge/provider_adapters.py \
     vC_WAVESHARE/bridge/tool_activity.py \
     vC_WAVESHARE/bridge/wearabllm_bridge.py
 

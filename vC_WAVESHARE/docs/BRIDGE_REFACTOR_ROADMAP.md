@@ -1,6 +1,6 @@
 # WearabLLM Bridge Refactor Roadmap
 
-Status: Phase 5 software-complete; physical Waveshare regression pending
+Status: Phase 6 software-complete; physical Waveshare regression passed
 Created: 2026-08-12  
 Scope: `vC_WAVESHARE/bridge/wearabllm_bridge.py` and its client-facing contracts
 
@@ -83,6 +83,7 @@ names.
 wearabllm_bridge.py        process startup and compatibility facade
         |
         +-- bridge_config.py       validated runtime configuration
+        +-- bridge_ports.py        structural ports for interchangeable stores
         +-- http_transport.py      HTTP, auth boundary, parsing, serialization
         +-- bridge_service.py      conversational and action orchestration
         +-- bridge_policy.py       allow/deny and sensitive-operation decisions
@@ -90,6 +91,7 @@ wearabllm_bridge.py        process startup and compatibility facade
         +-- model_protocol.py      model reply parsing and normalization
         +-- model_pipeline.py      context, eligibility, and bounded tool loop
         +-- tool_activity.py       public sanitization and private model context
+        +-- provider_adapters.py   model, embedding, STT, and TTS integrations
         +-- device_config.py       privileged config validation/preview/execution
         +-- audit.py               redacted structured events and request IDs
         |
