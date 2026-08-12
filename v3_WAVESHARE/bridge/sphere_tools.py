@@ -15,8 +15,8 @@ from household_memory import MEMORY_KINDS
 
 
 ACTIVE_BODY_IDS = {"wearabllm-esp32", "wearabllm-android", "web-console"}
-TEMPERATURE_SENSOR_BODY_ID = "ducati-temp-sensor"
-STATUS_BODY_IDS = {*ACTIVE_BODY_IDS, "wearabllm-wearable", TEMPERATURE_SENSOR_BODY_ID}
+SENSOR_BODY_ID = "ducati-temp-sensor"
+STATUS_BODY_IDS = {*ACTIVE_BODY_IDS, "wearabllm-wearable", SENSOR_BODY_ID}
 LED_COMMANDS = ["GS", "GP", "GC", "RS", "RF", "YP", "BS", "PS", "PP"]
 EXPRESSION_CHANNELS = ["visual", "display", "audio"]
 MEMORY_WRITE_RE = re.compile(
@@ -35,9 +35,9 @@ BODY_ACTION_RE = re.compile(
     r"\b(?:send|tell|say|speak|play|announce|show|display|light|color|colour)\b",
     re.IGNORECASE,
 )
-TEMPERATURE_RE = re.compile(r"\b(?:temperature|temp|thermistor|sensor reading|take a reading|measure)\b", re.IGNORECASE)
-TEMPERATURE_LOOP_RE = re.compile(r"\b(?:loop|repeat|every|times?|readings?|measurements?)\b", re.IGNORECASE)
-TEMPERATURE_CANCEL_RE = re.compile(r"\b(?:cancel|stop|end)\b", re.IGNORECASE)
+SENSOR_RE = re.compile(r"\b(?:sensor|temperature|temp|thermistor|humidity|light|lux|reading|measure)\b", re.IGNORECASE)
+LOOP_RE = re.compile(r"\b(?:loop|repeat|every|times?|readings?|measurements?)\b", re.IGNORECASE)
+LOOP_CANCEL_RE = re.compile(r"\b(?:cancel|stop|end)\b", re.IGNORECASE)
 MEMORY_CORRECTION_ROUTE_RE = re.compile(
     r"(?:\b(?:correct|update|replace)\b.{0,160}\b(?:memory|remembered|fact|preference|instruction)\b)"
     r"|(?:\b(?:memory|remembered|fact|preference|instruction)\b.{0,160}"
@@ -131,12 +131,14 @@ Sphere has model tools with these safety boundaries:
 - send_to_body creates an additional, durable expression on explicitly named
   bodies. Never use it for the ordinary reply on the body that is already
   handling the current request, and never infer a broadcast target.
-- temperature_read requests one fresh physical measurement from the dedicated
-  Ducati sensor body. Report a numeric value only when the tool returns a
+- sensor_list shows only the structured capabilities most recently registered
+  by authenticated sensor firmware. Treat unavailable sensors as unavailable.
+- sensor_read requests fresh physical measurements by device and sensor ID.
+  Report numeric values only when the tool returns a
   completed result; queued or timed-out work is not a reading.
-- temperature_loop creates a bounded series of future physical measurements.
+- sensor_loop creates a bounded series of future physical measurements.
   State its schedule ID and limits. Each result is reported only after the
-  sensor acknowledges the corresponding action. Use temperature_loop_cancel
+  sensor acknowledges the corresponding action. Use loop_cancel
   only for an explicit request to stop a known schedule.
 - All bodies receive the same semantic command. They render visual, display,
   and audio channels according to their capabilities and local preferences.
@@ -321,43 +323,59 @@ def function_tools() -> list[dict[str, Any]]:
         },
         {
             "type": "function",
-            "name": "temperature_read",
-            "description": (
-                "Request one fresh temperature measurement from the authenticated Ducati ESP32-S3. "
-                "The tool waits briefly for a device-confirmed result and otherwise returns pending state."
-            ),
+            "name": "sensor_list",
+            "description": "List sensor devices and capabilities registered by authenticated firmware.",
             "strict": True,
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 20},
-                },
-                "required": ["wait_seconds"],
+                "properties": {"device_id": {"type": "string", "maxLength": 80}},
+                "required": ["device_id"],
                 "additionalProperties": False,
             },
         },
         {
             "type": "function",
-            "name": "temperature_loop",
+            "name": "sensor_read",
             "description": (
-                "Schedule a bounded series of physical temperature measurements. "
+                "Request fresh readings from named sensors on one registered device. "
+                "Use sensor_list first when the available IDs are unknown."
+            ),
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_id": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "sensor_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16},
+                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 20},
+                },
+                "required": ["device_id", "sensor_ids", "wait_seconds"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "sensor_loop",
+            "description": (
+                "Schedule a bounded series of readings from named sensors. "
                 "Use only when the user explicitly supplies or requests a count and interval."
             ),
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "device_id": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "sensor_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16},
                     "count": {"type": "integer", "minimum": 2, "maximum": 10},
                     "interval_seconds": {"type": "integer", "minimum": 30, "maximum": 3600},
                 },
-                "required": ["count", "interval_seconds"],
+                "required": ["device_id", "sensor_ids", "count", "interval_seconds"],
                 "additionalProperties": False,
             },
         },
         {
             "type": "function",
-            "name": "temperature_loop_cancel",
-            "description": "Cancel the unfinished actions in one known temperature schedule.",
+            "name": "loop_cancel",
+            "description": "Cancel unfinished actions in one known repeat schedule.",
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -495,6 +513,7 @@ class SphereToolExecutor:
         memory_store: Any,
         action_queue: Any,
         status_provider: Any = None,
+        sensor_provider: Any = None,
         source_store: Any = None,
         pending_memory_confirmations: PendingMemoryConfirmationStore | None = None,
         origin_device_id: str,
@@ -503,6 +522,7 @@ class SphereToolExecutor:
         self.memory_store = memory_store
         self.action_queue = action_queue
         self.status_provider = status_provider
+        self.sensor_provider = sensor_provider
         self.source_store = source_store
         self.pending_memory_confirmations = pending_memory_confirmations
         self.origin_device_id = validate_device_id(origin_device_id)
@@ -647,16 +667,20 @@ class SphereToolExecutor:
         if name == "send_to_body":
             self._require_intent(BODY_ACTION_RE, "The user did not explicitly request a body action.")
             return self._send_to_body(arguments, call_id=call_id)
-        if name == "temperature_read":
-            self._require_intent(TEMPERATURE_RE, "The user did not explicitly request a temperature reading.")
-            return self._temperature_read(arguments, call_id=call_id)
-        if name == "temperature_loop":
-            self._require_intent(TEMPERATURE_RE, "The user did not explicitly request temperature measurements.")
-            self._require_intent(TEMPERATURE_LOOP_RE, "The user did not explicitly request repeated measurements.")
-            return self._temperature_loop(arguments, call_id=call_id)
-        if name == "temperature_loop_cancel":
-            self._require_intent(TEMPERATURE_CANCEL_RE, "The user did not explicitly request cancellation.")
-            cancelled = self.action_queue.cancel_temperature_schedule(str(arguments.get("schedule_id", "")))
+        if name == "sensor_list":
+            if not self.sensor_provider:
+                raise RuntimeError("Sensor registry is unavailable")
+            return {"ok": True, "devices": self.sensor_provider(str(arguments.get("device_id", "")))}
+        if name == "sensor_read":
+            self._require_intent(SENSOR_RE, "The user did not explicitly request a sensor reading.")
+            return self._sensor_read(arguments, call_id=call_id)
+        if name == "sensor_loop":
+            self._require_intent(SENSOR_RE, "The user did not explicitly request sensor measurements.")
+            self._require_intent(LOOP_RE, "The user did not explicitly request repeated measurements.")
+            return self._sensor_loop(arguments, call_id=call_id)
+        if name == "loop_cancel":
+            self._require_intent(LOOP_CANCEL_RE, "The user did not explicitly request cancellation.")
+            cancelled = self.action_queue.cancel_sensor_schedule(str(arguments.get("schedule_id", "")))
             return {"ok": True, "schedule_id": str(arguments.get("schedule_id", "")), "cancelled": cancelled}
         raise ValueError(f"Unknown Sphere tool: {name}")
 
@@ -693,15 +717,30 @@ class SphereToolExecutor:
             actions.append({"action": action, "created": created})
         return {"ok": True, "actions": actions}
 
-    def _temperature_read(self, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
-        digest = hashlib.sha256(f"{call_id}:temperature".encode("utf-8")).hexdigest()[:24]
-        schedule_id = f"temp-{digest}"
+    def _validate_sensor_selection(self, arguments: dict[str, Any]) -> tuple[str, list[str]]:
+        device_id = validate_device_id(str(arguments.get("device_id", "")))
+        sensor_ids = [str(value).strip().lower() for value in arguments.get("sensor_ids", [])]
+        if not self.sensor_provider:
+            raise RuntimeError("Sensor registry is unavailable")
+        manifests = self.sensor_provider(device_id)
+        if not manifests:
+            raise LookupError(f"No sensor manifest is registered for {device_id}")
+        available = {str(row.get("id")) for row in manifests[0].get("sensors", [])}
+        if not sensor_ids or any(sensor_id not in available for sensor_id in sensor_ids):
+            raise ValueError("Requested sensor is not present in the registered manifest")
+        return device_id, sensor_ids
+
+    def _sensor_read(self, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
+        device_id, sensor_ids = self._validate_sensor_selection(arguments)
+        digest = hashlib.sha256(f"{call_id}:sensor".encode("utf-8")).hexdigest()[:24]
+        schedule_id = f"sensor-{digest}"
         now = datetime.now(timezone.utc)
-        action, created = self.action_queue.create_temperature_request(
+        action, created = self.action_queue.create_sensor_request(
             origin_device_id=self.origin_device_id,
-            target_device_id=TEMPERATURE_SENSOR_BODY_ID,
+            target_device_id=device_id,
+            sensor_ids=sensor_ids,
             transcript=self.user_transcript,
-            idempotency_key=f"sphere-temp-{digest}",
+            idempotency_key=f"sphere-sensor-{digest}",
             schedule_id=schedule_id,
             schedule_index=1,
             schedule_count=1,
@@ -728,18 +767,20 @@ class SphereToolExecutor:
             "error": latest.get("error"),
         }
 
-    def _temperature_loop(self, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
+    def _sensor_loop(self, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
+        device_id, sensor_ids = self._validate_sensor_selection(arguments)
         count = max(2, min(int(arguments.get("count", 2)), 10))
         interval = max(30, min(int(arguments.get("interval_seconds", 60)), 3600))
-        digest = hashlib.sha256(f"{call_id}:temperature-loop".encode("utf-8")).hexdigest()[:20]
-        schedule_id = f"temp-loop-{digest}"
+        digest = hashlib.sha256(f"{call_id}:sensor-loop".encode("utf-8")).hexdigest()[:20]
+        schedule_id = f"sensor-loop-{digest}"
         now = datetime.now(timezone.utc)
         actions = []
         for index in range(count):
             available_at = now + timedelta(seconds=index * interval)
-            action, created = self.action_queue.create_temperature_request(
+            action, created = self.action_queue.create_sensor_request(
                 origin_device_id=self.origin_device_id,
-                target_device_id=TEMPERATURE_SENSOR_BODY_ID,
+                target_device_id=device_id,
+                sensor_ids=sensor_ids,
                 transcript=self.user_transcript,
                 idempotency_key=f"sphere-{schedule_id}-{index + 1}",
                 schedule_id=schedule_id,

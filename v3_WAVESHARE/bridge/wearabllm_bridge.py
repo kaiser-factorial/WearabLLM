@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from action_queue import JsonActionQueue, SupabaseActionQueue, validate_device_id
+from action_queue import JsonActionQueue, SupabaseActionQueue, normalize_sensor_manifest, validate_device_id
 from agent_config import AgentConfig, AgentConfigStore
 from durable_memory import (
     DEFAULT_CONVERSATION_FILE,
@@ -280,6 +280,8 @@ class BridgeState:
         self.history_lock = threading.Lock()
         self.device_presence: dict[str, dict[str, Any]] = {}
         self.device_presence_lock = threading.Lock()
+        self.sensor_manifests: dict[str, dict[str, Any]] = {}
+        self.sensor_manifests_lock = threading.Lock()
         self.action_backend = str(getattr(args, "action_backend", "local"))
         if self.action_backend == "supabase":
             self.action_queue = SupabaseActionQueue.from_environment(
@@ -411,6 +413,19 @@ class BridgeState:
                 "monotonic": time.monotonic(),
                 "last_seen_at": now,
             }
+
+    def register_sensor_manifest(self, device_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        normalized = normalize_sensor_manifest(device_id, manifest)
+        with self.sensor_manifests_lock:
+            self.sensor_manifests[device_id] = normalized
+        self.touch_device(device_id)
+        return normalized
+
+    def sensor_catalog(self, device_id: str = "") -> list[dict[str, Any]]:
+        target = validate_device_id(device_id) if device_id else ""
+        with self.sensor_manifests_lock:
+            manifests = [dict(value) for key, value in self.sensor_manifests.items() if not target or key == target]
+        return sorted(manifests, key=lambda value: str(value.get("device_id", "")))
 
     def _presence_for(self, device_id: str) -> tuple[bool, str | None]:
         with self.device_presence_lock:
@@ -1102,6 +1117,7 @@ class BridgeState:
             memory_store=self.household_memory_store,
             action_queue=self.action_queue,
             status_provider=self.sphere_status_snapshot,
+            sensor_provider=self.sensor_catalog,
             source_store=getattr(self, "source_store", None),
             pending_memory_confirmations=getattr(self, "pending_memory_confirmations", None),
             origin_device_id=origin_device_id,
@@ -1280,19 +1296,21 @@ class BridgeState:
         if name == "send_to_body":
             targets = [str(value) for value in arguments.get("target_device_ids", [])]
             return f"Expression queued — {', '.join(targets) or 'no target'}"
-        if name == "temperature_read":
+        if name == "sensor_list":
+            return f"Sensors inspected — {len(result.get('devices', []))} registered device(s)"
+        if name == "sensor_read":
             reading = result.get("result") if isinstance(result.get("result"), dict) else None
             if reading:
-                return f"Temperature measured — {float(reading.get('celsius', 0)):.2f} °C"
-            return f"Temperature requested — {result.get('status', 'queued')}"
-        if name == "temperature_loop":
+                return f"Sensors measured — {len(reading.get('readings', []))} confirmed reading(s)"
+            return f"Sensor reading requested — {result.get('status', 'queued')}"
+        if name == "sensor_loop":
             return (
-                f"Temperature loop scheduled — {result.get('count', '?')} readings every "
+                f"Sensor loop scheduled — {result.get('count', '?')} readings every "
                 f"{result.get('interval_seconds', '?')}s · {clip(result.get('schedule_id'), 64)}"
             )
-        if name == "temperature_loop_cancel":
+        if name == "loop_cancel":
             return (
-                f"Temperature loop cancelled — {result.get('cancelled', 0)} pending action"
+                f"Loop cancelled — {result.get('cancelled', 0)} pending action"
                 f"{'s' if result.get('cancelled', 0) != 1 else ''}"
             )
         if name == "source_list":
@@ -1361,8 +1379,8 @@ class BridgeState:
                 self.conversation_store.clear()
             self.history.clear()
 
-    def record_temperature_action(self, action: dict[str, Any]) -> None:
-        """Publish confirmed loop readings without claiming an unverified value."""
+    def record_sensor_action(self, action: dict[str, Any]) -> None:
+        """Publish confirmed loop readings without claiming unverified values."""
         result = action.get("result") if isinstance(action.get("result"), dict) else None
         payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
         if not result or int(payload.get("schedule_count", 1)) <= 1:
@@ -1373,13 +1391,19 @@ class BridgeState:
             session = self.conversation_store.active_session() or self.conversation_store.create_session()
             index = int(payload.get("schedule_index", 1))
             count = int(payload.get("schedule_count", 1))
-            celsius = float(result["celsius"])
-            fahrenheit = float(result["fahrenheit"])
+            readings = result.get("readings") if isinstance(result.get("readings"), list) else []
+            summary = ", ".join(
+                f"{row.get('sensor_id')}: {float(row.get('value')):.2f} {row.get('unit')}"
+                for row in readings
+                if isinstance(row, dict)
+            )
+            if not summary:
+                return
             self.conversation_store.append(
                 str(session["id"]),
                 "ducati-temp-sensor",
                 "assistant",
-                f"Temperature loop {index}/{count}: {celsius:.2f} °C / {fahrenheit:.2f} °F.",
+                f"Sensor loop {index}/{count}: {summary}.",
                 metadata={
                     "sensor_reading": result,
                     "sensor_schedule_id": payload.get("schedule_id"),
@@ -2005,6 +2029,19 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     return
                 self._send_json({"ok": True, "actions": actions})
                 return
+            if path == "/v1/sensors":
+                if not self._is_authorized():
+                    self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
+                    return
+                params = urllib.parse.parse_qs(parsed.query)
+                device_id = (params.get("device_id") or [""])[0].strip()
+                try:
+                    manifests = state.sensor_catalog(device_id)
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self._send_json({"ok": True, "devices": manifests})
+                return
             action_match = re.fullmatch(r"/v1/interactions/([a-f0-9-]{36})", path)
             if action_match:
                 if not self._is_authorized():
@@ -2103,6 +2140,24 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                     return
                 self._send_json({"ok": True, "device_id": device_id})
+                return
+            sensor_manifest_match = re.fullmatch(
+                r"/v1/devices/([A-Za-z0-9._-]{1,80})/sensor-manifest", path
+            )
+            if sensor_manifest_match:
+                target = sensor_manifest_match.group(1)
+                try:
+                    if self._device_id() != target:
+                        self._send_error_json(HTTPStatus.FORBIDDEN, "Device ID does not match manifest target")
+                        return
+                    request = self._read_json_request(max_bytes=16_384)
+                    if request is None:
+                        return
+                    manifest = state.register_sensor_manifest(target, request)
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self._send_json({"ok": True, "manifest": manifest})
                 return
             if path == "/v1/session/reset":
                 try:
@@ -2346,11 +2401,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             if (
-                action.get("action_type") == "temperature_measurement"
+                action.get("action_type") in {"temperature_measurement", "sensor_read"}
                 and action.get("status") == "completed"
                 and (previous or {}).get("status") != "completed"
             ):
-                state.record_temperature_action(action)
+                state.record_sensor_action(action)
             self._send_json({"ok": True, "action": action})
 
         def _handle_admin_config(self) -> None:

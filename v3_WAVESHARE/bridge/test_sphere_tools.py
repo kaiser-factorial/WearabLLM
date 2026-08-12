@@ -101,25 +101,37 @@ class SphereToolExecutorTest(unittest.TestCase):
                 )
         status_provider.assert_not_called()
 
-    def test_temperature_tools_are_strict_and_bounded(self) -> None:
-        tools = {item["name"]: item for item in function_tools()}
-        self.assertEqual(tools["temperature_read"]["parameters"]["properties"]["wait_seconds"]["maximum"], 20)
-        self.assertEqual(tools["temperature_loop"]["parameters"]["properties"]["count"]["maximum"], 10)
-        self.assertEqual(tools["temperature_loop"]["parameters"]["properties"]["interval_seconds"]["minimum"], 30)
-        self.assertTrue(tools["temperature_loop_cancel"]["strict"])
+    @staticmethod
+    def sensor_provider(device_id: str = ""):
+        manifest = {
+            "device_id": "ducati-temp-sensor",
+            "firmware_version": "6.4",
+            "sensors": [
+                {"id": "ambient_temperature", "quantity": "temperature", "label": "Ambient temperature", "unit": "Cel"}
+            ],
+        }
+        return [manifest] if not device_id or device_id == manifest["device_id"] else []
 
-    def test_temperature_loop_creates_due_time_actions(self) -> None:
+    def test_sensor_tools_are_strict_and_bounded(self) -> None:
+        tools = {item["name"]: item for item in function_tools()}
+        self.assertEqual(tools["sensor_read"]["parameters"]["properties"]["wait_seconds"]["maximum"], 20)
+        self.assertEqual(tools["sensor_loop"]["parameters"]["properties"]["count"]["maximum"], 10)
+        self.assertEqual(tools["sensor_loop"]["parameters"]["properties"]["interval_seconds"]["minimum"], 30)
+        self.assertTrue(tools["loop_cancel"]["strict"])
+
+    def test_sensor_loop_creates_due_time_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             queue = JsonActionQueue(Path(tmpdir) / "actions.json")
             executor = SphereToolExecutor(
                 memory_store=None,
                 action_queue=queue,
+                sensor_provider=self.sensor_provider,
                 origin_device_id="web-console",
                 user_transcript="Take five temperature readings every minute.",
             )
             result = executor.execute(
-                "temperature_loop",
-                {"count": 5, "interval_seconds": 60},
+                "sensor_loop",
+                {"device_id": "ducati-temp-sensor", "sensor_ids": ["ambient_temperature"], "count": 5, "interval_seconds": 60},
                 call_id="call-temperature-loop",
             )
             self.assertTrue(result["ok"])
@@ -129,29 +141,31 @@ class SphereToolExecutorTest(unittest.TestCase):
             self.assertEqual(len(actions), 5)
             self.assertEqual({item["payload"]["schedule_id"] for item in actions}, {result["schedule_id"]})
 
-    def test_temperature_read_never_invents_a_pending_result(self) -> None:
+    def test_sensor_read_never_invents_a_pending_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             queue = JsonActionQueue(Path(tmpdir) / "actions.json")
             executor = SphereToolExecutor(
                 memory_store=None,
                 action_queue=queue,
+                sensor_provider=self.sensor_provider,
                 origin_device_id="web-console",
                 user_transcript="Take the temperature now.",
             )
             result = executor.execute(
-                "temperature_read",
-                {"wait_seconds": 0},
+                "sensor_read",
+                {"device_id": "ducati-temp-sensor", "sensor_ids": ["ambient_temperature"], "wait_seconds": 0},
                 call_id="call-temperature-now",
             )
             self.assertTrue(result["pending"])
             self.assertIsNone(result["result"])
 
-    def test_temperature_read_returns_only_device_acknowledged_result(self) -> None:
+    def test_sensor_read_returns_only_device_acknowledged_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             queue = JsonActionQueue(Path(tmpdir) / "actions.json")
             executor = SphereToolExecutor(
                 memory_store=None,
                 action_queue=queue,
+                sensor_provider=self.sensor_provider,
                 origin_device_id="web-console",
                 user_transcript="Measure the temperature now.",
             )
@@ -168,20 +182,20 @@ class SphereToolExecutorTest(unittest.TestCase):
                     "ducati-temp-sensor",
                     str(action["id"]),
                     "completed",
-                    result={"sequence": 12, "celsius": 21.75, "raw_adc": 1988, "uptime_ms": 9000},
+                    result={"sequence": 12, "uptime_ms": 9000, "readings": [{"sensor_id": "ambient_temperature", "value": 21.75, "unit": "Cel"}]},
                 )
 
             worker = threading.Thread(target=device)
             worker.start()
             result = executor.execute(
-                "temperature_read",
-                {"wait_seconds": 2},
+                "sensor_read",
+                {"device_id": "ducati-temp-sensor", "sensor_ids": ["ambient_temperature"], "wait_seconds": 2},
                 call_id="call-temperature-confirmed",
             )
             worker.join(timeout=1)
             self.assertFalse(result["pending"])
             self.assertEqual(result["status"], "completed")
-            self.assertEqual(result["result"]["celsius"], 21.75)
+            self.assertEqual(result["result"]["readings"][0]["value"], 21.75)
 
     def test_safe_durable_memory_can_be_saved_without_magic_words(self) -> None:
         memory = Mock()

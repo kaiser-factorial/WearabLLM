@@ -39,16 +39,17 @@ Opens `http://127.0.0.1:8787`.
 
 Open the dashboard in a Web Bluetooth-capable browser, select **Sensor**, and
 choose **Connect sensor**. The page connects directly to the BLE service
-advertised by `ducati_relay/v6.2_temperature_sensor` or the hybrid v6.3 build.
+advertised by `ducati_relay/v6.2_temperature_sensor`, v6.3, or the v6.4 sensor hub.
 Use **Take reading** in the temperature card or press the physical sensor button
 for each direct BLE reading. The page writes command byte `0x01` to the command
 characteristic, and the resulting measurement arrives through the same versioned
 notification packet used by physical button presses.
 
-With v6.3, Sphere can also queue a fresh reading or a bounded recurring schedule
+With v6.4, Sphere can discover the registered sensors, queue fresh readings, or
+create a bounded recurring schedule
 through the private hosted bridge. The sensor polls that bridge over authenticated
 outbound HTTPS and posts structured results; confirmed Wi-Fi readings are folded
-into the same Sensor history. No inbound LAN port is opened. The v6.3 Wi-Fi
+into the same Sensor history. No inbound LAN port is opened. The v6.4 Wi-Fi
 credentials, device token, and TLS root CA live only in its Git-ignored local
 configuration header.
 

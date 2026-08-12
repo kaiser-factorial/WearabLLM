@@ -644,10 +644,14 @@ async function refreshTemperatureActions() {
     const actions = Array.isArray(payload.actions) ? [...payload.actions].reverse() : [];
     let latest = null;
     for (const action of actions) {
-      if (action?.action_type !== "temperature_measurement" || action?.status !== "completed") continue;
+      if (!["temperature_measurement", "sensor_read"].includes(action?.action_type) || action?.status !== "completed") continue;
       if (!action.result || state.sensorSeenActionIds.has(action.id)) continue;
       state.sensorSeenActionIds.add(action.id);
-      const celsius = Number(action.result.celsius);
+      const genericTemperature = Array.isArray(action.result.readings)
+        ? action.result.readings.find((item) => item?.sensor_id === "ambient_temperature")
+        : null;
+      const celsius = Number(genericTemperature?.value ?? action.result.celsius);
+      if (!Number.isFinite(celsius)) continue;
       const reading = {
         sequence: Number(action.result.sequence),
         celsius,

@@ -33,6 +33,10 @@ STATUS_ORDER = {"dispatched": 0, "delivered": 1, "rendered": 2, "tts_started": 3
 LED_COMMANDS = {"GS", "GP", "GC", "RS", "RF", "YP", "BS", "PS", "PP"}
 EXPRESSION_CHANNELS = {"visual", "display", "audio"}
 TEMPERATURE_ACTION_TYPE = "temperature_measurement"
+SENSOR_ACTION_TYPE = "sensor_read"
+SENSOR_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+SENSOR_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,79}")
+SENSOR_UNIT_RE = re.compile(r"[A-Za-z0-9%°._/-]{1,24}")
 
 
 def now_iso() -> str:
@@ -149,6 +153,100 @@ def normalize_temperature_result(result: dict[str, Any] | None) -> dict[str, Any
         "raw_adc": raw_adc,
         "uptime_ms": uptime_ms,
         "measured_at": measured.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def normalize_sensor_ids(values: Any) -> list[str]:
+    if not isinstance(values, list) or not 1 <= len(values) <= 16:
+        raise ValueError("Sensor request requires 1 to 16 sensor IDs")
+    sensor_ids: list[str] = []
+    for value in values:
+        sensor_id = str(value).strip().lower()
+        if not SENSOR_ID_RE.fullmatch(sensor_id):
+            raise ValueError("Invalid sensor ID")
+        if sensor_id not in sensor_ids:
+            sensor_ids.append(sensor_id)
+    return sensor_ids
+
+
+def normalize_sensor_manifest(device_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    device = validate_device_id(device_id)
+    if not isinstance(manifest, dict) or int(manifest.get("version", 0)) != 1:
+        raise ValueError("Unsupported sensor manifest version")
+    firmware_version = str(manifest.get("firmware_version", "")).strip()
+    rows = manifest.get("sensors")
+    if not firmware_version or len(firmware_version) > 40 or not isinstance(rows, list):
+        raise ValueError("Invalid sensor manifest")
+    if not 1 <= len(rows) <= 16:
+        raise ValueError("Sensor manifest requires 1 to 16 sensors")
+    sensors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Sensor capabilities must be objects")
+        sensor_id = str(row.get("id", "")).strip().lower()
+        quantity = str(row.get("quantity", "")).strip().lower()
+        label = " ".join(str(row.get("label", "")).split())
+        unit = str(row.get("unit", "")).strip()
+        if (
+            not SENSOR_ID_RE.fullmatch(sensor_id)
+            or sensor_id in seen
+            or not SENSOR_ID_RE.fullmatch(quantity)
+            or not SENSOR_LABEL_RE.fullmatch(label)
+            or not SENSOR_UNIT_RE.fullmatch(unit)
+        ):
+            raise ValueError("Invalid sensor capability")
+        sensors.append({"id": sensor_id, "quantity": quantity, "label": label, "unit": unit})
+        seen.add(sensor_id)
+    return {
+        "version": 1,
+        "device_id": device,
+        "firmware_version": firmware_version,
+        "sensors": sensors,
+        "updated_at": now_iso(),
+    }
+
+
+def normalize_sensor_result(result: dict[str, Any] | None, requested: list[str]) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise ValueError("Sensor result must be an object")
+    try:
+        sequence = int(result.get("sequence", 0))
+        uptime_ms = int(result.get("uptime_ms", -1))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Sensor result contains invalid metadata") from exc
+    readings = result.get("readings")
+    if sequence < 1 or uptime_ms < 0 or not isinstance(readings, list):
+        raise ValueError("Sensor result contains invalid metadata")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for reading in readings:
+        if not isinstance(reading, dict):
+            raise ValueError("Sensor readings must be objects")
+        sensor_id = str(reading.get("sensor_id", "")).strip().lower()
+        unit = str(reading.get("unit", "")).strip()
+        try:
+            value = float(reading.get("value"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Sensor reading contains an invalid value") from exc
+        if sensor_id not in requested or sensor_id in seen:
+            raise ValueError("Sensor result contains an unrequested or duplicate sensor")
+        if not unit or len(unit) > 24 or not -1.0e9 <= value <= 1.0e9:
+            raise ValueError("Sensor reading is outside supported bounds")
+        normalized.append({"sensor_id": sensor_id, "value": round(value, 4), "unit": unit})
+        seen.add(sensor_id)
+    if seen != set(requested):
+        raise ValueError("Sensor result did not include every requested sensor")
+    measured_at = str(result.get("measured_at", "")).strip() or now_iso()
+    measured = parse_iso(measured_at)
+    if measured.tzinfo is None:
+        raise ValueError("Sensor result timestamp must include a timezone")
+    return {
+        "version": 1,
+        "sequence": sequence,
+        "uptime_ms": uptime_ms,
+        "measured_at": measured.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "readings": normalized,
     }
 
 
@@ -320,6 +418,69 @@ class JsonActionQueue:
             self._persist_locked()
             return deepcopy(action), True
 
+    def create_sensor_request(
+        self,
+        *,
+        origin_device_id: str,
+        target_device_id: str,
+        sensor_ids: list[str],
+        transcript: str,
+        idempotency_key: str,
+        schedule_id: str,
+        schedule_index: int,
+        schedule_count: int,
+        available_at: str | None,
+        expires_at: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        origin = validate_device_id(origin_device_id)
+        target = validate_device_id(target_device_id)
+        key = validate_idempotency_key(idempotency_key)
+        requested = normalize_sensor_ids(sensor_ids)
+        clean_transcript = transcript.strip()
+        if not clean_transcript:
+            raise ValueError("Missing transcript")
+        payload = {
+            "version": 1,
+            "operation": "sensor_read",
+            "sensor_ids": requested,
+            "schedule_id": validate_idempotency_key(schedule_id),
+            "schedule_index": int(schedule_index),
+            "schedule_count": int(schedule_count),
+        }
+        with self._lock:
+            existing = next(
+                (item for item in self._actions if item.get("origin_device_id") == origin and item.get("idempotency_key") == key),
+                None,
+            )
+            if existing:
+                return deepcopy(existing), False
+            timestamp = now_iso()
+            action = {
+                "id": str(uuid.uuid4()),
+                "origin_device_id": origin,
+                "target_device_id": target,
+                "transcript": clean_transcript,
+                "command": "BS",
+                "reply": "Read the requested sensors.",
+                "action_type": SENSOR_ACTION_TYPE,
+                "expression": {},
+                "payload": payload,
+                "result": None,
+                "status": "queued",
+                "idempotency_key": key,
+                "attempts": 0,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "available_at": normalize_available_at(available_at),
+                "leased_until": None,
+                "expires_at": normalize_expiry(expires_at),
+                "error": None,
+            }
+            self._actions.append(action)
+            self._trim_locked()
+            self._persist_locked()
+            return deepcopy(action), True
+
     def claim_next(self, target_device_id: str) -> dict[str, Any] | None:
         target = validate_device_id(target_device_id)
         now = datetime.now(timezone.utc)
@@ -398,6 +559,10 @@ class JsonActionQueue:
             normalized_result = None
             if status == "completed" and action.get("action_type") == TEMPERATURE_ACTION_TYPE:
                 normalized_result = normalize_temperature_result(result)
+            elif status == "completed" and action.get("action_type") == SENSOR_ACTION_TYPE:
+                normalized_result = normalize_sensor_result(
+                    result, normalize_sensor_ids((action.get("payload") or {}).get("sensor_ids"))
+                )
             action["status"] = status
             action["leased_until"] = (
                 None
@@ -409,7 +574,7 @@ class JsonActionQueue:
             action["updated_at"] = now_iso()
             action["error"] = clean_error or None
             if status == "completed":
-                if action.get("action_type") == TEMPERATURE_ACTION_TYPE:
+                if action.get("action_type") in {TEMPERATURE_ACTION_TYPE, SENSOR_ACTION_TYPE}:
                     action["result"] = normalized_result
                 action["completed_at"] = action["updated_at"]
             self._persist_locked()
@@ -435,6 +600,25 @@ class JsonActionQueue:
             for action in self._actions:
                 if (
                     action.get("action_type") == TEMPERATURE_ACTION_TYPE
+                    and (action.get("payload") or {}).get("schedule_id") == schedule
+                    and action.get("status") not in TERMINAL_STATUSES
+                ):
+                    action["status"] = "failed"
+                    action["error"] = "Cancelled by user"
+                    action["leased_until"] = None
+                    action["updated_at"] = now_iso()
+                    count += 1
+            if count:
+                self._persist_locked()
+        return count
+
+    def cancel_sensor_schedule(self, schedule_id: str) -> int:
+        schedule = validate_idempotency_key(schedule_id)
+        count = 0
+        with self._lock:
+            for action in self._actions:
+                if (
+                    action.get("action_type") == SENSOR_ACTION_TYPE
                     and (action.get("payload") or {}).get("schedule_id") == schedule
                     and action.get("status") not in TERMINAL_STATUSES
                 ):
@@ -654,6 +838,59 @@ class SupabaseActionQueue:
             raise RuntimeError("Supabase did not return the created temperature action")
         return self._row(payload[0]), True
 
+    def create_sensor_request(
+        self,
+        *,
+        origin_device_id: str,
+        target_device_id: str,
+        sensor_ids: list[str],
+        transcript: str,
+        idempotency_key: str,
+        schedule_id: str,
+        schedule_index: int,
+        schedule_count: int,
+        available_at: str | None,
+        expires_at: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        origin = validate_device_id(origin_device_id)
+        target = validate_device_id(target_device_id)
+        key = validate_idempotency_key(idempotency_key)
+        if existing := self._find_idempotent(origin, key):
+            return existing, False
+        clean_transcript = transcript.strip()
+        if not clean_transcript:
+            raise ValueError("Missing transcript")
+        request_payload = {
+            "version": 1,
+            "operation": "sensor_read",
+            "sensor_ids": normalize_sensor_ids(sensor_ids),
+            "schedule_id": validate_idempotency_key(schedule_id),
+            "schedule_index": int(schedule_index),
+            "schedule_count": int(schedule_count),
+        }
+        payload = self._request(
+            "POST",
+            "/rest/v1/wearabllm_device_actions",
+            {
+                "principal_id": self.principal_id,
+                "origin_device_id": origin,
+                "target_device_id": target,
+                "transcript": clean_transcript,
+                "command": "BS",
+                "reply": "Read the requested sensors.",
+                "action_type": SENSOR_ACTION_TYPE,
+                "expression": {},
+                "payload": request_payload,
+                "status": "queued",
+                "idempotency_key": key,
+                "available_at": normalize_available_at(available_at),
+                "expires_at": normalize_expiry(expires_at),
+            },
+        )
+        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+            raise RuntimeError("Supabase did not return the created sensor action")
+        return self._row(payload[0]), True
+
     def claim_next(self, target_device_id: str) -> dict[str, Any] | None:
         target = validate_device_id(target_device_id)
         payload = self._request(
@@ -715,6 +952,10 @@ class SupabaseActionQueue:
         elif status == "completed":
             if existing.get("action_type") == TEMPERATURE_ACTION_TYPE:
                 update["result"] = normalize_temperature_result(result)
+            elif existing.get("action_type") == SENSOR_ACTION_TYPE:
+                update["result"] = normalize_sensor_result(
+                    result, normalize_sensor_ids((existing.get("payload") or {}).get("sensor_ids"))
+                )
             update["completed_at"] = timestamp
         elif status == "played":
             update["played_at"] = timestamp
@@ -770,6 +1011,25 @@ class SupabaseActionQueue:
             "PATCH",
             "/rest/v1/wearabllm_device_actions"
             f"?principal_id=eq.{principal}&action_type=eq.{TEMPERATURE_ACTION_TYPE}"
+            f"&payload->>schedule_id=eq.{encoded_schedule}"
+            "&status=not.in.(completed,played,failed,expired)",
+            {
+                "status": "failed",
+                "error": "Cancelled by user",
+                "lease_expires_at": None,
+                "failed_at": now_iso(),
+            },
+        )
+        return len(payload) if isinstance(payload, list) else 0
+
+    def cancel_sensor_schedule(self, schedule_id: str) -> int:
+        schedule = validate_idempotency_key(schedule_id)
+        principal = urllib.parse.quote(self.principal_id, safe="")
+        encoded_schedule = urllib.parse.quote(schedule, safe="")
+        payload = self._request(
+            "PATCH",
+            "/rest/v1/wearabllm_device_actions"
+            f"?principal_id=eq.{principal}&action_type=eq.{SENSOR_ACTION_TYPE}"
             f"&payload->>schedule_id=eq.{encoded_schedule}"
             "&status=not.in.(completed,played,failed,expired)",
             {

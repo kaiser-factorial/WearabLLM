@@ -19,7 +19,7 @@ TTS. It also provides body presence, conversation sessions/titles/archive,
 agent configuration, compact and provenance-rich durable memory, hybrid vector
 retrieval, built-in web search with durable citations, read-only Sphere status,
 read-only build-time source inspection, visible tool activity, a persistent
-cross-body expression queue, and bounded authenticated temperature measurement
+cross-body expression queue, and bounded authenticated capability-driven sensor
 and scheduling tools for the Ducati ESP32-S3 sensor body.
 
 ## Required Space secrets
