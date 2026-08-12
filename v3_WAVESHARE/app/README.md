@@ -12,18 +12,23 @@ body.
 - Adds a submitted user message immediately, then shows an inline assistant
   thinking state.
 - Optionally queues the reply for Waveshare display and speech.
+- Receives targeted Sphere expressions, maps all nine semantic commands to a
+  phone glow/text treatment, and optionally speaks them with device-local TTS.
+- Renders durable web-search source links beneath assistant turns.
 - Shows active conversations in the drawer and archived conversations behind a
   compact Archive control.
 - Provides Rename and Archive through each conversation's `...` menu.
 - Stores only the Sphere URL and device token in Android SecureStore.
 - Uses phone keyboard dictation; the app has no custom press-to-talk control.
 
-Android/Web prompts use `/v1/query_text`. Waveshare delivery uses
-`/v1/interactions` and follows the board-reported lifecycle:
+Android/Web prompts use `/v1/query_text`. Cross-body delivery uses the action
+claim/ack API. Automatic phone speech is disabled by default in Connection
+settings. Each target follows its own reported lifecycle:
 
 ```text
-queued -> dispatched -> played
-                    \-> failed
+queued -> dispatched -> delivered -> rendered -> completed
+                                      \-> tts_started -> played
+                                      \-> failed
 ```
 
 The app never reports physical playback until the board acknowledges it.

@@ -23,11 +23,20 @@ hold BOOT/PTT or say "Hi ESP"
 ```
 
 Android and the web dashboard participate in the same Sphere conversation.
-Either can optionally queue a response for the Waveshare to display and speak.
+Sphere can queue the same semantic expression for any explicit active target:
+the Waveshare maps it to LEDs/TFT/speaker, while Android and Web map it to a
+colored glow/text and optional local speech.
 Device heartbeats distinguish bodies that are online from bodies that are
 unplugged or inactive.
 
-Verified on 2026-08-09:
+The current hosted agent also exposes bounded tools for body status, household
+memory, source inspection, cross-body expression, and capability-driven
+sensors. The initial external sensor body is the Ducati ESP32-S3 sensor hub;
+its firmware lives alongside the Ducati project and registers temperature as a
+structured capability rather than hard-coding a temperature-only Sphere tool.
+
+Hardware last verified on 2026-08-09; hosted software and dashboard last
+verified on 2026-08-12:
 
 - Waveshare voice request through the hosted agent and audible response
 - Android connection and shared chat through Wi-Fi or cellular-capable HTTPS
@@ -36,8 +45,19 @@ Verified on 2026-08-09:
 - live OpenAI model, TTS model, and voice selection from the dashboard
 - Supabase-backed conversations, agent settings, durable-memory substrate, and
   device-action queue
-- 79 Python bridge tests, Android typechecking/protocol tests, firmware build,
-  image-coherence gate, physical flash/boot, and hosted health checks
+- model-facing memory search/remember/confirm/correct/forget, read-only source
+  inspection, cross-body expression, sensor discovery/read/loop/cancel, and
+  built-in web search
+- bounded private tool context preserved across turns without exposing raw
+  results to dashboard clients
+- safe Markdown in the dashboard with plain-text projection for Waveshare/TTS
+- conversation export as standalone HTML, structured JSON, or plain text
+- atomic user/assistant persistence so partial writes cannot create new orphan
+  exchanges
+- 149 Python bridge tests, six synthetic sensor-route cases, hosted health,
+  migration sync, and wide/mobile dashboard QA rerun on 2026-08-12
+- Android typechecking/protocol tests, firmware build, image-coherence gate,
+  and physical flash/boot retained as verified 2026-08-09 evidence
 
 This remains a private prototype rather than a packaged consumer product. See
 [Project boundaries](#project-boundaries) for the important gaps.
@@ -56,6 +76,9 @@ This remains a private prototype rather than a packaged consumer product. See
 ┌─────────────────┐   audio/actions   │ Private HF Space    │
 │ Waveshare body  │<─────────────────>│ WearabLLM bridge    │
 └─────────────────┘                   └──────────┬──────────┘
+┌─────────────────┐   sensor actions            │
+│ Ducati sensor   │<─────────────────────────────┤
+└─────────────────┘                              │
                                                 │
                                       ┌─────────┴─────────┐
                                       v                   v
@@ -89,6 +112,7 @@ Stable body IDs keep transport infrastructure separate from assistant bodies:
 | Waveshare | `wearabllm-esp32` | Home audio/light/display body |
 | Android | `wearabllm-android` | Mobile chat body |
 | Web console | `web-console` | Browser chat body |
+| Ducati sensor | `ducati-temp-sensor` | Capability-driven physical sensor body |
 | Wearable | `wearabllm-wearable` | Reserved future portable body |
 
 All bodies use one principal conversation. Turns retain their originating
@@ -98,11 +122,16 @@ private and do not automatically return to active prompt context.
 The action queue makes physical delivery explicit:
 
 ```text
-queued -> dispatched -> played
-                    \-> failed
+queued -> dispatched -> delivered -> rendered -> completed
+                                      \-> tts_started -> played
+                                      \-> failed
 ```
 
-The UI must not claim `played` until the Waveshare acknowledges playback.
+Each target has its own action row, expiry, idempotency key, and terminal
+status. The UI must not claim `played` until that target acknowledges playback.
+Sensor readings follow the same rule: Sphere reports a measurement only after
+the authenticated sensor body returns a terminal acknowledgement containing
+the requested capability IDs and real values.
 
 ## Physical Response Language
 
@@ -120,6 +149,10 @@ WearabLLM preserves the original nine two-character response commands:
 | `PS` | Creative or imaginative | Purple solid |
 | `PP` | Deep or philosophical | Purple pulse |
 
+These codes are semantic rather than hardware-specific. Android and Web use
+the same code to color their Sphere expression surface; local speech on those
+bodies is disabled by default and must be opted into in settings.
+
 The TFT shows listening, sending, thinking, error, and response states. Longer
 answers are presented one sentence/chunk at a time while firmware prefetches
 the next TTS chunk to reduce pauses between cards.
@@ -136,6 +169,7 @@ the next TTS chunk to reduce pauses between cards.
 | [`v3_WAVESHARE/hosted_agent/`](v3_WAVESHARE/hosted_agent/) | Private Hugging Face Docker Space image |
 | [`v3_WAVESHARE/protocol/`](v3_WAVESHARE/protocol/) | Shared API and command contract |
 | [`v3_WAVESHARE/docs/`](v3_WAVESHARE/docs/) | Bring-up, architecture, pin map, and status notes |
+| [`v3_WAVESHARE/docs/TOOLS.md`](v3_WAVESHARE/docs/TOOLS.md) | Sphere model tools, safety boundaries, limitations, and deferred decisions |
 | [`supabase/`](supabase/) | Database migrations and private backend schema |
 | [`v1/`](v1/) | Historical Bluefruit and phone-app baseline |
 | [`v2_servo_bluefruit/`](v2_servo_bluefruit/) | Documented servo-era archive |
@@ -313,15 +347,21 @@ The current system is functional, but these items remain intentionally open:
   npm advisories without destabilizing the verified Android build
 - firmware updates still require USB; authenticated dual-slot OTA is planned
 - one shared device token should become per-device credentials
-- the richer household-memory schema is not yet exposed as a model tool or a
-  user review/correction/deletion interface
+- the richer household-memory schema is model-accessible for search, safe
+  durable remembering, sensitive yes/no confirmation, correction, and forget
+  operations, but still lacks a dedicated user
+  review interface
 - archived conversations cannot yet be restored or deleted from the UI
 - long-response playback, retries, lease expiry, and power-loss behavior need
   a recorded regression matrix
+- the capability-driven Ducati sensor firmware is maintained in the separate
+  `ducati_relay` repository; humidity and light are planned capabilities, not
+  currently registered hardware
 
-Near-term priorities are to preserve and publish the verified clean-switch
-state, host the dashboard securely, add Android distribution and OTA, then
-build the separate Supabase-backed household-memory tool.
+All 14 migrations through `20260812000000` and the private hosted bridge were
+live-checked on 2026-08-12. The current feature set is pushed on draft PR #6;
+near-term priorities are to merge the reviewed branch, add a memory review UI,
+host the dashboard securely, and add Android distribution and OTA.
 
 ## Development Guardrails
 

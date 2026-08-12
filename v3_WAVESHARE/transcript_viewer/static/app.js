@@ -1,6 +1,10 @@
 const els = {
   status: document.querySelector("#status"),
   deviceList: document.querySelector("#device-list"),
+  expressionBanner: document.querySelector("#expression-banner"),
+  expressionGlow: document.querySelector("#expression-glow"),
+  expressionMeta: document.querySelector("#expression-meta"),
+  expressionText: document.querySelector("#expression-text"),
   conversationList: document.querySelector("#conversation-list"),
   newConversation: document.querySelector("#new-conversation"),
   archiveToggle: document.querySelector("#archive-toggle"),
@@ -17,6 +21,16 @@ const els = {
   actionDebug: document.querySelector("#action-debug"),
   chatView: document.querySelector("#chat-view"),
   commandView: document.querySelector("#command-view"),
+  sensorView: document.querySelector("#sensor-view"),
+  sensorConnect: document.querySelector("#sensor-connect"),
+  sensorTakeReading: document.querySelector("#sensor-take-reading"),
+  sensorConnectionBadge: document.querySelector("#sensor-connection-badge"),
+  sensorStatus: document.querySelector("#sensor-status"),
+  sensorCelsius: document.querySelector("#sensor-celsius"),
+  sensorFahrenheit: document.querySelector("#sensor-fahrenheit"),
+  sensorReadingMeta: document.querySelector("#sensor-reading-meta"),
+  sensorHistory: document.querySelector("#sensor-history"),
+  sensorClear: document.querySelector("#sensor-clear"),
   settingsModal: document.querySelector("#settings-modal"),
   settingsClose: document.querySelector("#settings-close"),
   configForm: document.querySelector("#config-form"),
@@ -32,6 +46,7 @@ const els = {
   cfgTtsModel: document.querySelector("#cfg-tts-model"),
   cfgTtsVoice: document.querySelector("#cfg-tts-voice"),
   cfgTtsInstructions: document.querySelector("#cfg-tts-instructions"),
+  allowBrowserSpeech: document.querySelector("#allow-browser-speech"),
   cfgUpdated: document.querySelector("#cfg-updated"),
   deployRepo: document.querySelector("#deploy-repo"),
   deployBridge: document.querySelector("#deploy-bridge"),
@@ -49,6 +64,7 @@ const state = {
   deliverToWaveshare: false,
   latestActionId: "",
   turns: [],
+  unsavedTurns: [],
   session: null,
   view: "chat",
   polling: false,
@@ -63,6 +79,26 @@ const state = {
   agentConfig: null,
   modelCatalog: null,
   showArchived: false,
+  receivingBodyAction: false,
+  expressionTimer: null,
+  sensorDevice: null,
+  sensorCharacteristic: null,
+  sensorCommandCharacteristic: null,
+  sensorReadings: [],
+  sensorSeenActionIds: new Set(),
+  sensorLastSequence: null,
+};
+
+const SENSOR_SERVICE_UUID = "7b8f2b10-3a42-4d4e-9fd4-8b5b86d8a101";
+const SENSOR_READING_UUID = "7b8f2b11-3a42-4d4e-9fd4-8b5b86d8a101";
+const SENSOR_COMMAND_UUID = "7b8f2b12-3a42-4d4e-9fd4-8b5b86d8a101";
+
+const EXPRESSION_COLORS = {
+  G: "#22c55e",
+  R: "#ef4444",
+  Y: "#eab308",
+  B: "#3b82f6",
+  P: "#a855f7",
 };
 
 function setStatus(kind, text) {
@@ -88,6 +124,99 @@ function shortId(value) {
   if (!value) return "—";
   const text = String(value);
   return text.length > 12 ? `${text.slice(0, 8)}…` : text;
+}
+
+function appendInlineMarkdown(parent, text) {
+  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_([^_\n]+)_|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\))/g;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > cursor) parent.append(document.createTextNode(text.slice(cursor, match.index)));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      parent.append(code);
+    } else if (token.startsWith("**") || token.startsWith("__")) {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      parent.append(strong);
+    } else if (token.startsWith("*") || token.startsWith("_")) {
+      const em = document.createElement("em");
+      em.textContent = token.slice(1, -1);
+      parent.append(em);
+    } else {
+      const parts = /^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/.exec(token);
+      const link = document.createElement("a");
+      link.textContent = parts?.[1] || token;
+      link.href = parts?.[2] || "#";
+      link.target = "_blank";
+      link.rel = "noreferrer noopener";
+      parent.append(link);
+    }
+    cursor = match.index + token.length;
+  }
+  if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
+}
+
+function renderMarkdown(container, source) {
+  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    if (/^```/.test(line.trim())) {
+      const language = line.trim().slice(3).trim();
+      const body = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index].trim())) body.push(lines[index++]);
+      if (index < lines.length) index += 1;
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (language) code.dataset.language = language;
+      code.textContent = body.join("\n");
+      pre.append(code);
+      container.append(pre);
+      continue;
+    }
+    const heading = /^(#{1,4})\s+(.+)$/.exec(line);
+    if (heading) {
+      const node = document.createElement(`h${Math.min(heading[1].length + 2, 6)}`);
+      appendInlineMarkdown(node, heading[2]);
+      container.append(node);
+      index += 1;
+      continue;
+    }
+    const listMatch = /^\s*(?:([-*+])|(\d+)[.)])\s+(.+)$/.exec(line);
+    if (listMatch) {
+      const ordered = Boolean(listMatch[2]);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (index < lines.length) {
+        const item = /^\s*(?:([-*+])|(\d+)[.)])\s+(.+)$/.exec(lines[index]);
+        if (!item || Boolean(item[2]) !== ordered) break;
+        const li = document.createElement("li");
+        appendInlineMarkdown(li, item[3]);
+        list.append(li);
+        index += 1;
+      }
+      container.append(list);
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const quote = document.createElement("blockquote");
+      const quoted = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) quoted.push(lines[index++].replace(/^\s*>\s?/, ""));
+      appendInlineMarkdown(quote, quoted.join("\n"));
+      container.append(quote);
+      continue;
+    }
+    const paragraph = [];
+    while (index < lines.length && lines[index].trim() && !/^```|^#{1,4}\s|^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)/.test(lines[index])) {
+      paragraph.push(lines[index++]);
+    }
+    const p = document.createElement("p");
+    appendInlineMarkdown(p, paragraph.join("\n"));
+    container.append(p);
+  }
 }
 
 function formatTime(value, { relative = false } = {}) {
@@ -148,7 +277,8 @@ function mergeDevices(known = [], remote = []) {
     "wearabllm-esp32": 0,
     "wearabllm-android": 1,
     "web-console": 2,
-    "wearabllm-wearable": 3,
+    "ducati-temp-sensor": 3,
+    "wearabllm-wearable": 4,
   };
   return Array.from(byId.values()).sort((a, b) =>
     (order[a.id] ?? 100).toString().localeCompare((order[b.id] ?? 100).toString())
@@ -161,7 +291,7 @@ function devicesSignature(devices) {
 }
 
 function turnsSignature(turns) {
-  return `${turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${t.created_at}`).join("\n")}|thinking:${state.thinking}`;
+  return `${turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${JSON.stringify(t.metadata || {})}|${t.created_at}|${t.persistence_status || ""}`).join("\n")}|thinking:${state.thinking}`;
 }
 
 function nearBottom(el, px = 96) {
@@ -282,6 +412,16 @@ function renderConversations({ force = false } = {}) {
       rename.setAttribute("aria-label", rename.title);
       rename.addEventListener("click", () => void renameConversation(session));
       menuItems.append(rename);
+      for (const format of ["html", "json", "txt"]) {
+        const exportButton = document.createElement("button");
+        exportButton.type = "button";
+        exportButton.className = "conversation-action export-conversation";
+        exportButton.textContent = `Export ${format.toUpperCase()}`;
+        exportButton.title = `Export ${conversationTitle(session)} as ${format.toUpperCase()}`;
+        exportButton.setAttribute("aria-label", exportButton.title);
+        exportButton.addEventListener("click", () => void exportConversation(session, format));
+        menuItems.append(exportButton);
+      }
       if (!session.archived_at) {
         const archive = document.createElement("button");
         archive.type = "button";
@@ -296,6 +436,132 @@ function renderConversations({ force = false } = {}) {
       return row;
     })
   );
+}
+
+function exportFilename(session, format) {
+  const base = conversationTitle(session)
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase()
+    .slice(0, 64) || "sphere-conversation";
+  const date = String(session?.started_at || new Date().toISOString()).slice(0, 10);
+  return `${base}-${date}.${format}`;
+}
+
+function exportConversationData(payload, session) {
+  const selected = payload.session || session || {};
+  return {
+    format: "wearabllm-conversation.v1",
+    exported_at: new Date().toISOString(),
+    conversation: {
+      id: selected.id || session?.id || null,
+      title: conversationTitle(selected),
+      started_at: selected.started_at || null,
+      last_turn_at: selected.last_turn_at || null,
+      archived_at: selected.archived_at || null,
+    },
+    devices: Array.isArray(payload.devices) ? payload.devices : [],
+    turns: Array.isArray(payload.turns) ? payload.turns : [],
+  };
+}
+
+function exportRole(turn) {
+  return turn?.role === "assistant" ? "Sphere" : "You";
+}
+
+function exportDeviceLabel(turn, devices) {
+  const deviceId = String(turn?.device_id || "unknown");
+  return devices.find((device) => device?.id === deviceId)?.label || deviceId;
+}
+
+function conversationAsText(data) {
+  const lines = [
+    data.conversation.title,
+    `Exported: ${formatTimeTitle(data.exported_at)}`,
+  ];
+  if (data.conversation.started_at) lines.push(`Started: ${formatTimeTitle(data.conversation.started_at)}`);
+  lines.push("");
+  for (const turn of data.turns) {
+    const label = exportRole(turn);
+    const device = exportDeviceLabel(turn, data.devices);
+    lines.push(`${label} · ${device} · ${formatTimeTitle(turn.created_at)}`);
+    lines.push(String(turn.content || ""));
+    const tools = Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [];
+    for (const tool of tools) {
+      if (tool?.summary) lines.push(`Tool: ${String(tool.summary)}`);
+    }
+    const sources = Array.isArray(turn.metadata?.sources) ? turn.metadata.sources : [];
+    for (const source of sources) {
+      if (source?.url) lines.push(`Source: ${source.title || source.url} — ${source.url}`);
+    }
+    lines.push("");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function markdownAsExportHtml(source) {
+  const container = document.createElement("div");
+  renderMarkdown(container, source);
+  return container.innerHTML;
+}
+
+function conversationAsHtml(data) {
+  const turns = data.turns.map((turn) => {
+    const role = exportRole(turn);
+    const device = exportDeviceLabel(turn, data.devices);
+    const tools = (Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [])
+      .filter((tool) => tool?.summary)
+      .map((tool) => `<li>${escapeHtml(tool.summary)}</li>`)
+      .join("");
+    const sources = (Array.isArray(turn.metadata?.sources) ? turn.metadata.sources : [])
+      .filter((source) => source?.url && /^https?:\/\//i.test(String(source.url)))
+      .map((source) => `<li><a href="${escapeHtml(source.url)}">${escapeHtml(source.title || source.url)}</a></li>`)
+      .join("");
+    return `<article class="turn ${turn.role === "assistant" ? "assistant" : "user"}">
+      <header><strong>${escapeHtml(role)}</strong><span>${escapeHtml(device)} · ${escapeHtml(formatTimeTitle(turn.created_at))}</span></header>
+      <div class="content">${markdownAsExportHtml(turn.content || "")}</div>
+      ${tools ? `<section><h2>Tool activity</h2><ul>${tools}</ul></section>` : ""}
+      ${sources ? `<section><h2>Sources</h2><ul>${sources}</ul></section>` : ""}
+    </article>`;
+  }).join("\n");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(data.conversation.title)} · Sphere</title>
+<style>
+:root{color-scheme:light dark}*{box-sizing:border-box}body{max-width:860px;margin:0 auto;padding:48px 22px;background:#0b0f14;color:#e8edf2;font:17px/1.58 system-ui,-apple-system,sans-serif}body>header{margin-bottom:36px;border-bottom:1px solid #334155;padding-bottom:20px}h1{margin:0 0 6px;font:700 2.2rem/1.1 Georgia,serif}body>header p{margin:0;color:#94a3b8}.turn{max-width:88%;margin:18px 0;padding:18px 20px;border:1px solid #334155;border-radius:16px;background:#111827}.turn.user{margin-left:auto;background:#172554}.turn.assistant{margin-right:auto;background:#0f201b}.turn header{display:flex;flex-wrap:wrap;gap:8px 14px;margin-bottom:11px;color:#94a3b8;font-size:.82rem}.turn header strong{color:#e8edf2}.content{overflow-wrap:anywhere}.content p{margin:.6em 0;white-space:pre-wrap}.content h3,.content h4,.content h5,.content h6{margin:.9em 0 .35em}.content pre{overflow:auto;padding:12px;border-radius:9px;background:#070a0e}.content code{font-family:ui-monospace,monospace}.content blockquote{margin:.7em 0;padding-left:12px;border-left:3px solid #64748b;color:#cbd5e1}section{margin-top:14px;border-top:1px solid #334155;padding-top:10px}section h2{margin:0 0 5px;color:#94a3b8;font-size:.78rem;text-transform:uppercase}ul{margin:.35em 0;padding-left:20px}a{color:#7dd3fc}@media print{:root{color-scheme:light}body{background:#fff;color:#111;padding:20px}.turn,.turn.user,.turn.assistant{max-width:100%;background:#fff;border-color:#bbb;break-inside:avoid}.turn header strong{color:#111}}
+</style></head><body>
+<header><h1>${escapeHtml(data.conversation.title)}</h1><p>Sphere conversation · exported ${escapeHtml(formatTimeTitle(data.exported_at))}</p></header>
+<main>${turns || "<p>No messages in this conversation.</p>"}</main>
+</body></html>\n`;
+}
+
+function downloadConversation(data, session, format) {
+  const content = format === "json"
+    ? `${JSON.stringify(data, null, 2)}\n`
+    : format === "html" ? conversationAsHtml(data) : conversationAsText(data);
+  const mime = format === "json" ? "application/json" : format === "html" ? "text/html" : "text/plain";
+  const url = URL.createObjectURL(new Blob([content], { type: `${mime};charset=utf-8` }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = exportFilename(session, format);
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportConversation(session, format) {
+  if (!["html", "json", "txt"].includes(format)) return;
+  els.composerStatus.textContent = `Preparing ${format.toUpperCase()} export…`;
+  try {
+    const params = new URLSearchParams({ limit: "500", session_id: session.id });
+    const payload = await fetchJson(`/api/conversation?${params.toString()}`);
+    downloadConversation(exportConversationData(payload, session), payload.session || session, format);
+    els.composerStatus.textContent = `${format.toUpperCase()} export downloaded`;
+  } catch (error) {
+    els.composerStatus.textContent = `Export failed: ${error.message || "unknown error"}`;
+  }
 }
 
 async function renameConversation(session) {
@@ -392,9 +658,47 @@ function renderThread({ force = false } = {}) {
         <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
         <time class="timestamp" datetime="${escapeHtml(turn.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
       </div>
-      <p></p>
+      <div class="bubble-content"></div>
     `;
-    article.querySelector("p").textContent = turn.content || "";
+    renderMarkdown(article.querySelector(".bubble-content"), turn.content || "");
+    if (turn.persistence_status && turn.persistence_status !== "persisted") {
+      article.classList.add("unsaved");
+      const warning = document.createElement("div");
+      warning.className = "bubble-persistence-warning";
+      warning.textContent = "Not saved · copy anything important";
+      article.append(warning);
+    }
+    const toolResults = Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [];
+    if (toolResults.length) {
+      const activity = document.createElement("div");
+      activity.className = "bubble-tools";
+      for (const result of toolResults) {
+        if (!result || typeof result !== "object" || !result.summary) continue;
+        const row = document.createElement("div");
+        row.className = `bubble-tool ${result.ok ? "ok" : "failed"}`;
+        row.textContent = String(result.summary);
+        activity.append(row);
+      }
+      if (activity.children.length) article.append(activity);
+    }
+    const sources = Array.isArray(turn.metadata?.sources) ? turn.metadata.sources : [];
+    if (sources.length) {
+      const list = document.createElement("div");
+      list.className = "bubble-sources";
+      const label = document.createElement("strong");
+      label.textContent = "Sources";
+      list.append(label);
+      for (const [index, source] of sources.entries()) {
+        if (!source || typeof source !== "object" || !source.url) continue;
+        const link = document.createElement("a");
+        link.href = String(source.url);
+        link.target = "_blank";
+        link.rel = "noreferrer noopener";
+        link.textContent = `${index + 1}. ${source.title || source.url}`;
+        list.append(link);
+      }
+      if (list.querySelector("a")) article.append(list);
+    }
     fragment.append(article);
   }
   if (state.thinking) {
@@ -468,6 +772,66 @@ async function sendHeartbeat() {
   }
 }
 
+function normalizedExpression(action) {
+  const expression = action?.expression && typeof action.expression === "object" ? action.expression : {};
+  return {
+    command: String(expression.command || action?.command || "BS").toUpperCase(),
+    text: String(expression.text || action?.reply || ""),
+    channels: Array.isArray(expression.channels) ? expression.channels.map(String) : ["visual", "display", "audio"],
+  };
+}
+
+function renderExpression(action) {
+  const expression = normalizedExpression(action);
+  const color = EXPRESSION_COLORS[expression.command[0]] || EXPRESSION_COLORS.B;
+  els.expressionBanner.style.setProperty("--expression-color", color);
+  els.expressionMeta.textContent = `Sphere · ${expression.command} · ${expression.channels.join(" + ")}`;
+  els.expressionText.textContent = expression.text;
+  els.expressionBanner.hidden = false;
+  if (state.expressionTimer) clearTimeout(state.expressionTimer);
+  state.expressionTimer = setTimeout(() => { els.expressionBanner.hidden = true; }, 8000);
+}
+
+async function acknowledgeBodyAction(actionId, status, error = "") {
+  return fetchJson(`/api/body-actions/${encodeURIComponent(actionId)}/ack`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, error: error || undefined }),
+  });
+}
+
+async function receiveBodyAction() {
+  if (state.receivingBodyAction || document.hidden) return;
+  state.receivingBodyAction = true;
+  try {
+    const payload = await fetchJson("/api/body-actions/next");
+    const action = payload.action;
+    if (!action) return;
+    const expression = normalizedExpression(action);
+    renderExpression(action);
+    await acknowledgeBodyAction(action.id, "delivered");
+    await acknowledgeBodyAction(action.id, "rendered");
+    const speechEnabled = els.allowBrowserSpeech.checked && expression.channels.includes("audio");
+    if (!speechEnabled || !("speechSynthesis" in window)) {
+      await acknowledgeBodyAction(action.id, "completed");
+      return;
+    }
+    await new Promise((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(expression.text);
+      utterance.onstart = () => { void acknowledgeBodyAction(action.id, "tts_started"); };
+      utterance.onend = () => { void acknowledgeBodyAction(action.id, "played").finally(resolve); };
+      utterance.onerror = (event) => {
+        void acknowledgeBodyAction(action.id, "failed", event.error || "Browser speech failed").finally(resolve);
+      };
+      window.speechSynthesis.speak(utterance);
+    });
+  } catch (error) {
+    console.warn("body action", error);
+  } finally {
+    state.receivingBodyAction = false;
+  }
+}
+
 async function refreshConversation({ forceRender = false } = {}) {
   if (state.polling) return;
   if (state.pausePolling && !forceRender) return;
@@ -476,7 +840,12 @@ async function refreshConversation({ forceRender = false } = {}) {
     const params = new URLSearchParams({ limit: "300" });
     if (state.selectedSessionId) params.set("session_id", state.selectedSessionId);
     const payload = await fetchJson(`/api/conversation?${params.toString()}`);
-    state.turns = Array.isArray(payload.turns) ? payload.turns : [];
+    const persistedTurns = Array.isArray(payload.turns) ? payload.turns : [];
+    const snapshotSessionId = payload.session?.id || state.selectedSessionId || payload.active_session_id || "";
+    const unsavedTurns = state.unsavedTurns.filter(
+      (turn) => !turn.local_session_id || turn.local_session_id === snapshotSessionId,
+    );
+    state.turns = [...persistedTurns, ...unsavedTurns];
     state.session = payload.session || null;
     state.activeSessionId = payload.active_session_id || "";
     state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
@@ -489,7 +858,9 @@ async function refreshConversation({ forceRender = false } = {}) {
     renderThread({ force: forceRender });
     const selected = state.sessions.find((item) => item.id === state.selectedSessionId) || state.session;
     const isCurrent = !state.selectedSessionId || state.selectedSessionId === state.activeSessionId;
-    els.threadTitle.textContent = conversationTitle(selected);
+    if (state.view === "chat") {
+      els.threadTitle.textContent = conversationTitle(selected);
+    }
     els.replyInput.disabled = !isCurrent;
     els.send.disabled = !isCurrent || state.sending;
     els.deliverWaveshare.disabled = !isCurrent;
@@ -498,11 +869,56 @@ async function refreshConversation({ forceRender = false } = {}) {
       : "This conversation is archived. Start a new one to reply.";
     if (!isCurrent) els.composerStatus.textContent = "Archived conversation · read only";
     setStatus("online", "Live");
+    if (state.view === "sensor") void refreshTemperatureActions();
   } catch (error) {
     console.error(error);
     setStatus("offline", error.message || "Retrying");
   } finally {
     state.polling = false;
+  }
+}
+
+async function refreshTemperatureActions() {
+  try {
+    const payload = await fetchJson(
+      "/api/interactions?target_device_id=ducati-temp-sensor&limit=50",
+    );
+    const actions = Array.isArray(payload.actions) ? [...payload.actions].reverse() : [];
+    let latest = null;
+    for (const action of actions) {
+      if (!["temperature_measurement", "sensor_read"].includes(action?.action_type) || action?.status !== "completed") continue;
+      if (!action.result || state.sensorSeenActionIds.has(action.id)) continue;
+      state.sensorSeenActionIds.add(action.id);
+      const genericTemperature = Array.isArray(action.result.readings)
+        ? action.result.readings.find((item) => item?.sensor_id === "ambient_temperature")
+        : null;
+      const celsius = Number(genericTemperature?.value ?? action.result.celsius);
+      if (!Number.isFinite(celsius)) continue;
+      const reading = {
+        sequence: Number(action.result.sequence),
+        celsius,
+        fahrenheit: Number(action.result.fahrenheit ?? ((celsius * 9) / 5 + 32)),
+        rawAdc: Number(action.result.raw_adc),
+        uptimeMs: Number(action.result.uptime_ms),
+        time: new Date(action.result.measured_at || action.completed_at || Date.now()),
+        source: "Wi-Fi",
+      };
+      const alreadyReceivedOverBle = state.sensorReadings.some(
+        (item) => item.sequence === reading.sequence && item.uptimeMs === reading.uptimeMs,
+      );
+      if (!alreadyReceivedOverBle) {
+        state.sensorReadings = [reading, ...state.sensorReadings].slice(0, 20);
+      }
+      latest = reading;
+    }
+    if (latest) {
+      els.sensorCelsius.textContent = latest.celsius.toFixed(2);
+      els.sensorFahrenheit.textContent = `${latest.fahrenheit.toFixed(2)} °F`;
+      els.sensorReadingMeta.textContent = `Wi-Fi reading ${latest.sequence} · raw ADC ${latest.rawAdc} · board up ${Math.round(latest.uptimeMs / 1000)}s`;
+      renderSensorHistory();
+    }
+  } catch (error) {
+    console.warn("temperature actions", error);
   }
 }
 
@@ -525,7 +941,7 @@ async function refreshLatestAction() {
     if (!payload.action) return;
     const action = payload.action;
     renderActionDelivery(action);
-    if (action.status === "played" || action.status === "failed") state.latestActionId = "";
+    if (["completed", "played", "failed", "expired"].includes(action.status)) state.latestActionId = "";
   } catch (error) {
     els.composerStatus.textContent = `Could not check Waveshare delivery: ${error.message || "unknown error"}`;
   }
@@ -538,8 +954,10 @@ function renderActionDelivery(action) {
     delivered: "Waveshare acknowledged receipt. Render and playback are unverified by that firmware.",
     rendered: "Waveshare reported its display/LED update. Audio completion is not confirmed yet.",
     tts_started: "Waveshare reported TTS playback started.",
+    completed: "The target body completed its requested non-audio expression.",
     played: "Waveshare reported TTS playback completed.",
     failed: `Waveshare reported delivery failure${action.error ? `: ${action.error}` : "."}`,
+    expired: "This expression expired before the target body could render it.",
   };
   els.composerStatus.textContent = messages[action.status] || `Waveshare action state: ${action.status || "unknown"}`;
   const target = action.target_device_id || "unknown";
@@ -554,23 +972,196 @@ function renderActionDelivery(action) {
 
 function setView(view) {
   state.view = view;
-  const isChat = view === "chat";
-  els.chatView.classList.toggle("active", isChat);
-  els.chatView.hidden = !isChat;
-  els.commandView.classList.toggle("active", !isChat);
-  els.commandView.hidden = isChat;
+  const views = {
+    chat: els.chatView,
+    command: els.commandView,
+    sensor: els.sensorView,
+  };
+  for (const [name, element] of Object.entries(views)) {
+    const active = name === view;
+    element.classList.toggle("active", active);
+    element.hidden = !active;
+  }
   document.querySelectorAll(".tab").forEach((tab) => {
     const active = tab.dataset.view === view;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", active ? "true" : "false");
   });
-  if (isChat) {
+  if (view === "chat") {
     els.viewEyebrow.textContent = "Conversation";
     const selected = state.sessions.find((item) => item.id === state.selectedSessionId) || state.session;
     els.threadTitle.textContent = conversationTitle(selected);
+  } else if (view === "sensor") {
+    els.viewEyebrow.textContent = "Local Bluetooth";
+    els.threadTitle.textContent = "Temperature sensor";
   } else {
     els.viewEyebrow.textContent = "Deployment";
     els.threadTitle.textContent = "Hugging Face Space";
+  }
+}
+
+function setSensorConnectionStatus(kind, label, detail) {
+  els.sensorConnectionBadge.className = `sensor-badge ${kind}`;
+  const dot = document.createElement("span");
+  dot.setAttribute("aria-hidden", "true");
+  els.sensorConnectionBadge.replaceChildren(dot, document.createTextNode(` ${label}`));
+  els.sensorStatus.textContent = detail;
+}
+
+function renderSensorHistory() {
+  els.sensorClear.disabled = state.sensorReadings.length === 0;
+  if (!state.sensorReadings.length) {
+    const row = document.createElement("tr");
+    row.className = "sensor-history-empty";
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = "No readings yet.";
+    row.append(cell);
+    els.sensorHistory.replaceChildren(row);
+    return;
+  }
+
+  els.sensorHistory.replaceChildren(
+    ...state.sensorReadings.map((reading) => {
+      const row = document.createElement("tr");
+      const values = [
+        reading.time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }),
+        `${reading.celsius.toFixed(2)} °C`,
+        `${reading.fahrenheit.toFixed(2)} °F`,
+        String(reading.rawAdc),
+      ];
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      return row;
+    })
+  );
+}
+
+function handleSensorPacket(dataView) {
+  const packet = window.WearabLLMSensorProtocol.decode(dataView);
+  if (packet.kind === "packet-error") {
+    setSensorConnectionStatus("error", "Packet error", "The board sent an incomplete reading. Press the button again.");
+    return;
+  }
+  if (packet.kind === "version-error") {
+    setSensorConnectionStatus("error", "Version error", `Unsupported sensor packet version ${packet.version}.`);
+    return;
+  }
+  if (packet.kind === "waiting") {
+    setSensorConnectionStatus("connected", "Connected", "Connected. Press the physical button to take a reading.");
+    return;
+  }
+  if (state.sensorLastSequence === packet.sequence) return;
+  state.sensorLastSequence = packet.sequence;
+
+  if (packet.kind === "sensor-error") {
+    setSensorConnectionStatus(
+      "error",
+      "Sensor error",
+      `Reading ${packet.sequence} was outside the valid range (raw ADC ${packet.rawAdc}). Check the thermistor connection.`,
+    );
+    els.sensorReadingMeta.textContent = `Invalid reading · raw ADC ${packet.rawAdc}`;
+    return;
+  }
+
+  const reading = { ...packet, time: new Date() };
+  state.sensorReadings = [reading, ...state.sensorReadings].slice(0, 20);
+  els.sensorCelsius.textContent = packet.celsius.toFixed(2);
+  els.sensorFahrenheit.textContent = `${packet.fahrenheit.toFixed(2)} °F`;
+  els.sensorReadingMeta.textContent = `Reading ${packet.sequence} · raw ADC ${packet.rawAdc} · board up ${Math.round(packet.uptimeMs / 1000)}s`;
+  setSensorConnectionStatus("connected", "Connected", "Reading received. Press the physical button whenever you want another.");
+  renderSensorHistory();
+}
+
+function onSensorValueChanged(event) {
+  handleSensorPacket(event.target.value);
+}
+
+function onSensorDisconnected(event) {
+  if (state.sensorCharacteristic) {
+    state.sensorCharacteristic.removeEventListener("characteristicvaluechanged", onSensorValueChanged);
+  }
+  event?.target?.removeEventListener("gattserverdisconnected", onSensorDisconnected);
+  state.sensorDevice = null;
+  state.sensorCharacteristic = null;
+  state.sensorCommandCharacteristic = null;
+  state.sensorLastSequence = null;
+  els.sensorConnect.textContent = "Connect sensor";
+  els.sensorTakeReading.disabled = true;
+  setSensorConnectionStatus("disconnected", "Disconnected", "Sensor disconnected. Reconnect when the board is powered and nearby.");
+}
+
+async function requestSensorReading() {
+  const characteristic = state.sensorCommandCharacteristic;
+  if (!characteristic || !state.sensorDevice?.gatt?.connected) {
+    setSensorConnectionStatus("disconnected", "Disconnected", "Connect the sensor before requesting a reading.");
+    return;
+  }
+
+  els.sensorTakeReading.disabled = true;
+  setSensorConnectionStatus("connected", "Connected", "Measurement requested. Waiting for the ESP32-S3…");
+  try {
+    const command = new Uint8Array([0x01]);
+    if (typeof characteristic.writeValueWithResponse === "function") {
+      await characteristic.writeValueWithResponse(command);
+    } else {
+      await characteristic.writeValue(command);
+    }
+  } catch (error) {
+    setSensorConnectionStatus("error", "Command error", `Could not request a reading: ${error?.message || "unknown Bluetooth error"}`);
+  } finally {
+    els.sensorTakeReading.disabled = !state.sensorDevice?.gatt?.connected;
+  }
+}
+
+async function toggleSensorConnection() {
+  if (state.sensorDevice?.gatt?.connected) {
+    state.sensorDevice.gatt.disconnect();
+    return;
+  }
+  if (!("bluetooth" in navigator)) {
+    setSensorConnectionStatus("error", "Unavailable", "Web Bluetooth is not available here. Open this page in desktop Chrome or Edge.");
+    return;
+  }
+
+  els.sensorConnect.disabled = true;
+  setSensorConnectionStatus("connecting", "Connecting", "Choose Ducati Temperature Sensor in the Bluetooth window.");
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SENSOR_SERVICE_UUID] }],
+    });
+    state.sensorDevice = device;
+    device.addEventListener("gattserverdisconnected", onSensorDisconnected);
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SENSOR_SERVICE_UUID);
+    const characteristic = await service.getCharacteristic(SENSOR_READING_UUID);
+    const commandCharacteristic = await service.getCharacteristic(SENSOR_COMMAND_UUID);
+    state.sensorCharacteristic = characteristic;
+    state.sensorCommandCharacteristic = commandCharacteristic;
+    state.sensorLastSequence = null;
+    characteristic.addEventListener("characteristicvaluechanged", onSensorValueChanged);
+    await characteristic.startNotifications();
+    els.sensorConnect.textContent = "Disconnect";
+    els.sensorTakeReading.disabled = false;
+    setSensorConnectionStatus("connected", "Connected", "Connected. Take a reading here or with the physical button.");
+    handleSensorPacket(await characteristic.readValue());
+  } catch (error) {
+    if (state.sensorDevice?.gatt?.connected) state.sensorDevice.gatt.disconnect();
+    state.sensorDevice = null;
+    state.sensorCharacteristic = null;
+    state.sensorCommandCharacteristic = null;
+    els.sensorTakeReading.disabled = true;
+    const cancelled = error?.name === "NotFoundError";
+    setSensorConnectionStatus(
+      "disconnected",
+      "Disconnected",
+      cancelled ? "Connection cancelled." : `Could not connect: ${error?.message || "unknown Bluetooth error"}`,
+    );
+  } finally {
+    els.sensorConnect.disabled = false;
   }
 }
 
@@ -748,6 +1339,7 @@ async function bootstrap() {
   els.deployRepo.textContent = payload.hf_space_repo || "—";
   els.deployBridge.textContent = payload.bridge_configured ? "configured" : "missing";
   els.deployAvailability.textContent = payload.deploy_available ? "available" : "disabled";
+  els.allowBrowserSpeech.checked = localStorage.getItem("wearabllm.allowBrowserSpeech") === "true";
   if (!payload.bridge_configured) {
     setStatus("offline", "Bridge missing");
     els.composerStatus.textContent = "Configure WEARABLLM_BRIDGE_URL in firmware sdkconfig.";
@@ -771,8 +1363,18 @@ els.cfgTtsModel?.addEventListener("change", () => {
   const selected = voices.includes(els.cfgTtsVoice.value) ? els.cfgTtsVoice.value : voices[0] || "";
   fillSelect(els.cfgTtsVoice, voices, selected);
 });
+els.allowBrowserSpeech?.addEventListener("change", () => {
+  localStorage.setItem("wearabllm.allowBrowserSpeech", String(els.allowBrowserSpeech.checked));
+  if (!els.allowBrowserSpeech.checked && "speechSynthesis" in window) window.speechSynthesis.cancel();
+});
 els.deployDry?.addEventListener("click", () => runDeploy({ dryRun: true }));
 els.deployLive?.addEventListener("click", () => runDeploy({ dryRun: false }));
+els.sensorConnect?.addEventListener("click", toggleSensorConnection);
+els.sensorTakeReading?.addEventListener("click", requestSensorReading);
+els.sensorClear?.addEventListener("click", () => {
+  state.sensorReadings = [];
+  renderSensorHistory();
+});
 
 els.deliverWaveshare.addEventListener("change", () => {
   state.deliverToWaveshare = els.deliverWaveshare.checked;
@@ -810,6 +1412,7 @@ els.replyForm.addEventListener("submit", async (event) => {
     role: "user",
     content: transcript,
     created_at: new Date().toISOString(),
+    local_session_id: state.selectedSessionId || state.activeSessionId,
   };
   state.turns = [...state.turns, optimisticTurn];
   els.replyInput.value = "";
@@ -830,13 +1433,51 @@ els.replyForm.addEventListener("submit", async (event) => {
     if (payload.action) renderActionDelivery(payload.action);
     else els.composerStatus.textContent = payload.command ? `Got ${payload.command}` : "Reply sent";
     state.thinking = false;
+    const persistenceStatus = String(payload.persistence?.status || "unknown");
+    if (persistenceStatus !== "persisted" && persistenceStatus !== "unknown") {
+      const unsavedUser = { ...optimisticTurn, persistence_status: persistenceStatus };
+      const unsavedAssistant = {
+        id: `unsaved-assistant-${Date.now()}`,
+        device_id: "web-console",
+        role: "assistant",
+        content: String(payload.reply || ""),
+        created_at: new Date().toISOString(),
+        local_session_id: optimisticTurn.local_session_id,
+        persistence_status: persistenceStatus,
+        metadata: {
+          sources: Array.isArray(payload.sources) ? payload.sources : [],
+          tool_results: Array.isArray(payload.tool_results) ? payload.tool_results : [],
+        },
+      };
+      state.unsavedTurns = [...state.unsavedTurns, unsavedUser, unsavedAssistant];
+      state.turns = [
+        ...state.turns.filter((turn) => turn.id !== optimisticTurn.id),
+        unsavedUser,
+        unsavedAssistant,
+      ];
+      els.composerStatus.textContent = payload.persistence?.message || "Reply received, but the exchange was not saved";
+      setStatus("warning", "Not saved");
+      renderThread({ force: true });
+      return;
+    }
     await refreshConversation({ forceRender: true });
   } catch (error) {
     console.error(error);
     els.composerStatus.textContent = error.message || "Send failed";
     setStatus("offline", "Send failed");
     state.thinking = false;
-    await refreshConversation({ forceRender: true });
+    state.turns = [
+      ...state.turns,
+      {
+        id: `send-error-${Date.now()}`,
+        device_id: "web-console",
+        role: "assistant",
+        content:
+          "I couldn’t reach Sphere. Your message is still shown here, but it may not have reached the shared conversation. Please try again.",
+        created_at: new Date().toISOString(),
+      },
+    ];
+    renderThread({ force: true });
   } finally {
     state.sending = false;
     state.pausePolling = document.activeElement === els.replyInput;
@@ -882,6 +1523,7 @@ bootstrap()
   .then(async () => {
     await sendHeartbeat();
     await refreshConversation({ forceRender: true });
+    await receiveBodyAction();
   })
   .catch((error) => {
     console.error(error);
@@ -891,6 +1533,7 @@ bootstrap()
 setInterval(() => {
   if (document.hidden) return;
   refreshLatestAction();
+  receiveBodyAction();
   if (state.pausePolling) return;
   refreshConversation();
 }, 4000);

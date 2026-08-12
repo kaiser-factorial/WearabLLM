@@ -14,9 +14,22 @@ Opens `http://127.0.0.1:8787`.
   (`wearabllm-esp32` Waveshare, `wearabllm-android`, `web-console`, future `wearabllm-wearable`)
 - Shows live body presence horizontally across the top
 - Lets you reply from the browser, continuing the same shared thread
-- Keeps active conversation history in the side panel with a `+` new-session
-  action
+- Receives targeted Sphere expressions as a semantic color/text treatment;
+  optional browser speech is disabled by default
+- Shows durable web-search sources under assistant turns
+- Keeps conversation history in the side panel. `+` ends and preserves the
+  current nonempty conversation in the normal list, then starts a new one;
+  repeated clicks on an empty conversation do not create empty history items.
+- Renders lightweight Sphere Markdown as safe headings, lists, links, emphasis,
+  and code while preserving the same turn as plain text for Waveshare/TTS.
+- Downloads any current or archived conversation as standalone HTML, structured
+  JSON, or plain UTF-8 text. Exports use the client-visible API and never include
+  private model tool context.
+- Keeps the conversation in a centered, bounded reading lane at extreme browser
+  zoom-out so left/right message alignment remains visually connected.
 - Moves archived conversations behind a compact bottom Archive control
+- Only the explicit Archive action moves a conversation behind that control;
+  starting a new conversation no longer archives or clears the previous one.
 - Places Rename and Archive behind each conversation's `...` menu
 - Keeps a secondary **device event feed** from private Supabase transcript rows
   (command + mic transcript log)
@@ -24,8 +37,28 @@ Opens `http://127.0.0.1:8787`.
   system prompt, live OpenAI LLM/TTS model choices, TTS voice + delivery
   instructions
 - **Deploy to Hugging Face** from the laptop (code upload only; secrets stay local)
+- **Sensor** tab for direct Web Bluetooth readings from the standalone Ducati
+  ESP32-S3 v6.2 temperature sensor; readings remain browser-local
 - Binds only to `127.0.0.1`; device tokens stay in the Python proxy and never
   reach browser JavaScript
+
+## Temperature sensor tab
+
+Open the dashboard in a Web Bluetooth-capable browser, select **Sensor**, and
+choose **Connect sensor**. The page connects directly to the BLE service
+advertised by `ducati_relay/v6.2_temperature_sensor`, v6.3, or the v6.4 sensor hub.
+Use **Take reading** in the temperature card or press the physical sensor button
+for each direct BLE reading. The page writes command byte `0x01` to the command
+characteristic, and the resulting measurement arrives through the same versioned
+notification packet used by physical button presses.
+
+With v6.4, Sphere can discover the registered sensors, queue fresh readings, or
+create a bounded recurring schedule
+through the private hosted bridge. The sensor polls that bridge over authenticated
+outbound HTTPS and posts structured results; confirmed Wi-Fi readings are folded
+into the same Sensor history. No inbound LAN port is opened. The v6.4 Wi-Fi
+credentials, device token, and TLS root CA live only in its Git-ignored local
+configuration header.
 
 ## Configuration
 
@@ -59,6 +92,8 @@ python3 v3_WAVESHARE/transcript_viewer/server.py \
 | POST | `/api/sessions/<id>/archive` | bridge session archive |
 | POST | `/api/reply` | bridge `POST /v1/query_text` |
 | GET | `/api/interactions[/<id>]` | bridge action queue status |
+| GET | `/api/body-actions/next` | claim the next `web-console` expression |
+| POST | `/api/body-actions/<id>/ack` | report browser rendering/playback state |
 | POST | `/api/session/reset` | bridge `POST /v1/session/reset` |
 | GET/POST | `/api/admin/config` | bridge `GET/POST /v1/admin/config` |
 | GET | `/api/admin/catalog` | bridge live OpenAI model catalog |

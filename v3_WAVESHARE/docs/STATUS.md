@@ -1,6 +1,6 @@
 # v3 Status
 
-Last verified: 2026-08-09
+Last verified: 2026-08-12 (software); 2026-08-09 (Waveshare hardware)
 
 ## Verified on hardware
 
@@ -43,17 +43,23 @@ Do not publish it or distribute compiled binaries from a private deployment.
 
 ## Verified software
 
-- 79 bridge unit tests pass
-- Android TypeScript and protocol tests pass
+- 149 bridge unit tests pass on Python 3.12
+- six synthetic BLE/Wi-Fi sensor protocol routes pass
+- Android TypeScript and protocol tests pass (retained 2026-08-09 evidence)
 - hosted `/health` reports OpenAI + Supabase backends ready
 - OpenAI model catalog and live query work through the Space
-- all Supabase migrations through `20260809030000` match remote
+- all 14 Supabase migrations through `20260812000000` match remote
 - conversation create/read/new-session behavior works across bodies
 - conversation rename and archive endpoints/UI are implemented
 - one 12-turn local session was recovered into Supabase without replaying it
 - live presence uses a 20-second TTL for Waveshare, Android, and Web console
 - dashboard optimistic sends and inline thinking state work
 - queued Waveshare interactions expose real board-reported states
+- the dashboard safely renders lightweight Markdown, exports conversations as
+  HTML/JSON/TXT, and keeps messages in a bounded lane at extreme zoom-out
+- completed user/assistant exchanges use one bulk database insert; later model
+  turns receive bounded private tool context while client APIs receive only
+  redacted activity summaries
 
 ## Known warnings and boundaries
 
@@ -66,13 +72,46 @@ Do not publish it or distribute compiled binaries from a private deployment.
   React Native upgrade, so it is tracked as a dedicated upgrade rather than
   forced into this hardware-verified release.
 - Android and Waveshare currently share one device token.
-- The richer `wearabllm_memory_records` schema is not yet connected to a
-  model-facing memory tool or user review/correction UI.
+- Thirteen custom Sphere tools are live on the private hosted bridge, plus
+  built-in web search: passive status; hybrid memory search, remember,
+  sensitive confirmation, correct, and forget; cross-body expression;
+  read-only source listing/reading; and sensor list/read/loop/cancel. The tool
+  loop is bounded to eight rounds. The memory review UI remains unimplemented.
+- Every tool call now persists a concise in-chat activity summary. Memory
+  mutations show a bounded content prefix; source reads show only path and line
+  range in the audit row.
+- Web search is offered only for explicit or clearly time-sensitive current
+  requests; prior web-search intent and citations cannot leak into later
+  memory turns.
+- Dashboard `+` now ends and preserves the current nonempty conversation in
+  the normal history list. Explicit Archive remains the only action that moves
+  turns into archive storage.
+- Hybrid memory uses `text-embedding-3-small` at 512 dimensions behind a
+  service-role-only, principal-scoped Supabase RPC. The 2026-08-11 live probe
+  retrieved “cobalt lantern” from the synonym query “blue lamp,” then soft-
+  forgot the disposable record.
 - Archive restore/unarchive and deletion are not implemented.
+- One historical 2026-08-12 user turn (`design doc would be nice`) has no stored
+  assistant reply from before atomic exchange persistence was deployed. It was
+  intentionally not rewritten or deleted.
+- The capability-driven Ducati sensor firmware is maintained in the separate
+  `ducati_relay` repository; temperature is the initial registered capability,
+  while humidity and light remain planned.
 - Boot logs emit an I2C pull-up-resistance warning even though both codecs
   initialize and physical audio works; investigate if hardware is intermittent.
 - Long-response retry, lease-expiry, reboot, and power-loss behavior need a
   recorded regression matrix.
+
+## Explicitly tabled on 2026-08-11
+
+The following adjacent work remains deliberately tabled:
+
+- Android/browser background push delivery
+- choosing local per-device speech versus one hosted Sphere voice
+- the dedicated memory review/restore/permanent-delete UI
+
+The implementation and limitations of each tool are documented in
+`TOOLS.md`.
 
 ## Current verification commands
 

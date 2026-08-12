@@ -127,7 +127,7 @@ body {
   top: calc(100% + 4px);
   right: 0;
   display: grid;
-  width: 88px;
+  width: 128px;
   gap: 4px;
   padding: 5px;
   border: 1px solid var(--line);
@@ -155,6 +155,7 @@ body {
 }
 .archive-toggle.active { border-color: var(--accent-2); color: var(--text); }
 .rename-conversation:hover { border-color: var(--accent-2); color: var(--accent-2); }
+.export-conversation:hover { border-color: var(--accent); color: var(--accent); }
 .archive-conversation:hover { border-color: var(--warn); color: var(--warn); }
 .archive-badge { color: var(--muted); font: 600 0.62rem/1 var(--mono); text-transform: uppercase; }
 .conversation-item.active {
@@ -246,6 +247,7 @@ body {
 }
 .status.online span { background: var(--accent); }
 .status.offline span { background: var(--danger); }
+.status.warning span { background: var(--warn); }
 
 .device-list {
   display: flex;
@@ -274,8 +276,46 @@ body {
 .body-status.home .device-dot { color: var(--home); background: var(--home); }
 .body-status.phone .device-dot { color: #f7ca43; background: #f7ca43; }
 .body-status.web .device-dot { color: var(--web); background: var(--web); }
+.body-status.sensor .device-dot { color: var(--accent); background: var(--accent); }
 .body-status.wearable .device-dot { color: var(--wearable); background: var(--wearable); }
 .body-status.custom .device-dot { color: var(--accent-2); background: var(--accent-2); }
+
+.expression-banner {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  gap: 12px;
+  margin: 0 24px 12px;
+  overflow: hidden;
+  border: 1px solid var(--expression-color, var(--accent-2));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--expression-color, var(--accent-2)) 9%, var(--bg-elevated));
+  box-shadow: 0 0 36px color-mix(in srgb, var(--expression-color, var(--accent-2)) 22%, transparent);
+}
+.expression-banner[hidden] { display: none; }
+.expression-glow { background: var(--expression-color, var(--accent-2)); }
+.expression-banner > div { padding: 10px 14px 10px 0; }
+.expression-meta {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font: 600 0.64rem/1.2 "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.expression-text { margin: 0; color: var(--text); font-size: 0.92rem; line-height: 1.35; }
+
+.browser-speech-setting {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+.browser-speech-setting input { width: auto; margin-top: 3px; }
+.browser-speech-setting span { display: grid; gap: 3px; }
+.browser-speech-setting strong { color: var(--text); font-size: 0.82rem; }
+.browser-speech-setting small { color: var(--muted); font-size: 0.72rem; font-weight: 400; }
 
 .device-card {
   display: grid;
@@ -415,6 +455,143 @@ body {
   overflow: auto;
   padding: 18px 32px 28px;
 }
+.view.sensor-view.active {
+  display: block;
+  overflow: auto;
+  padding: 18px 32px 32px;
+}
+
+.sensor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+  gap: 16px;
+  max-width: 1120px;
+  margin: 0 auto;
+}
+.sensor-card {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(18, 23, 34, 0.84);
+  box-shadow: var(--shadow);
+}
+.sensor-card h2 {
+  margin: 4px 0 0;
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 1.45rem;
+}
+.sensor-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.sensor-reading-card {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 86% 18%, rgba(124, 240, 194, 0.13), transparent 38%),
+    rgba(18, 23, 34, 0.9);
+}
+.sensor-reading-card::after {
+  content: "";
+  position: absolute;
+  right: -70px;
+  bottom: -100px;
+  width: 220px;
+  height: 220px;
+  border: 1px solid rgba(124, 240, 194, 0.13);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.sensor-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font: 600 0.68rem/1 "IBM Plex Mono", ui-monospace, monospace;
+  text-transform: uppercase;
+}
+.sensor-badge span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+.sensor-badge.connected { color: var(--accent); border-color: rgba(124, 240, 194, 0.32); }
+.sensor-badge.connecting { color: var(--warn); border-color: rgba(240, 178, 122, 0.32); }
+.sensor-badge.error { color: var(--danger); border-color: rgba(255, 123, 114, 0.32); }
+.temperature-reading {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 34px 0 20px;
+}
+.temperature-reading strong {
+  font: 500 clamp(4rem, 10vw, 7.2rem)/0.86 "Fraunces", Georgia, serif;
+  letter-spacing: -0.07em;
+}
+.temperature-reading > span { color: var(--accent); font-size: 1.6rem; font-weight: 600; }
+.temperature-reading small {
+  align-self: flex-end;
+  margin-left: 10px;
+  color: var(--muted);
+  font: 500 0.9rem/1.3 "IBM Plex Mono", ui-monospace, monospace;
+}
+.sensor-reading-meta {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  color: var(--muted);
+  font: 500 0.74rem/1.4 "IBM Plex Mono", ui-monospace, monospace;
+}
+.sensor-connect-card { display: flex; flex-direction: column; }
+.sensor-connect-card .hint { margin-top: 12px; }
+.sensor-connect-card > button { width: 100%; margin-top: auto; }
+.sensor-reading-actions { position: relative; z-index: 1; margin-top: 18px; }
+.sensor-reading-actions button { width: 100%; }
+.sensor-steps {
+  display: grid;
+  gap: 9px;
+  margin: 18px 0 24px;
+  padding-left: 22px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.sensor-steps strong { color: var(--text); }
+.sensor-status { min-height: 2.3em; margin: 10px 2px 0 !important; }
+.sensor-history-card { grid-column: 1 / -1; }
+.sensor-history-card .ghost { padding: 7px 11px; }
+.sensor-table-wrap { overflow-x: auto; }
+.sensor-table {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+  font: 500 0.78rem/1.35 "IBM Plex Mono", ui-monospace, monospace;
+}
+.sensor-table th,
+.sensor-table td {
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+.sensor-table th {
+  color: var(--muted);
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.sensor-table tbody tr:last-child td { border-bottom: 0; }
+.sensor-table tbody tr:first-child:not(.sensor-history-empty) td { color: var(--accent); }
+.sensor-history-empty td { padding: 28px 12px; color: var(--muted); text-align: center; }
 
 .settings-open { white-space: nowrap; }
 .settings-open--brand {
@@ -580,6 +757,8 @@ body {
 
 @media (max-width: 1100px) {
   .command-grid { grid-template-columns: 1fr; }
+  .sensor-grid { grid-template-columns: 1fr; }
+  .sensor-history-card { grid-column: auto; }
   .field-row { grid-template-columns: 1fr; }
   .key-row { grid-template-columns: 1fr; }
   .models-actions { align-items: flex-end; flex-direction: column; }
@@ -604,7 +783,8 @@ body {
 
 .thread {
   overflow: auto;
-  padding: 24px 32px 12px;
+  padding-block: 24px 12px;
+  padding-inline: max(32px, calc((100% - 1180px) / 2));
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -642,6 +822,14 @@ body {
   border-bottom-left-radius: 6px;
   box-shadow: inset 0 0 0 1px rgba(124, 240, 194, 0.05);
 }
+.bubble.unsaved { border-color: rgba(251, 191, 36, 0.65); }
+.bubble-persistence-warning {
+  margin-top: 9px;
+  color: var(--warn);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
 .bubble-meta {
   display: flex;
   flex-wrap: wrap;
@@ -659,11 +847,84 @@ body {
 .bubble-meta .device-pill.home { color: var(--home); border-color: rgba(110, 231, 183, 0.35); }
 .bubble-meta .device-pill.web { color: var(--web); border-color: rgba(147, 197, 253, 0.35); }
 .bubble-meta .device-pill.wearable { color: var(--wearable); border-color: rgba(240, 171, 252, 0.35); }
-.bubble p {
-  margin: 0;
-  white-space: pre-wrap;
+.bubble-content {
   line-height: 1.55;
   font-size: 1.02rem;
+  overflow-wrap: anywhere;
+}
+.bubble-content > :first-child { margin-top: 0; }
+.bubble-content > :last-child { margin-bottom: 0; }
+.bubble-content p { margin: 0 0 0.8em; white-space: pre-wrap; }
+.bubble-content h3,
+.bubble-content h4,
+.bubble-content h5,
+.bubble-content h6 { margin: 0.9em 0 0.35em; line-height: 1.25; }
+.bubble-content ul,
+.bubble-content ol { margin: 0.45em 0 0.8em; padding-left: 1.45em; }
+.bubble-content li + li { margin-top: 0.28em; }
+.bubble-content code {
+  padding: 0.08em 0.3em;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.24);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.86em;
+}
+.bubble-content pre {
+  overflow: auto;
+  margin: 0.6em 0 0.9em;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+}
+.bubble-content pre code { padding: 0; border: 0; background: none; white-space: pre; }
+.bubble-content blockquote {
+  margin: 0.6em 0 0.9em;
+  padding-left: 0.85em;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.bubble-tools {
+  display: grid;
+  gap: 5px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+}
+.bubble-tool {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.bubble-tool::before {
+  content: "↳ ";
+  color: var(--accent);
+}
+.bubble-tool.failed { color: var(--danger); }
+.bubble-sources {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+}
+.bubble-sources strong {
+  color: var(--muted);
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.bubble-sources a {
+  max-width: 640px;
+  overflow: hidden;
+  color: var(--web);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .thinking-bubble {
   border-color: rgba(124, 240, 194, 0.3);
@@ -837,5 +1098,12 @@ button[type="submit"]:disabled {
   .stage-head { align-items: flex-start; flex-wrap: wrap; }
   .brand-title-row { min-width: 0; }
   .stage-head, .thread, .composer, .body-status-bar { padding-left: 18px; padding-right: 18px; }
+  .view.sensor-view.active { padding-left: 18px; padding-right: 18px; }
   .conversations-panel { max-height: 300px; }
+}
+
+@media (max-width: 560px) {
+  .temperature-reading { flex-wrap: wrap; }
+  .temperature-reading small { width: 100%; margin: 4px 0 0; }
+  .sensor-card { padding: 16px; }
 }

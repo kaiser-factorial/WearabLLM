@@ -46,17 +46,25 @@ Android and Web console use typed queries. Waveshare-originated queries upload
 audio for server-side transcription. All three paths converge before assistant
 generation so they share one conversation.
 
-## Physical delivery
+## Cross-body expression delivery
 
-An assistant reply is not the same as physical playback. When a user enables
-Waveshare delivery, the hosted bridge creates a durable action:
+An assistant reply is not the same as delivery on another body. When the user
+explicitly names one or more targets, the hosted bridge creates one durable
+action per target carrying the same device-neutral expression:
+
+```json
+{"version":1,"command":"GP","text":"Dinner is ready.","channels":["visual","display","audio"]}
+```
 
 ```text
-created/queued
--> board claims action (dispatched)
--> board renders and starts TTS
--> board acknowledges played or failed
+queued -> dispatched -> delivered -> rendered -> completed
+                                      \-> tts_started -> played
+                                      \-> failed
 ```
+
+Waveshare renders command/text/channels as LEDs, TFT, and hosted TTS. Android
+and Web render the same command as a colored Sphere surface plus text; local
+speech is an opt-in body preference. Expired actions are never claimed.
 
 Supabase provides persistence and a claim lease so dashboard/Android and the
 board can operate concurrently without exposing inbound ports on the ESP32.
@@ -106,17 +114,46 @@ Local-only dashboard operations include macOS Keychain updates, firmware
 flashing, and HF code deployment. They should be removed or disabled when the
 conversation UI is hosted.
 
-## Memory boundary
+## Agent tools and memory boundary
 
 WearabLLM and the separate local Memory Hub do not share storage or backends.
-WearabLLM currently uses compact Supabase memories. The richer
-`wearabllm_memory_records` table is a foundation for a future assistant memory
-tool with inferred facts, provenance, confidence, supersession, review,
-correction, and deletion.
+WearabLLM retains compact automatic memories for compatibility and exposes the
+richer `wearabllm_memory_records` table through model tools. Search is allowed
+when relevant. Safe stable facts may be remembered without a magic phrase;
+the bridge blocks credentials and requires a bound yes/no confirmation for
+precise address or contact data. Correction, forgetting, and cross-body sends
+still require matching current-turn intent. Corrections preserve supersession
+history. Clients receive bounded tool activity metadata, including a short
+content prefix for memory mutations so the user can verify what changed. A
+dedicated memory review UI remains future work.
+
+The OpenAI Responses tool loop exposes built-in web search only for explicit or
+clearly time-sensitive current requests. Public source URLs are stored as
+non-spoken assistant-turn metadata and rendered by Android and Web. Tool rounds
+are bounded and parallel function calls are disabled.
+
+Sphere's self-source tools read only a build-time manifest uploaded with the
+private hosted bridge. The manifest broadly covers first-party bridge, client,
+firmware, protocol, migration, and documentation sources while excluding
+secrets, configuration, build outputs, captures, and arbitrary filesystem
+paths.
+
+Rich-memory retrieval is hybrid: the hosted bridge creates 512-dimensional
+`text-embedding-3-small` vectors while a private service-role PostgreSQL
+function combines cosine similarity, full-text rank, importance, and
+confidence after principal/status/expiry filters. Raw vectors never leave the
+bridge/database boundary. `sphere_status` is a separate read-only tool that
+returns only sanitized passive heartbeats, declared body capabilities, service
+availability, and optional acknowledgement metadata; it cannot actively probe
+physical hardware.
+
+See [TOOLS.md](TOOLS.md) for the complete tool inventory, execution flow,
+intent guards, limitations, and the deployment/background-audio decisions that
+are currently tabled.
 
 ## Response contract
 
-The two-character command set remains the cross-component contract:
+The two-character command set remains the semantic cross-component contract:
 
 `GS`, `GP`, `GC`, `RS`, `RF`, `YP`, `BS`, `PS`, `PP`.
 

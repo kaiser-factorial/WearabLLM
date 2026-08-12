@@ -181,6 +181,17 @@ Bridge returns:
   "transcript": "Recognized user speech.",
   "audio_bytes": 123456,
   "saved_wav": null,
+  "sources": [
+    {"title": "Public source title", "url": "https://example.com/source"}
+  ],
+  "tool_results": [
+    {"name": "memory_search", "ok": true, "match_count": 2}
+  ],
+  "persistence": {
+    "status": "persisted",
+    "backend": "supabase",
+    "session_id": "00000000-0000-4000-8000-000000000000"
+  },
   "wav_info": {
     "valid": true,
     "sample_rate": 16000,
@@ -213,8 +224,52 @@ firmware or the Android app.
 | `audio_bytes` | number | yes | debugging capture/upload |
 | `saved_wav` | string or null | yes | bridge-side audio debugging |
 | `wav_info` | object or null | yes | bridge-side audio format debugging |
+| `sources` | array | yes | visual clients; never read aloud automatically |
+| `tool_results` | array | yes | bounded tool audit plus visual activity summary; memory mutations include a short content prefix |
+| `persistence` | object | yes | durable conversation result: `persisted`, `failed`, `skipped`, or `not_configured` |
 
 For `/v1/query_text`, `audio_bytes` is `0`, `saved_wav` is `null`, and `wav_info` is `null`.
+
+If Sphere generates a reply but durable conversation storage fails, the bridge
+still returns the usable command/reply with `persistence.status: "failed"`, a
+stable `error_code`, and a safe user-facing message. Visual clients retain that
+exchange locally and label it **Not saved** instead of refreshing it away or
+claiming it was shared. Conversation and archive rows accept up to 65,536
+characters per turn; larger turns are rejected before a local write.
+
+## Cross-body expressions
+
+All active bodies claim the same device-neutral action shape from:
+
+```http
+GET /v1/devices/<device-id>/actions
+X-WearabLLM-Device-Id: <same device-id>
+```
+
+```json
+{
+  "id": "...",
+  "action_type": "expression",
+  "command": "GP",
+  "reply": "Dinner is ready.",
+  "expression": {
+    "version": 1,
+    "command": "GP",
+    "text": "Dinner is ready.",
+    "channels": ["visual", "display", "audio"]
+  },
+  "status": "dispatched",
+  "expires_at": "2026-08-11T01:02:03Z"
+}
+```
+
+Top-level `command` and `reply` mirror the expression for compatibility with
+the currently flashed Waveshare firmware. Android and Web render the semantic
+command themselves and honor local speech preferences. A body reports progress
+to `POST /v1/devices/<device-id>/actions/<action-id>/ack` with one of
+`delivered`, `rendered`, `tts_started`, `completed`, `played`, or `failed`.
+Only `completed`, `played`, `failed`, and server-generated `expired` are
+terminal. One action row belongs to exactly one target.
 
 Error responses from bridge API endpoints are JSON:
 

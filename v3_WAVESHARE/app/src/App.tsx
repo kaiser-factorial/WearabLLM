@@ -1,9 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
+import * as Speech from 'expo-speech';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   SafeAreaView,
@@ -23,6 +25,8 @@ import {
   BridgeHealth,
   BridgeInteractionResponse,
   archiveBridgeSession,
+  acknowledgeBridgeAction,
+  claimBridgeAction,
   createBridgeInteraction,
   fetchBridgeAction,
   fetchBridgeConversation,
@@ -35,10 +39,12 @@ import {
 } from './protocol/bridgeClient';
 import {
   loadAppDeviceId,
+  loadAllowAutomaticSpeech,
   loadBridgeToken,
   loadBridgeUrl,
   saveBridgeToken,
   saveBridgeUrl,
+  saveAllowAutomaticSpeech,
 } from './storage/settings';
 
 const ANDROID_BODY_ID = 'wearabllm-android';
@@ -69,6 +75,14 @@ function bodyColor(kind: string): string {
   if (kind === 'web') return '#93c5fd';
   if (kind === 'wearable') return '#c084fc';
   return '#818cf8';
+}
+
+function expressionColor(command: string): string {
+  if (command.startsWith('G')) return '#22c55e';
+  if (command.startsWith('R')) return '#ef4444';
+  if (command.startsWith('Y')) return '#eab308';
+  if (command.startsWith('P')) return '#a855f7';
+  return '#3b82f6';
 }
 
 function formatTurnTime(value: string | null): string {
@@ -108,6 +122,8 @@ export default function App() {
   const [transcript, setTranscript] = useState('');
   const [lastAction, setLastAction] = useState<BridgeAction | null>(null);
   const [deliverToWaveshare, setDeliverToWaveshare] = useState(false);
+  const [allowAutomaticSpeech, setAllowAutomaticSpeech] = useState(false);
+  const [activeExpression, setActiveExpression] = useState<BridgeAction | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -126,6 +142,9 @@ export default function App() {
   const healthRequestIdRef = useRef(0);
   const isSendingRef = useRef(false);
   const messageScrollRef = useRef<ScrollView | null>(null);
+  const actionReceiverBusyRef = useRef(false);
+  const activeExpressionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unsavedTurnsRef = useRef<BridgeConversationTurn[]>([]);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId),
@@ -139,13 +158,14 @@ export default function App() {
   const isCurrentConversation = !selectedSessionId || selectedSessionId === activeSessionId;
 
   useEffect(() => {
-    Promise.all([loadBridgeUrl(), loadBridgeToken(), loadAppDeviceId()])
-      .then(([url, token, deviceId]) => {
+    Promise.all([loadBridgeUrl(), loadBridgeToken(), loadAppDeviceId(), loadAllowAutomaticSpeech()])
+      .then(([url, token, deviceId, automaticSpeech]) => {
         bridgeUrlRef.current = url;
         bridgeTokenRef.current = token;
         setBridgeUrl(url);
         setBridgeToken(token);
         setAppDeviceId(deviceId);
+        setAllowAutomaticSpeech(automaticSpeech);
       })
       .finally(() => setSettingsReady(true));
   }, []);
@@ -166,7 +186,11 @@ export default function App() {
         bridgeTokenRef.current,
         selectedSessionIdRef.current,
       );
-      setTurns(snapshot.turns);
+      const snapshotSessionId = snapshot.session?.id || selectedSessionIdRef.current || snapshot.active_session_id || '';
+      const unsavedTurns = unsavedTurnsRef.current.filter(
+        (turn) => !turn.local_session_id || turn.local_session_id === snapshotSessionId,
+      );
+      setTurns([...snapshot.turns, ...unsavedTurns]);
       setBodies(mergeBodies(snapshot.devices));
       setSessions(snapshot.sessions);
       const nextActiveId = snapshot.active_session_id ?? '';
@@ -204,7 +228,80 @@ export default function App() {
   }, [settingsReady, appDeviceId]);
 
   useEffect(() => {
-    if (!lastAction || lastAction.status === 'played' || lastAction.status === 'failed') return;
+    if (!settingsReady) return;
+    let cancelled = false;
+    const receiveAction = async () => {
+      if (cancelled || actionReceiverBusyRef.current) return;
+      const normalizedUrl = normalizeBridgeBaseUrl(bridgeUrlRef.current);
+      if (!normalizedUrl) return;
+      actionReceiverBusyRef.current = true;
+      try {
+        const action = await claimBridgeAction(normalizedUrl, appDeviceId, bridgeTokenRef.current);
+        if (!action || cancelled) return;
+        setActiveExpression(action);
+        setStatus(`Sphere expression · ${action.command}`);
+        if (activeExpressionTimerRef.current) clearTimeout(activeExpressionTimerRef.current);
+        activeExpressionTimerRef.current = setTimeout(() => setActiveExpression(null), 8000);
+        await acknowledgeBridgeAction(normalizedUrl, appDeviceId, action.id, 'delivered', bridgeTokenRef.current);
+        await acknowledgeBridgeAction(normalizedUrl, appDeviceId, action.id, 'rendered', bridgeTokenRef.current);
+        const shouldSpeak = allowAutomaticSpeech && action.expression.channels.includes('audio');
+        if (!shouldSpeak) {
+          await acknowledgeBridgeAction(normalizedUrl, appDeviceId, action.id, 'completed', bridgeTokenRef.current);
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          Speech.speak(action.expression.text, {
+            onStart: () => {
+              void acknowledgeBridgeAction(
+                normalizedUrl,
+                appDeviceId,
+                action.id,
+                'tts_started',
+                bridgeTokenRef.current,
+              );
+            },
+            onDone: () => {
+              void acknowledgeBridgeAction(
+                normalizedUrl,
+                appDeviceId,
+                action.id,
+                'played',
+                bridgeTokenRef.current,
+              ).finally(resolve);
+            },
+            onError: (error) => {
+              void acknowledgeBridgeAction(
+                normalizedUrl,
+                appDeviceId,
+                action.id,
+                'failed',
+                bridgeTokenRef.current,
+                String(error),
+              ).finally(resolve);
+            },
+          });
+        });
+      } catch (error) {
+        setStatus(`Body action failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        actionReceiverBusyRef.current = false;
+      }
+    };
+    void receiveAction();
+    const timer = setInterval(() => void receiveAction(), 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [settingsReady, appDeviceId, allowAutomaticSpeech]);
+
+  useEffect(() => () => {
+    if (activeExpressionTimerRef.current) clearTimeout(activeExpressionTimerRef.current);
+    Speech.stop();
+  }, []);
+
+  useEffect(() => {
+    if (!lastAction || ['completed', 'played', 'failed', 'expired'].includes(lastAction.status)) return;
     const timer = setInterval(() => {
       void fetchBridgeAction(bridgeUrlRef.current, lastAction.id, bridgeTokenRef.current)
         .then((action) => {
@@ -226,16 +323,18 @@ export default function App() {
     setIsSending(true);
     isSendingRef.current = true;
     setIsThinking(true);
-    setTurns((current) => [
-      ...current,
-      {
-        id: `optimistic-${Date.now()}`,
-        device_id: appDeviceId,
-        role: 'user',
-        content: cleanTranscript,
-        created_at: new Date().toISOString(),
-      },
-    ]);
+    const localSessionId = selectedSessionIdRef.current || activeSessionId;
+    const optimisticTurn: BridgeConversationTurn = {
+      id: `optimistic-${Date.now()}`,
+      device_id: appDeviceId,
+      role: 'user',
+      content: cleanTranscript,
+      sources: [],
+      tool_results: [],
+      created_at: new Date().toISOString(),
+      local_session_id: localSessionId,
+    };
+    setTurns((current) => [...current, optimisticTurn]);
     setTranscript('');
     setStatus(deliverToWaveshare ? 'Queueing for Waveshare' : 'Sphere is thinking');
     try {
@@ -265,6 +364,35 @@ export default function App() {
 
       const action = deliverToWaveshare ? (response as BridgeInteractionResponse).action : null;
       setLastAction(action);
+      if (response.persistence.status !== 'persisted' && response.persistence.status !== 'unknown') {
+        const persistenceStatus = response.persistence.status;
+        const unsavedUser = { ...optimisticTurn, persistence_status: persistenceStatus };
+        const unsavedAssistant: BridgeConversationTurn = {
+          id: `unsaved-assistant-${Date.now()}`,
+          device_id: deliverToWaveshare ? WAVESHARE_BODY_ID : ANDROID_BODY_ID,
+          role: 'assistant',
+          content: response.reply,
+          sources: response.sources,
+          tool_results: response.tool_results,
+          created_at: new Date().toISOString(),
+          local_session_id: localSessionId,
+          persistence_status: persistenceStatus,
+        };
+        unsavedTurnsRef.current = [...unsavedTurnsRef.current, unsavedUser, unsavedAssistant];
+        setTurns((current) => [
+          ...current.filter((turn) => turn.id !== optimisticTurn.id),
+          unsavedUser,
+          unsavedAssistant,
+        ]);
+        setStatus(action ? `Waveshare ${action.status} · chat not saved` : 'Reply received · not saved');
+        setIsThinking(false);
+        isSendingRef.current = false;
+        Alert.alert(
+          'Conversation not saved',
+          response.persistence.message || 'Sphere answered, but this exchange is only visible on this screen.',
+        );
+        return;
+      }
       setStatus(action ? `Waveshare ${action.status}` : 'Reply shared');
       setIsThinking(false);
       isSendingRef.current = false;
@@ -427,6 +555,28 @@ export default function App() {
           ))}
         </ScrollView>
 
+        {activeExpression ? (
+          <View
+            style={[
+              styles.expressionBanner,
+              { borderColor: expressionColor(activeExpression.expression.command) },
+            ]}
+          >
+            <View
+              style={[
+                styles.expressionGlow,
+                { backgroundColor: expressionColor(activeExpression.expression.command) },
+              ]}
+            />
+            <View style={styles.expressionCopy}>
+              <Text style={styles.expressionMeta}>
+                SPHERE · {activeExpression.expression.command} · {activeExpression.expression.channels.join(' + ')}
+              </Text>
+              <Text style={styles.expressionText}>{activeExpression.expression.text}</Text>
+            </View>
+          </View>
+        ) : null}
+
         <ScrollView
           ref={messageScrollRef}
           style={styles.messages}
@@ -451,6 +601,36 @@ export default function App() {
                   <Text style={styles.bubbleTime}>{formatTurnTime(turn.created_at)}</Text>
                 </View>
                 <Text style={styles.bubbleText}>{turn.content}</Text>
+                {turn.persistence_status && turn.persistence_status !== 'persisted' ? (
+                  <Text style={styles.persistenceWarning}>Not saved · copy anything important</Text>
+                ) : null}
+                {turn.tool_results.length > 0 ? (
+                  <View style={styles.toolActivityList}>
+                    {turn.tool_results.map((activity, activityIndex) => (
+                      <Text
+                        key={`${activity.name}-${activityIndex}`}
+                        style={[styles.toolActivityText, !activity.ok ? styles.toolActivityFailed : null]}
+                      >
+                        ↳ {activity.summary}
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+                {turn.sources.length > 0 ? (
+                  <View style={styles.sourceList}>
+                    <Text style={styles.sourceLabel}>Sources</Text>
+                    {turn.sources.map((source, sourceIndex) => (
+                      <Text
+                        key={`${source.url}-${sourceIndex}`}
+                        numberOfLines={1}
+                        onPress={() => void Linking.openURL(source.url)}
+                        style={styles.sourceLink}
+                      >
+                        {sourceIndex + 1}. {source.title || source.url}
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
               </View>
             );
           })}
@@ -629,6 +809,21 @@ export default function App() {
                       placeholderTextColor="#64748b"
                       style={styles.configInput}
                     />
+                    <View style={styles.preferenceRow}>
+                      <View style={styles.preferenceCopy}>
+                        <Text style={styles.preferenceTitle}>Automatic Sphere speech</Text>
+                        <Text style={styles.helperText}>Allow targeted body actions to speak through this phone.</Text>
+                      </View>
+                      <Switch
+                        value={allowAutomaticSpeech}
+                        onValueChange={(value) => {
+                          setAllowAutomaticSpeech(value);
+                          void saveAllowAutomaticSpeech(value);
+                        }}
+                        trackColor={{ false: '#334155', true: '#287b63' }}
+                        thumbColor={allowAutomaticSpeech ? '#7cf0c2' : '#94a3b8'}
+                      />
+                    </View>
                     <Pressable style={[styles.testButton, isCheckingHealth && styles.disabled]} onPress={() => void handleCheckBridge()} disabled={isCheckingHealth}>
                       {isCheckingHealth ? <ActivityIndicator color="#e2e8f0" size="small" /> : <Text style={styles.testButtonText}>Save & test</Text>}
                     </Pressable>
@@ -664,6 +859,11 @@ const styles = StyleSheet.create({
   bodyChipLabel: { color: '#e2e8f0', fontSize: 11, fontWeight: '800' },
   bodyChipState: { color: '#64748b', fontSize: 9, textTransform: 'uppercase' },
   planned: { opacity: 0.5 },
+  expressionBanner: { alignItems: 'stretch', backgroundColor: '#101827', borderRadius: 12, borderWidth: 1, flexDirection: 'row', marginHorizontal: 14, marginBottom: 8, overflow: 'hidden' },
+  expressionGlow: { opacity: 0.9, width: 7 },
+  expressionCopy: { flex: 1, gap: 4, paddingHorizontal: 11, paddingVertical: 9 },
+  expressionMeta: { color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 0.8, textTransform: 'uppercase' },
+  expressionText: { color: '#f8fafc', fontSize: 14, lineHeight: 19 },
   messages: { borderTopColor: '#1e293b', borderTopWidth: 1, flex: 1 },
   messageContent: { flexGrow: 1, gap: 9, padding: 14 },
   emptyState: { alignItems: 'center', flex: 1, justifyContent: 'center', padding: 28 },
@@ -679,6 +879,13 @@ const styles = StyleSheet.create({
   bubbleRole: { color: '#64748b', fontSize: 10 },
   bubbleTime: { color: '#64748b', flex: 1, fontSize: 9, textAlign: 'right' },
   bubbleText: { color: '#f8fafc', fontSize: 15, lineHeight: 21 },
+  persistenceWarning: { color: '#fbbf24', fontSize: 10, fontWeight: '800', marginTop: 2 },
+  toolActivityList: { borderTopColor: '#273449', borderTopWidth: 1, gap: 4, marginTop: 3, paddingTop: 7 },
+  toolActivityText: { color: '#94a3b8', fontFamily: 'monospace', fontSize: 10, lineHeight: 15 },
+  toolActivityFailed: { color: '#fca5a5' },
+  sourceList: { borderTopColor: '#273449', borderTopWidth: 1, gap: 4, marginTop: 3, paddingTop: 7 },
+  sourceLabel: { color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 0.7, textTransform: 'uppercase' },
+  sourceLink: { color: '#93c5fd', fontSize: 11, lineHeight: 16, textDecorationLine: 'underline' },
   composer: { borderTopColor: '#273449', borderTopWidth: 1, gap: 7, paddingHorizontal: 12, paddingBottom: 10, paddingTop: 8 },
   deliveryRow: { alignItems: 'center', flexDirection: 'row', gap: 5, minHeight: 28 },
   deliveryLabel: { color: '#cbd5e1', fontSize: 11, fontWeight: '700' },
@@ -730,6 +937,9 @@ const styles = StyleSheet.create({
   configChevron: { color: '#facc15', fontSize: 11, fontWeight: '900' },
   configBodyScroll: { maxHeight: 310 },
   configBody: { borderTopColor: '#273449', borderTopWidth: 1, gap: 8, padding: 13 },
+  preferenceRow: { alignItems: 'center', borderColor: '#273449', borderRadius: 8, borderWidth: 1, flexDirection: 'row', gap: 10, padding: 10 },
+  preferenceCopy: { flex: 1, gap: 2 },
+  preferenceTitle: { color: '#e2e8f0', fontSize: 12, fontWeight: '800' },
   label: { color: '#cbd5e1', fontSize: 10, fontWeight: '800', letterSpacing: 0.7, textTransform: 'uppercase' },
   configInput: { backgroundColor: '#111827', borderColor: '#334155', borderRadius: 8, borderWidth: 1, color: '#f8fafc', fontSize: 14, paddingHorizontal: 11, paddingVertical: 9 },
   testButton: { alignItems: 'center', backgroundColor: '#1e293b', borderColor: '#475569', borderRadius: 8, borderWidth: 1, justifyContent: 'center', minHeight: 40, paddingHorizontal: 12 },

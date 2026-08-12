@@ -7,6 +7,35 @@ export interface BridgeResponse {
   audio_bytes: number;
   saved_wav: string | null;
   wav_info: BridgeWavInfo | null;
+  sources: BridgeSource[];
+  tool_results: BridgeToolActivity[];
+  persistence: BridgePersistence;
+}
+
+export type BridgePersistenceStatus =
+  | 'persisted'
+  | 'failed'
+  | 'skipped'
+  | 'not_configured'
+  | 'unknown';
+
+export interface BridgePersistence {
+  status: BridgePersistenceStatus;
+  backend: string;
+  session_id: string | null;
+  error_code?: string;
+  message?: string;
+}
+
+export interface BridgeSource {
+  url: string;
+  title: string;
+}
+
+export interface BridgeToolActivity {
+  name: string;
+  ok: boolean;
+  summary: string;
 }
 
 export type ActionStatus =
@@ -15,8 +44,19 @@ export type ActionStatus =
   | 'delivered'
   | 'rendered'
   | 'tts_started'
+  | 'completed'
   | 'played'
-  | 'failed';
+  | 'failed'
+  | 'expired';
+
+export type ExpressionChannel = 'visual' | 'display' | 'audio';
+
+export interface SphereExpression {
+  version: 1;
+  command: LEDCommand;
+  text: string;
+  channels: ExpressionChannel[];
+}
 
 export interface BridgeAction {
   id: string;
@@ -25,10 +65,13 @@ export interface BridgeAction {
   transcript: string;
   command: LEDCommand;
   reply: string;
+  action_type: 'expression';
+  expression: SphereExpression;
   status: ActionStatus;
   attempts: number;
   created_at: string;
   updated_at: string;
+  expires_at: string | null;
   error: string | null;
 }
 
@@ -53,7 +96,11 @@ export interface BridgeConversationTurn {
   device_id: string;
   role: 'user' | 'assistant';
   content: string;
+  sources: BridgeSource[];
+  tool_results: BridgeToolActivity[];
   created_at: string | null;
+  local_session_id?: string;
+  persistence_status?: BridgePersistenceStatus;
 }
 
 export interface BridgeConversationSession {
@@ -514,11 +561,14 @@ export async function createBridgeInteraction(
     throw new Error(`Bridge interaction error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
   const payload = parsed as Record<string, unknown>;
-  const action = payload.action as BridgeAction | undefined;
-  if (!isLEDCommand(String(payload.command ?? '')) || typeof payload.reply !== 'string' || !action?.id) {
+  if (!isLEDCommand(String(payload.command ?? '')) || typeof payload.reply !== 'string') {
     throw new Error('Bridge interaction response is missing a valid action.');
   }
-  return payload as unknown as BridgeInteractionResponse;
+  return {
+    ...parseBridgeResponse(payload),
+    action: parseBridgeAction(payload.action),
+    action_created: Boolean(payload.action_created),
+  };
 }
 
 export async function fetchBridgeConversation(
@@ -715,13 +765,40 @@ function parseBridgeConversationTurn(payload: unknown): BridgeConversationTurn |
   const role = String(data.role ?? '');
   if (role !== 'user' && role !== 'assistant') return null;
   const rawDeviceId = String(data.device_id ?? '').trim();
+  const metadata = typeof data.metadata === 'object' && data.metadata !== null
+    ? data.metadata as Record<string, unknown>
+    : {};
   return {
     id: typeof data.id === 'number' ? data.id : String(data.id ?? ''),
     device_id: rawDeviceId === 'local-bridge' ? 'web-console' : rawDeviceId || 'wearabllm-unknown',
     role,
     content: String(data.content ?? ''),
+    sources: parseBridgeSources(metadata.sources),
+    tool_results: parseBridgeToolActivity(metadata.tool_results),
     created_at: data.created_at == null ? null : String(data.created_at),
   };
+}
+
+function parseBridgeSources(payload: unknown): BridgeSource[] {
+  return Array.isArray(payload)
+    ? payload
+        .filter((source): source is Record<string, unknown> => typeof source === 'object' && source !== null)
+        .map((source) => ({ url: String(source.url ?? ''), title: String(source.title ?? source.url ?? '') }))
+        .filter((source) => Boolean(source.url))
+    : [];
+}
+
+function parseBridgeToolActivity(payload: unknown): BridgeToolActivity[] {
+  return Array.isArray(payload)
+    ? payload
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => ({
+          name: String(item.name ?? 'tool'),
+          ok: Boolean(item.ok),
+          summary: String(item.summary ?? '').trim(),
+        }))
+        .filter((item) => Boolean(item.summary))
+    : [];
 }
 
 export async function fetchBridgeAction(baseUrl: string, actionId: string, deviceToken = ''): Promise<BridgeAction> {
@@ -738,11 +815,59 @@ export async function fetchBridgeAction(baseUrl: string, actionId: string, devic
   if (!response.ok || !parsed || typeof parsed !== 'object') {
     throw new Error(`Bridge action error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  const action = (parsed as Record<string, unknown>).action as BridgeAction | undefined;
-  if (!action?.id || !isLEDCommand(String(action.command ?? ''))) {
-    throw new Error('Bridge action response is invalid.');
+  return parseBridgeAction((parsed as Record<string, unknown>).action);
+}
+
+export async function claimBridgeAction(
+  baseUrl: string,
+  deviceId: string,
+  deviceToken = '',
+): Promise<BridgeAction | null> {
+  const response = await fetch(
+    `${normalizeBridgeBaseUrl(baseUrl)}/v1/devices/${encodeURIComponent(deviceId)}/actions`,
+    { headers: bridgeHeaders(deviceToken, false, deviceId) },
+  );
+  const rawText = await response.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    throw new Error(`Bridge action claim returned non-JSON response: ${rawText.slice(0, 160)}`);
   }
-  return action;
+  if (!response.ok || !parsed || typeof parsed !== 'object') {
+    throw new Error(`Bridge action claim error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
+  }
+  const action = (parsed as Record<string, unknown>).action;
+  return action == null ? null : parseBridgeAction(action);
+}
+
+export async function acknowledgeBridgeAction(
+  baseUrl: string,
+  deviceId: string,
+  actionId: string,
+  status: 'delivered' | 'rendered' | 'tts_started' | 'completed' | 'played' | 'failed',
+  deviceToken = '',
+  error = '',
+): Promise<BridgeAction> {
+  const response = await fetch(
+    `${normalizeBridgeBaseUrl(baseUrl)}/v1/devices/${encodeURIComponent(deviceId)}/actions/${encodeURIComponent(actionId)}/ack`,
+    {
+      method: 'POST',
+      headers: bridgeHeaders(deviceToken, true, deviceId),
+      body: JSON.stringify({ status, error: error || undefined }),
+    },
+  );
+  const rawText = await response.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    throw new Error(`Bridge action acknowledgement returned non-JSON response: ${rawText.slice(0, 160)}`);
+  }
+  if (!response.ok || !parsed || typeof parsed !== 'object') {
+    throw new Error(`Bridge action acknowledgement error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
+  }
+  return parseBridgeAction((parsed as Record<string, unknown>).action);
 }
 
 export async function configureDeviceWifi(
@@ -931,6 +1056,79 @@ export function parseBridgeResponse(payload: unknown): BridgeResponse {
     audio_bytes: Number(data.audio_bytes ?? 0),
     saved_wav: data.saved_wav == null ? null : String(data.saved_wav),
     wav_info: parseBridgeWavInfo(data.wav_info),
+    sources: parseBridgeSources(data.sources),
+    tool_results: parseBridgeToolActivity(data.tool_results),
+    persistence: parseBridgePersistence(data.persistence),
+  };
+}
+
+export function parseBridgePersistence(payload: unknown): BridgePersistence {
+  if (typeof payload !== 'object' || payload === null) {
+    return { status: 'unknown', backend: '', session_id: null };
+  }
+  const data = payload as Record<string, unknown>;
+  const rawStatus = String(data.status ?? 'unknown');
+  const allowed = new Set<BridgePersistenceStatus>([
+    'persisted',
+    'failed',
+    'skipped',
+    'not_configured',
+    'unknown',
+  ]);
+  const status = allowed.has(rawStatus as BridgePersistenceStatus)
+    ? rawStatus as BridgePersistenceStatus
+    : 'unknown';
+  return {
+    status,
+    backend: String(data.backend ?? ''),
+    session_id: data.session_id == null ? null : String(data.session_id),
+    error_code: data.error_code == null ? undefined : String(data.error_code),
+    message: data.message == null ? undefined : String(data.message),
+  };
+}
+
+export function parseBridgeAction(payload: unknown): BridgeAction {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error('Bridge action must be a JSON object.');
+  }
+  const data = payload as Record<string, unknown>;
+  const command = String(data.command ?? '').toUpperCase();
+  if (!data.id || !isLEDCommand(command)) {
+    throw new Error('Bridge action response is invalid.');
+  }
+  const rawExpression = typeof data.expression === 'object' && data.expression !== null
+    ? data.expression as Record<string, unknown>
+    : {};
+  const expressionCommand = String(rawExpression.command ?? command).toUpperCase();
+  if (!isLEDCommand(expressionCommand)) {
+    throw new Error('Bridge expression command is invalid.');
+  }
+  const allowedChannels = new Set<ExpressionChannel>(['visual', 'display', 'audio']);
+  const channels = Array.isArray(rawExpression.channels)
+    ? rawExpression.channels
+        .map((channel) => String(channel) as ExpressionChannel)
+        .filter((channel): channel is ExpressionChannel => allowedChannels.has(channel))
+    : ['visual', 'display', 'audio'] as ExpressionChannel[];
+  return {
+    id: String(data.id),
+    origin_device_id: String(data.origin_device_id ?? ''),
+    target_device_id: String(data.target_device_id ?? ''),
+    transcript: String(data.transcript ?? ''),
+    command,
+    reply: String(data.reply ?? ''),
+    action_type: 'expression',
+    expression: {
+      version: 1,
+      command: expressionCommand,
+      text: String(rawExpression.text ?? data.reply ?? ''),
+      channels: channels.length ? channels : ['display'],
+    },
+    status: String(data.status ?? 'queued') as ActionStatus,
+    attempts: Number(data.attempts ?? 0),
+    created_at: String(data.created_at ?? ''),
+    updated_at: String(data.updated_at ?? ''),
+    expires_at: data.expires_at == null ? null : String(data.expires_at),
+    error: data.error == null ? null : String(data.error),
   };
 }
 

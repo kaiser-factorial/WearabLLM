@@ -12,6 +12,7 @@ import {
   normalizeTtsMaxBytes,
   parseBridgeHealth,
   parseBridgeConversation,
+  parseBridgeResponse,
   parseDeviceWifiConfigResponse,
   summarizeBridgeBenchStatus,
 } from './bridgeClient';
@@ -44,6 +45,30 @@ assertEqual(bridgeErrorMessage({ reply: 'Bridge error: bad audio' }, 'fallback')
 assertEqual(bridgeErrorMessage({ message: 'Updated' }, 'fallback'), 'Updated');
 assertEqual(bridgeErrorMessage({}, 'plain text failure'), 'plain text failure');
 
+const unsavedReply = parseBridgeResponse({
+  command: 'BS',
+  reply: 'The RFC was generated.',
+  transcript: 'Write the RFC.',
+  persistence: {
+    status: 'failed',
+    backend: 'supabase',
+    session_id: 'session-1',
+    error_code: 'conversation_write_failed',
+    message: 'Sphere answered, but this exchange could not be saved.',
+  },
+});
+if (
+  unsavedReply.persistence.status !== 'failed' ||
+  unsavedReply.persistence.error_code !== 'conversation_write_failed'
+) {
+  throw new Error(`Expected failed persistence metadata, got ${JSON.stringify(unsavedReply.persistence)}`);
+}
+
+const legacyReply = parseBridgeResponse({ command: 'BS', reply: 'Legacy', transcript: 'Legacy' });
+if (legacyReply.persistence.status !== 'unknown') {
+  throw new Error(`Expected legacy reply persistence to remain compatible, got ${legacyReply.persistence.status}`);
+}
+
 const conversation = parseBridgeConversation({
   ok: true,
   conversation_backend: 'supabase',
@@ -60,7 +85,17 @@ const conversation = parseBridgeConversation({
   ],
   turns: [
     { id: 1, device_id: 'wearabllm-android', role: 'user', content: 'Hello', created_at: null },
-    { id: 2, device_id: 'local-bridge', role: 'assistant', content: 'Hi', created_at: null },
+    {
+      id: 2,
+      device_id: 'local-bridge',
+      role: 'assistant',
+      content: 'Hi',
+      metadata: {
+        sources: [{ title: 'Example', url: 'https://example.com/source' }],
+        tool_results: [{ name: 'memory_remember', ok: true, summary: 'Memory updated — Corina prefers direct replies.' }],
+      },
+      created_at: null,
+    },
   ],
 });
 if (conversation.devices.length !== 1 || conversation.devices[0].id !== 'wearabllm-android') {
@@ -68,6 +103,12 @@ if (conversation.devices.length !== 1 || conversation.devices[0].id !== 'wearabl
 }
 if (conversation.turns[1].device_id !== 'web-console') {
   throw new Error(`Expected legacy local-bridge turn to map to web-console, got ${conversation.turns[1].device_id}`);
+}
+if (conversation.turns[1].sources[0]?.url !== 'https://example.com/source') {
+  throw new Error(`Expected assistant source metadata to parse, got ${JSON.stringify(conversation.turns[1])}`);
+}
+if (conversation.turns[1].tool_results[0]?.summary !== 'Memory updated — Corina prefers direct replies.') {
+  throw new Error(`Expected tool activity metadata to parse, got ${JSON.stringify(conversation.turns[1])}`);
 }
 if (conversation.session?.id !== 'session-1' || conversation.sessions.length !== 2) {
   throw new Error(`Expected conversation sessions to parse, got ${JSON.stringify(conversation.sessions)}`);

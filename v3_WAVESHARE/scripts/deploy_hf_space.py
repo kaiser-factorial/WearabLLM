@@ -8,6 +8,7 @@ prints, or uploads local firmware sdkconfig files or any other secrets.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -17,6 +18,38 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 V3_DIR = SCRIPT_DIR.parent
 BRIDGE_DIR = V3_DIR / "bridge"
 SPACE_DIR = V3_DIR / "hosted_agent"
+REPO_DIR = V3_DIR.parent
+SOURCE_PATTERNS = (
+    "README.md",
+    "supabase/README.md",
+    "supabase/migrations/*.sql",
+    "v3_WAVESHARE/README.md",
+    "v3_WAVESHARE/docs/*.md",
+    "v3_WAVESHARE/bridge/*.py",
+    "v3_WAVESHARE/protocol/*.md",
+    "v3_WAVESHARE/hosted_agent/Dockerfile",
+    "v3_WAVESHARE/hosted_agent/README.md",
+    "v3_WAVESHARE/scripts/*.py",
+    "v3_WAVESHARE/scripts/*.sh",
+    "v3_WAVESHARE/transcript_viewer/README.md",
+    "v3_WAVESHARE/transcript_viewer/server.py",
+    "v3_WAVESHARE/transcript_viewer/static/*.html",
+    "v3_WAVESHARE/transcript_viewer/static/*.css",
+    "v3_WAVESHARE/transcript_viewer/static/*.js",
+    "v3_WAVESHARE/app/README.md",
+    "v3_WAVESHARE/app/package.json",
+    "v3_WAVESHARE/app/src/**/*.ts",
+    "v3_WAVESHARE/app/src/**/*.tsx",
+    "v3_WAVESHARE/firmware/main/*.c",
+    "v3_WAVESHARE/firmware/main/*.h",
+    "v3_WAVESHARE/firmware/main/*.yml",
+    "v3_WAVESHARE/firmware/main/CMakeLists.txt",
+    "v3_WAVESHARE/firmware/main/Kconfig.projbuild",
+)
+FORBIDDEN_SOURCE_PARTS = {".git", "build", "node_modules", "captures", "private", "secrets"}
+FORBIDDEN_SOURCE_NAMES = (".env", "sdkconfig", "credential", "secret", "id_rsa")
+MAX_SOURCE_FILE_BYTES = 256 * 1024
+MAX_SOURCE_BUNDLE_BYTES = 4 * 1024 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +58,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--public", action="store_true", help="Create a public Space with public source code (not recommended).")
     parser.add_argument("--dry-run", action="store_true", help="Show the selected files without contacting Hugging Face.")
     return parser.parse_args()
+
+
+def build_source_bundle(destination: Path) -> Path:
+    """Create the private Space's opt-in, read-only self-source manifest."""
+    selected: set[Path] = set()
+    for pattern in SOURCE_PATTERNS:
+        selected.update(path for path in REPO_DIR.glob(pattern) if path.is_file())
+    files: dict[str, str] = {}
+    total_bytes = 0
+    for path in sorted(selected):
+        relative = path.relative_to(REPO_DIR).as_posix()
+        lowered_parts = {part.lower() for part in path.relative_to(REPO_DIR).parts}
+        lowered_name = path.name.lower()
+        if path.is_symlink() or lowered_parts & FORBIDDEN_SOURCE_PARTS:
+            raise RuntimeError(f"Refusing unsafe source-manifest path: {relative}")
+        if any(marker in lowered_name for marker in FORBIDDEN_SOURCE_NAMES):
+            raise RuntimeError(f"Refusing sensitive source-manifest path: {relative}")
+        size = path.stat().st_size
+        if size > MAX_SOURCE_FILE_BYTES:
+            raise RuntimeError(f"Source-manifest file is too large: {relative} ({size} bytes)")
+        content = path.read_text(encoding="utf-8")
+        total_bytes += len(content.encode("utf-8"))
+        if total_bytes > MAX_SOURCE_BUNDLE_BYTES:
+            raise RuntimeError("Sphere source manifest exceeds the 4 MiB deployment limit")
+        files[relative] = content
+    if not files:
+        raise RuntimeError("Sphere source manifest is empty")
+    output = destination / "source_bundle.json"
+    output.write_text(json.dumps({"version": 1, "files": files}), encoding="utf-8")
+    return output
 
 
 def staged_space(destination: Path) -> list[Path]:
@@ -36,12 +99,21 @@ def staged_space(destination: Path) -> list[Path]:
         "action_queue.py",
         "agent_config.py",
         "durable_memory.py",
+        "household_memory.py",
+        "source_code.py",
+        "sphere_tools.py",
         "wearabllm_bridge.py",
         "requirements.txt",
     ]
     for name in files:
         shutil.copy2(BRIDGE_DIR / name, bridge_destination / name)
-    return [destination / "Dockerfile", destination / "README.md", *(bridge_destination / name for name in files)]
+    source_bundle = build_source_bundle(destination)
+    return [
+        destination / "Dockerfile",
+        destination / "README.md",
+        source_bundle,
+        *(bridge_destination / name for name in files),
+    ]
 
 
 def main() -> int:

@@ -32,15 +32,17 @@ JavaScript, or a committed environment file.
   roomies, household facts, routines, relationships, and instructions. Records
   retain source, confidence, importance, confirmation, expiry, and supersession
   state so later corrections do not silently overwrite history.
-- `wearabllm_device_actions`: persistent phone/dashboard-to-Waveshare actions
-  with idempotency, a board claim lease, and delivery/playback state.
+- `wearabllm_device_actions`: device-neutral expressions targeted to any active
+  body, with per-target idempotency, expiry, a claim lease, and terminal state.
 - `wearabllm_agent_settings`: live assistant model, voice, prompts, and TTS
   instructions used by dashboard and hosted bridge.
 
-The action queue, shared conversation, archive, titles, compact memory, and
-agent settings are implemented. The richer `wearabllm_memory_records` table is
-still a schema foundation: model tools, retrieval, inferred-fact extraction,
-review, correction, and deletion remain future work.
+The richer records are now available to Sphere through search, safe durable
+remembering, sensitive yes/no confirmation, and explicit correct/forget tools.
+Broad transcript extraction and a user review UI remain out of scope.
+Conversation-turn metadata stores public
+web citations and redacted tool audit results without putting them in spoken
+reply text.
 
 ## Applied migrations
 
@@ -55,6 +57,10 @@ The current schema sequence is:
 20260809010000 agent settings
 20260809020000 device action status alignment
 20260809030000 conversation titles
+20260810000000 normalized Sphere expression actions
+20260810010000 conversation citation and tool metadata
+20260810020000 atomic explicit memory correction
+20260810030000 pgvector columns and principal-scoped hybrid memory search
 ```
 
 Confirm local and remote versions match before deploying bridge code:

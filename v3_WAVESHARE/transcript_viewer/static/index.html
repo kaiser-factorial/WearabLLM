@@ -42,14 +42,23 @@
           </div>
           <div class="stage-actions">
             <div class="view-tabs" role="tablist" aria-label="Sphere views">
-              <button type="button" class="tab active" data-view="chat" role="tab" aria-selected="true">Chat</button>
-              <button type="button" class="tab" data-view="command" role="tab" aria-selected="false">Deploy</button>
+              <button type="button" class="tab active" data-view="chat" role="tab" aria-selected="true" aria-controls="chat-view">Chat</button>
+              <button type="button" class="tab" data-view="sensor" role="tab" aria-selected="false" aria-controls="sensor-view">Sensor</button>
+              <button type="button" class="tab" data-view="command" role="tab" aria-selected="false" aria-controls="command-view">Deploy</button>
             </div>
           </div>
         </header>
 
         <section class="body-status-bar" aria-label="Sphere bodies">
           <div id="device-list" class="device-list" role="list" aria-label="Body statuses"></div>
+        </section>
+
+        <section id="expression-banner" class="expression-banner" aria-live="polite" hidden>
+          <span id="expression-glow" class="expression-glow" aria-hidden="true"></span>
+          <div>
+            <p id="expression-meta" class="expression-meta"></p>
+            <p id="expression-text" class="expression-text"></p>
+          </div>
         </section>
 
         <section id="chat-view" class="view active">
@@ -106,6 +115,65 @@
             </section>
           </div>
         </section>
+
+        <section id="sensor-view" class="view sensor-view" hidden>
+          <div class="sensor-grid">
+            <section class="sensor-card sensor-reading-card" aria-labelledby="sensor-reading-title">
+              <div class="sensor-card-head">
+                <div>
+                  <p class="eyebrow">Latest reading</p>
+                  <h2 id="sensor-reading-title">Temperature</h2>
+                </div>
+                <span id="sensor-connection-badge" class="sensor-badge disconnected">
+                  <span aria-hidden="true"></span> Disconnected
+                </span>
+              </div>
+              <div class="temperature-reading" aria-live="polite">
+                <strong id="sensor-celsius">—</strong><span>°C</span>
+                <small id="sensor-fahrenheit">Waiting for a reading</small>
+              </div>
+              <p id="sensor-reading-meta" class="sensor-reading-meta">Connect v6.2 or v6.3, then request a reading here or on the device.</p>
+              <div class="sensor-reading-actions">
+                <button id="sensor-take-reading" type="button" disabled>Take reading</button>
+              </div>
+            </section>
+
+            <section class="sensor-card sensor-connect-card" aria-labelledby="sensor-connect-title">
+              <p class="eyebrow">Bluetooth LE</p>
+              <h2 id="sensor-connect-title">Ducati sensor</h2>
+              <p class="hint">
+                Direct BLE readings stay on this page. With v6.3, confirmed Wi-Fi readings also arrive through Sphere's private bridge.
+              </p>
+              <ol class="sensor-steps">
+                <li>Power the ESP32-S3 running v6.2 or v6.3.</li>
+                <li>Connect and choose <strong>Ducati Temperature Sensor</strong>.</li>
+                <li>Use <strong>Take reading</strong> here or press the TinkerBlock button.</li>
+              </ol>
+              <button id="sensor-connect" type="button">Connect sensor</button>
+              <p id="sensor-status" class="hint sensor-status" aria-live="polite">Ready to connect.</p>
+            </section>
+
+            <section class="sensor-card sensor-history-card" aria-labelledby="sensor-history-title">
+              <div class="sensor-card-head">
+                <div>
+                  <p class="eyebrow">This page session</p>
+                  <h2 id="sensor-history-title">Reading history</h2>
+                </div>
+                <button id="sensor-clear" type="button" class="ghost" disabled>Clear</button>
+              </div>
+              <div class="sensor-table-wrap">
+                <table class="sensor-table">
+                  <thead>
+                    <tr><th scope="col">Time</th><th scope="col">Celsius</th><th scope="col">Fahrenheit</th><th scope="col">ADC</th></tr>
+                  </thead>
+                  <tbody id="sensor-history">
+                    <tr class="sensor-history-empty"><td colspan="4">No readings yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
       </main>
     </div>
     <dialog id="settings-modal" class="settings-modal" aria-labelledby="settings-modal-title">
@@ -151,6 +219,13 @@
         <section class="settings-section tts-settings">
           <label for="cfg-tts-instructions">TTS delivery instructions</label>
           <textarea id="cfg-tts-instructions" rows="6" maxlength="4000" required></textarea>
+          <label class="browser-speech-setting" for="allow-browser-speech">
+            <input id="allow-browser-speech" type="checkbox">
+            <span>
+              <strong>Automatic Sphere speech in this browser</strong>
+              <small>Targeted expressions always render visually. Speech is opt-in on this body.</small>
+            </span>
+          </label>
         </section>
 
         <section class="provider-controls" aria-labelledby="provider-controls-title">
@@ -179,6 +254,7 @@
         </div>
       </form>
     </dialog>
+    <script src="/sensor_protocol.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

@@ -137,6 +137,13 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
                             "description": "This browser — reply here to continue the shared thread",
                         },
                         {
+                            "id": "ducati-temp-sensor",
+                            "label": "Ducati sensor",
+                            "kind": "sensor",
+                            "status": "active",
+                            "description": "Hybrid BLE and outbound Wi-Fi ESP32-S3 temperature sensor",
+                        },
+                        {
                             "id": "wearabllm-wearable",
                             "label": "Wearable",
                             "kind": "wearable",
@@ -158,6 +165,9 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/interactions":
             self.proxy_bridge_get("/v1/interactions", parsed.query)
+            return
+        if path == "/api/body-actions/next":
+            self.proxy_body_action_claim("web-console")
             return
         interaction_match = re.fullmatch(r"/api/interactions/([a-f0-9-]{36})", path)
         if interaction_match:
@@ -196,6 +206,10 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/heartbeat":
             self.proxy_heartbeat("web-console")
+            return
+        action_ack_match = re.fullmatch(r"/api/body-actions/([a-f0-9-]{36})/ack", parsed.path)
+        if action_ack_match:
+            self.proxy_body_action_ack("web-console", action_ack_match.group(1))
             return
         if parsed.path == "/api/admin/config":
             self.proxy_admin_config_update()
@@ -325,6 +339,38 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
         request = urllib.request.Request(
             f"{self.bridge_base}/v1/heartbeat",
             data=b"{}",
+            headers={
+                **self._bridge_headers(),
+                "Content-Type": "application/json",
+                "X-WearabLLM-Device-Id": device_id,
+            },
+            method="POST",
+        )
+        self._forward(request)
+
+    def proxy_body_action_claim(self, device_id: str) -> None:
+        if not self.bridge_base:
+            self.send_json(503, {"error": "bridge_not_configured"})
+            return
+        request = urllib.request.Request(
+            f"{self.bridge_base}/v1/devices/{device_id}/actions",
+            headers={**self._bridge_headers(), "X-WearabLLM-Device-Id": device_id},
+            method="GET",
+        )
+        self._forward(request)
+
+    def proxy_body_action_ack(self, device_id: str, action_id: str) -> None:
+        if not self.bridge_base:
+            self.send_json(503, {"error": "bridge_not_configured"})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 2_048:
+            self.send_json(400, {"error": "invalid_body"})
+            return
+        raw = self.rfile.read(length)
+        request = urllib.request.Request(
+            f"{self.bridge_base}/v1/devices/{device_id}/actions/{action_id}/ack",
+            data=raw,
             headers={
                 **self._bridge_headers(),
                 "Content-Type": "application/json",
