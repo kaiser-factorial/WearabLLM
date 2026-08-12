@@ -70,3 +70,9 @@ and TypeScript typecheck, Web shared-fixture tests, hosted staging/source-bundle
 checks, protocol consistency, and an isolated mixed `/v1`/`/v2` bridge smoke.
 The existing firmware image also passed the freshness/configuration gate with
 its `/v1/query` URL unchanged.
+
+The private hosted bridge was then deployed from the Phase 7 branch. Its live
+runtime reached `RUNNING`; public legacy `/health`, normalized `/v2/health`, and
+the typed v2 unauthorized response passed. An authenticated live text mutation
+was deliberately skipped because the deployment shell did not expose a device
+token, and the rollout did not justify extracting one from firmware config.
