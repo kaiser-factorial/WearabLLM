@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from action_queue import validate_device_id
+from bridge_policy import BridgePolicy, MemoryMutationOutcome, PrivilegedOperation
 from household_memory import MEMORY_KINDS
 
 
@@ -536,6 +537,8 @@ class SphereToolExecutor:
         pending_memory_confirmations: PendingMemoryConfirmationStore | None = None,
         origin_device_id: str,
         user_transcript: str,
+        policy: BridgePolicy | None = None,
+        audit_sink: Any = None,
     ) -> None:
         self.memory_store = memory_store
         self.action_queue = action_queue
@@ -545,6 +548,22 @@ class SphereToolExecutor:
         self.pending_memory_confirmations = pending_memory_confirmations
         self.origin_device_id = validate_device_id(origin_device_id)
         self.user_transcript = user_transcript.strip()
+        self.policy = policy or BridgePolicy()
+        self.audit_sink = audit_sink
+
+    def _audit_memory(
+        self,
+        outcome: str,
+        *,
+        error_code: str | None = None,
+    ) -> None:
+        if self.audit_sink:
+            self.audit_sink(
+                PrivilegedOperation.MEMORY_MUTATION.value,
+                outcome,
+                device_id=self.origin_device_id,
+                error_code=error_code,
+            )
 
     def execute(self, name: str, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
         if name == "sphere_status":
@@ -552,9 +571,11 @@ class SphereToolExecutor:
                 raise RuntimeError("Sphere status is unavailable")
             targets: list[str] = []
             for raw_target in arguments.get("target_device_ids", []):
-                target = validate_device_id(str(raw_target))
-                if target not in STATUS_BODY_IDS:
-                    raise ValueError(f"Unknown Sphere body: {target}")
+                target = self.policy.require_allowlisted_target(
+                    name,
+                    str(raw_target),
+                    STATUS_BODY_IDS,
+                )
                 if target not in targets:
                     targets.append(target)
             return {
@@ -578,32 +599,38 @@ class SphereToolExecutor:
         if name == "memory_remember":
             content = str(arguments.get("content", ""))
             blocked, confirm = memory_sensitivity(f"{self.user_transcript}\n{content}")
-            if blocked:
+            decision = self.policy.decide_memory_mutation(blocked, confirm)
+            if decision.outcome is MemoryMutationOutcome.BLOCK:
+                self._audit_memory("rejected", error_code="sensitive_memory_blocked")
                 raise PermissionError(
                     "Memory not saved: credentials and financial or government identifiers "
                     "cannot be stored in Sphere memory."
                 )
-            if confirm:
+            if decision.outcome is MemoryMutationOutcome.CONFIRM:
                 if not self.pending_memory_confirmations:
                     raise RuntimeError("Sensitive-memory confirmation is unavailable")
                 self.pending_memory_confirmations.stage(
                     arguments,
                     source_device_id=self.origin_device_id,
-                    sensitive_categories=confirm,
+                    sensitive_categories=list(decision.categories),
                     operation="remember",
                 )
+                self._audit_memory("previewed")
                 return {
                     "ok": True,
                     "saved": False,
                     "confirmation_required": True,
-                    "sensitive_categories": confirm,
+                    "sensitive_categories": list(decision.categories),
                     "memory_preview": self._memory_preview(arguments),
                 }
-            return self._remember(arguments, source_device_id=self.origin_device_id)
+            result = self._remember(arguments, source_device_id=self.origin_device_id)
+            self._audit_memory("accepted")
+            return result
         if name == "memory_confirm":
             save = bool(arguments.get("save"))
             decision = memory_confirmation_decision_for_turn(self.user_transcript)
             if decision is None or decision is not save:
+                self._audit_memory("denied", error_code="confirmation_mismatch")
                 raise PermissionError(
                     "The user's current answer does not match this memory confirmation decision."
                 )
@@ -611,8 +638,10 @@ class SphereToolExecutor:
                 raise RuntimeError("Sensitive-memory confirmation is unavailable")
             pending = self.pending_memory_confirmations.consume()
             if not pending:
+                self._audit_memory("rejected", error_code="confirmation_missing")
                 raise LookupError("There is no pending sensitive memory to confirm")
             if not save:
+                self._audit_memory("accepted")
                 return {
                     "ok": True,
                     "saved": False,
@@ -631,37 +660,53 @@ class SphereToolExecutor:
                     source_device_id=str(pending["source_device_id"]),
                 )
             result["confirmed"] = True
+            self._audit_memory("accepted")
             return result
         if name == "memory_correct":
-            self._require_intent(MEMORY_CORRECT_RE, "The user did not explicitly correct a memory.")
+            self._require_intent(
+                name,
+                MEMORY_CORRECT_RE,
+                "The user did not explicitly correct a memory.",
+            )
             content = str(arguments.get("content", ""))
             blocked, confirm = memory_sensitivity(f"{self.user_transcript}\n{content}")
-            if blocked:
+            decision = self.policy.decide_memory_mutation(blocked, confirm)
+            if decision.outcome is MemoryMutationOutcome.BLOCK:
+                self._audit_memory("rejected", error_code="sensitive_memory_blocked")
                 raise PermissionError(
                     "Memory not corrected: credentials and financial or government identifiers "
                     "cannot be stored in Sphere memory."
                 )
-            if confirm:
+            if decision.outcome is MemoryMutationOutcome.CONFIRM:
                 if not self.pending_memory_confirmations:
                     raise RuntimeError("Sensitive-memory confirmation is unavailable")
                 self.pending_memory_confirmations.stage(
                     arguments,
                     source_device_id=self.origin_device_id,
-                    sensitive_categories=confirm,
+                    sensitive_categories=list(decision.categories),
                     operation="correct",
                 )
+                self._audit_memory("previewed")
                 return {
                     "ok": True,
                     "saved": False,
                     "confirmation_required": True,
-                    "sensitive_categories": confirm,
+                    "sensitive_categories": list(decision.categories),
                     "memory_preview": self._memory_preview(arguments),
                 }
-            return self._correct(arguments, source_device_id=self.origin_device_id)
+            result = self._correct(arguments, source_device_id=self.origin_device_id)
+            self._audit_memory("accepted")
+            return result
         if name == "memory_forget":
-            self._require_intent(MEMORY_FORGET_RE, "The user did not explicitly ask Sphere to forget a memory.")
+            self._require_intent(
+                name,
+                MEMORY_FORGET_RE,
+                "The user did not explicitly ask Sphere to forget a memory.",
+            )
             store = self._require_memory_store()
-            return {"ok": True, "memory": store.forget(str(arguments.get("memory_id", "")))}
+            result = {"ok": True, "memory": store.forget(str(arguments.get("memory_id", "")))}
+            self._audit_memory("accepted")
+            return result
         if name == "source_list":
             store = self._require_source_store()
             return {
@@ -683,21 +728,41 @@ class SphereToolExecutor:
                 ),
             }
         if name == "send_to_body":
-            self._require_intent(BODY_ACTION_RE, "The user did not explicitly request a body action.")
+            self._require_intent(
+                name,
+                BODY_ACTION_RE,
+                "The user did not explicitly request a body action.",
+            )
             return self._send_to_body(arguments, call_id=call_id)
         if name == "sensor_list":
             if not self.sensor_provider:
                 raise RuntimeError("Sensor registry is unavailable")
             return {"ok": True, "devices": self.sensor_provider(str(arguments.get("device_id", "")))}
         if name == "sensor_read":
-            self._require_intent(SENSOR_RE, "The user did not explicitly request a sensor reading.")
+            self._require_intent(
+                name,
+                SENSOR_RE,
+                "The user did not explicitly request a sensor reading.",
+            )
             return self._sensor_read(arguments, call_id=call_id)
         if name == "sensor_loop":
-            self._require_intent(SENSOR_RE, "The user did not explicitly request sensor measurements.")
-            self._require_intent(LOOP_RE, "The user did not explicitly request repeated measurements.")
+            self._require_intent(
+                name,
+                SENSOR_RE,
+                "The user did not explicitly request sensor measurements.",
+            )
+            self._require_intent(
+                name,
+                LOOP_RE,
+                "The user did not explicitly request repeated measurements.",
+            )
             return self._sensor_loop(arguments, call_id=call_id)
         if name == "loop_cancel":
-            self._require_intent(LOOP_CANCEL_RE, "The user did not explicitly request cancellation.")
+            self._require_intent(
+                name,
+                LOOP_CANCEL_RE,
+                "The user did not explicitly request cancellation.",
+            )
             cancelled = self.action_queue.cancel_sensor_schedule(str(arguments.get("schedule_id", "")))
             return {"ok": True, "schedule_id": str(arguments.get("schedule_id", "")), "cancelled": cancelled}
         raise ValueError(f"Unknown Sphere tool: {name}")
@@ -705,9 +770,11 @@ class SphereToolExecutor:
     def _send_to_body(self, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
         targets: list[str] = []
         for raw_target in arguments.get("target_device_ids", []):
-            target = validate_device_id(str(raw_target))
-            if target not in ACTIVE_BODY_IDS:
-                raise ValueError(f"Unsupported or inactive target body: {target}")
+            target = self.policy.require_allowlisted_target(
+                "send_to_body",
+                str(raw_target),
+                ACTIVE_BODY_IDS,
+            )
             if target not in targets:
                 targets.append(target)
         if not targets:
@@ -736,7 +803,11 @@ class SphereToolExecutor:
         return {"ok": True, "actions": actions}
 
     def _validate_sensor_selection(self, arguments: dict[str, Any]) -> tuple[str, list[str]]:
-        device_id = validate_device_id(str(arguments.get("device_id", "")))
+        device_id = self.policy.require_allowlisted_target(
+            "sensor",
+            str(arguments.get("device_id", "")),
+            {SENSOR_BODY_ID},
+        )
         sensor_ids = [str(value).strip().lower() for value in arguments.get("sensor_ids", [])]
         if not self.sensor_provider:
             raise RuntimeError("Sensor registry is unavailable")
@@ -856,9 +927,18 @@ class SphereToolExecutor:
     def _memory_preview(arguments: dict[str, Any]) -> str:
         return " ".join(str(arguments.get("content", "")).split()).strip()[:160]
 
-    def _require_intent(self, pattern: re.Pattern[str], message: str) -> None:
-        if not pattern.search(self.user_transcript):
-            raise PermissionError(message)
+    def _require_intent(
+        self,
+        tool_name: str,
+        pattern: re.Pattern[str],
+        message: str,
+    ) -> None:
+        self.policy.require_tool_intent(
+            tool_name,
+            self.user_transcript,
+            pattern,
+            message,
+        )
 
 
 def parse_function_arguments(raw: Any) -> dict[str, Any]:

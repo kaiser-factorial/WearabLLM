@@ -41,14 +41,20 @@ class SourceManifestTest(unittest.TestCase):
 
         self.assertIn("source_bundle.json", relative)
         self.assertIn("bridge/bridge_contracts.py", relative)
+        self.assertIn("bridge/bridge_policy.py", relative)
         self.assertIn("bridge/bridge_service.py", relative)
+        self.assertIn("bridge/device_config.py", relative)
         self.assertIn("bridge/http_transport.py", relative)
         self.assertIn("bridge/source_code.py", relative)
         self.assertIn("bridge/observability.py", relative)
+        self.assertIn("bridge/privileged_service.py", relative)
         self.assertIn("COPY bridge/bridge_contracts.py ./bridge_contracts.py", dockerfile)
+        self.assertIn("COPY bridge/bridge_policy.py ./bridge_policy.py", dockerfile)
         self.assertIn("COPY bridge/bridge_service.py ./bridge_service.py", dockerfile)
+        self.assertIn("COPY bridge/device_config.py ./device_config.py", dockerfile)
         self.assertIn("COPY bridge/http_transport.py ./http_transport.py", dockerfile)
         self.assertIn("COPY bridge/observability.py ./observability.py", dockerfile)
+        self.assertIn("COPY bridge/privileged_service.py ./privileged_service.py", dockerfile)
 
 
 if __name__ == "__main__":

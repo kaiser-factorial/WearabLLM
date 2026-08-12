@@ -102,6 +102,27 @@ class ParseLLMResponseTest(unittest.TestCase):
 
 
 class BridgeStateTest(unittest.TestCase):
+    def test_durable_memory_mutation_emits_content_free_audit(self):
+        state = BridgeState.__new__(BridgeState)
+        state.memory_store = Mock()
+        state.memory_store.add.return_value = True
+        state.openai_client = object()
+        state.args = SimpleNamespace(memory_model="memory-model", llm_model="llm-model")
+        state.policy = wearabllm_bridge.BridgePolicy()
+        events: list[str] = []
+        state.event_sink = events.append
+        private_fact = "The user prefers jasmine tea every morning."
+        state._generate_text = Mock(return_value=json.dumps([private_fact]))
+
+        stored = state._extract_and_store_memory_payload({"user": private_fact})
+
+        self.assertEqual(stored, 1)
+        state.memory_store.add.assert_called_once_with(private_fact)
+        rendered = "\n".join(events)
+        self.assertIn('"operation":"memory_mutation"', rendered)
+        self.assertIn('"outcome":"accepted"', rendered)
+        self.assertNotIn(private_fact, rendered)
+
     def test_source_continuation_forces_source_read_tool(self):
         response = SimpleNamespace(id="resp-source", output=[], output_text="BS\nDone.")
         create = Mock(return_value=response)

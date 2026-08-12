@@ -283,35 +283,22 @@ class BridgeService:
     def claim_action(
         self,
         *,
-        requesting_device_id: str,
         target_device_id: str,
     ) -> dict[str, Any] | None:
-        target = self.assert_target_device(requesting_device_id, target_device_id)
+        target = validate_device_id(target_device_id)
         self.touch_device(target)
         return self.action_queue.claim_next(target)
-
-    @staticmethod
-    def assert_target_device(
-        requesting_device_id: str,
-        target_device_id: str,
-    ) -> str:
-        requester = validate_device_id(requesting_device_id)
-        target = validate_device_id(target_device_id)
-        if requester != target:
-            raise ServicePermissionError("Device ID does not match action target")
-        return target
 
     def acknowledge_action(
         self,
         *,
-        requesting_device_id: str,
         target_device_id: str,
         action_id: str,
         status: str,
         error: str = "",
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        target = self.assert_target_device(requesting_device_id, target_device_id)
+        target = validate_device_id(target_device_id)
         self.touch_device(target)
         previous = self.action_queue.get(action_id)
         try:

@@ -9,10 +9,13 @@ COPY bridge/durable_memory.py ./durable_memory.py
 COPY bridge/action_queue.py ./action_queue.py
 COPY bridge/agent_config.py ./agent_config.py
 COPY bridge/bridge_contracts.py ./bridge_contracts.py
+COPY bridge/bridge_policy.py ./bridge_policy.py
 COPY bridge/bridge_service.py ./bridge_service.py
+COPY bridge/device_config.py ./device_config.py
 COPY bridge/household_memory.py ./household_memory.py
 COPY bridge/http_transport.py ./http_transport.py
 COPY bridge/observability.py ./observability.py
+COPY bridge/privileged_service.py ./privileged_service.py
 COPY bridge/source_code.py ./source_code.py
 COPY bridge/sphere_tools.py ./sphere_tools.py
 COPY bridge/wearabllm_bridge.py ./wearabllm_bridge.py

@@ -21,7 +21,6 @@ from bridge_service import (
     ConversationTurnView,
     ConversationView,
     ServiceNotFoundError,
-    ServicePermissionError,
 )
 
 
@@ -180,14 +179,9 @@ class BridgeServiceTest(unittest.TestCase):
         self.assertEqual(result.query.saved_wav, "capture.wav")
         recorder.assert_called_once()
 
-    def test_action_domain_failures_are_explicit(self) -> None:
+    def test_action_lookup_failure_is_explicit_after_policy_authorization(self) -> None:
         service = self.make_service()
 
-        with self.assertRaises(ServicePermissionError):
-            service.claim_action(
-                requesting_device_id="wearabllm-android",
-                target_device_id="wearabllm-esp32",
-            )
         with self.assertRaises(ServiceNotFoundError):
             service.get_action("missing")
 

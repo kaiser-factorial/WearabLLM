@@ -13,18 +13,24 @@ RUN_APP=1
 RUN_SMOKE=1
 PYTHON_BIN="${WEARABLLM_PYTHON:-python3}"
 
-if ! "${PYTHON_BIN}" -c 'import audioop' >/dev/null 2>&1; then
-    for candidate in /usr/bin/python3 \
-        "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"; do
-        if [ -x "${candidate}" ] && "${candidate}" -c 'import audioop' >/dev/null 2>&1; then
+python_is_compatible() {
+    "$1" -c 'import audioop, sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
+        >/dev/null 2>&1
+}
+
+if ! python_is_compatible "${PYTHON_BIN}"; then
+    for candidate in \
+        "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3" \
+        /usr/bin/python3; do
+        if [ -x "${candidate}" ] && python_is_compatible "${candidate}"; then
             PYTHON_BIN="${candidate}"
             break
         fi
     done
 fi
 
-if ! "${PYTHON_BIN}" -c 'import audioop' >/dev/null 2>&1; then
-    echo "No Python runtime with audioop support was found." >&2
+if ! python_is_compatible "${PYTHON_BIN}"; then
+    echo "No Python 3.10+ runtime with audioop support was found." >&2
     echo "Install vC_WAVESHARE/bridge/requirements.txt or set WEARABLLM_PYTHON." >&2
     exit 1
 fi
@@ -111,8 +117,11 @@ step "Python compile checks"
     vC_WAVESHARE/scripts/validate_protocol.py \
     vC_WAVESHARE/scripts/verify_firmware_image.py \
     vC_WAVESHARE/bridge/bridge_contracts.py \
+    vC_WAVESHARE/bridge/bridge_policy.py \
     vC_WAVESHARE/bridge/bridge_service.py \
+    vC_WAVESHARE/bridge/device_config.py \
     vC_WAVESHARE/bridge/http_transport.py \
+    vC_WAVESHARE/bridge/privileged_service.py \
     vC_WAVESHARE/bridge/wearabllm_bridge.py
 
 step "Protocol consistency"
