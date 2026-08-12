@@ -22,6 +22,9 @@ Opens `http://127.0.0.1:8787`.
   repeated clicks on an empty conversation do not create empty history items.
 - Renders lightweight Sphere Markdown as safe headings, lists, links, emphasis,
   and code while preserving the same turn as plain text for Waveshare/TTS.
+- Downloads any current or archived conversation as standalone HTML, structured
+  JSON, or plain UTF-8 text. Exports use the client-visible API and never include
+  private model tool context.
 - Moves archived conversations behind a compact bottom Archive control
 - Only the explicit Archive action moves a conversation behind that control;
   starting a new conversation no longer archives or clears the previous one.

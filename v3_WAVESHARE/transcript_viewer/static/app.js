@@ -411,6 +411,16 @@ function renderConversations({ force = false } = {}) {
       rename.setAttribute("aria-label", rename.title);
       rename.addEventListener("click", () => void renameConversation(session));
       menuItems.append(rename);
+      for (const format of ["html", "json", "txt"]) {
+        const exportButton = document.createElement("button");
+        exportButton.type = "button";
+        exportButton.className = "conversation-action export-conversation";
+        exportButton.textContent = `Export ${format.toUpperCase()}`;
+        exportButton.title = `Export ${conversationTitle(session)} as ${format.toUpperCase()}`;
+        exportButton.setAttribute("aria-label", exportButton.title);
+        exportButton.addEventListener("click", () => void exportConversation(session, format));
+        menuItems.append(exportButton);
+      }
       if (!session.archived_at) {
         const archive = document.createElement("button");
         archive.type = "button";
@@ -425,6 +435,132 @@ function renderConversations({ force = false } = {}) {
       return row;
     })
   );
+}
+
+function exportFilename(session, format) {
+  const base = conversationTitle(session)
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase()
+    .slice(0, 64) || "sphere-conversation";
+  const date = String(session?.started_at || new Date().toISOString()).slice(0, 10);
+  return `${base}-${date}.${format}`;
+}
+
+function exportConversationData(payload, session) {
+  const selected = payload.session || session || {};
+  return {
+    format: "wearabllm-conversation.v1",
+    exported_at: new Date().toISOString(),
+    conversation: {
+      id: selected.id || session?.id || null,
+      title: conversationTitle(selected),
+      started_at: selected.started_at || null,
+      last_turn_at: selected.last_turn_at || null,
+      archived_at: selected.archived_at || null,
+    },
+    devices: Array.isArray(payload.devices) ? payload.devices : [],
+    turns: Array.isArray(payload.turns) ? payload.turns : [],
+  };
+}
+
+function exportRole(turn) {
+  return turn?.role === "assistant" ? "Sphere" : "You";
+}
+
+function exportDeviceLabel(turn, devices) {
+  const deviceId = String(turn?.device_id || "unknown");
+  return devices.find((device) => device?.id === deviceId)?.label || deviceId;
+}
+
+function conversationAsText(data) {
+  const lines = [
+    data.conversation.title,
+    `Exported: ${formatTimeTitle(data.exported_at)}`,
+  ];
+  if (data.conversation.started_at) lines.push(`Started: ${formatTimeTitle(data.conversation.started_at)}`);
+  lines.push("");
+  for (const turn of data.turns) {
+    const label = exportRole(turn);
+    const device = exportDeviceLabel(turn, data.devices);
+    lines.push(`${label} · ${device} · ${formatTimeTitle(turn.created_at)}`);
+    lines.push(String(turn.content || ""));
+    const tools = Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [];
+    for (const tool of tools) {
+      if (tool?.summary) lines.push(`Tool: ${String(tool.summary)}`);
+    }
+    const sources = Array.isArray(turn.metadata?.sources) ? turn.metadata.sources : [];
+    for (const source of sources) {
+      if (source?.url) lines.push(`Source: ${source.title || source.url} — ${source.url}`);
+    }
+    lines.push("");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function markdownAsExportHtml(source) {
+  const container = document.createElement("div");
+  renderMarkdown(container, source);
+  return container.innerHTML;
+}
+
+function conversationAsHtml(data) {
+  const turns = data.turns.map((turn) => {
+    const role = exportRole(turn);
+    const device = exportDeviceLabel(turn, data.devices);
+    const tools = (Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [])
+      .filter((tool) => tool?.summary)
+      .map((tool) => `<li>${escapeHtml(tool.summary)}</li>`)
+      .join("");
+    const sources = (Array.isArray(turn.metadata?.sources) ? turn.metadata.sources : [])
+      .filter((source) => source?.url && /^https?:\/\//i.test(String(source.url)))
+      .map((source) => `<li><a href="${escapeHtml(source.url)}">${escapeHtml(source.title || source.url)}</a></li>`)
+      .join("");
+    return `<article class="turn ${turn.role === "assistant" ? "assistant" : "user"}">
+      <header><strong>${escapeHtml(role)}</strong><span>${escapeHtml(device)} · ${escapeHtml(formatTimeTitle(turn.created_at))}</span></header>
+      <div class="content">${markdownAsExportHtml(turn.content || "")}</div>
+      ${tools ? `<section><h2>Tool activity</h2><ul>${tools}</ul></section>` : ""}
+      ${sources ? `<section><h2>Sources</h2><ul>${sources}</ul></section>` : ""}
+    </article>`;
+  }).join("\n");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(data.conversation.title)} · Sphere</title>
+<style>
+:root{color-scheme:light dark}*{box-sizing:border-box}body{max-width:860px;margin:0 auto;padding:48px 22px;background:#0b0f14;color:#e8edf2;font:17px/1.58 system-ui,-apple-system,sans-serif}body>header{margin-bottom:36px;border-bottom:1px solid #334155;padding-bottom:20px}h1{margin:0 0 6px;font:700 2.2rem/1.1 Georgia,serif}body>header p{margin:0;color:#94a3b8}.turn{max-width:88%;margin:18px 0;padding:18px 20px;border:1px solid #334155;border-radius:16px;background:#111827}.turn.user{margin-left:auto;background:#172554}.turn.assistant{margin-right:auto;background:#0f201b}.turn header{display:flex;flex-wrap:wrap;gap:8px 14px;margin-bottom:11px;color:#94a3b8;font-size:.82rem}.turn header strong{color:#e8edf2}.content{overflow-wrap:anywhere}.content p{margin:.6em 0;white-space:pre-wrap}.content h3,.content h4,.content h5,.content h6{margin:.9em 0 .35em}.content pre{overflow:auto;padding:12px;border-radius:9px;background:#070a0e}.content code{font-family:ui-monospace,monospace}.content blockquote{margin:.7em 0;padding-left:12px;border-left:3px solid #64748b;color:#cbd5e1}section{margin-top:14px;border-top:1px solid #334155;padding-top:10px}section h2{margin:0 0 5px;color:#94a3b8;font-size:.78rem;text-transform:uppercase}ul{margin:.35em 0;padding-left:20px}a{color:#7dd3fc}@media print{:root{color-scheme:light}body{background:#fff;color:#111;padding:20px}.turn,.turn.user,.turn.assistant{max-width:100%;background:#fff;border-color:#bbb;break-inside:avoid}.turn header strong{color:#111}}
+</style></head><body>
+<header><h1>${escapeHtml(data.conversation.title)}</h1><p>Sphere conversation · exported ${escapeHtml(formatTimeTitle(data.exported_at))}</p></header>
+<main>${turns || "<p>No messages in this conversation.</p>"}</main>
+</body></html>\n`;
+}
+
+function downloadConversation(data, session, format) {
+  const content = format === "json"
+    ? `${JSON.stringify(data, null, 2)}\n`
+    : format === "html" ? conversationAsHtml(data) : conversationAsText(data);
+  const mime = format === "json" ? "application/json" : format === "html" ? "text/html" : "text/plain";
+  const url = URL.createObjectURL(new Blob([content], { type: `${mime};charset=utf-8` }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = exportFilename(session, format);
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportConversation(session, format) {
+  if (!["html", "json", "txt"].includes(format)) return;
+  els.composerStatus.textContent = `Preparing ${format.toUpperCase()} export…`;
+  try {
+    const params = new URLSearchParams({ limit: "500", session_id: session.id });
+    const payload = await fetchJson(`/api/conversation?${params.toString()}`);
+    downloadConversation(exportConversationData(payload, session), payload.session || session, format);
+    els.composerStatus.textContent = `${format.toUpperCase()} export downloaded`;
+  } catch (error) {
+    els.composerStatus.textContent = `Export failed: ${error.message || "unknown error"}`;
+  }
 }
 
 async function renameConversation(session) {

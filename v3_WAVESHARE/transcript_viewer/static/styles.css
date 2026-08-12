@@ -127,7 +127,7 @@ body {
   top: calc(100% + 4px);
   right: 0;
   display: grid;
-  width: 88px;
+  width: 128px;
   gap: 4px;
   padding: 5px;
   border: 1px solid var(--line);
@@ -155,6 +155,7 @@ body {
 }
 .archive-toggle.active { border-color: var(--accent-2); color: var(--text); }
 .rename-conversation:hover { border-color: var(--accent-2); color: var(--accent-2); }
+.export-conversation:hover { border-color: var(--accent); color: var(--accent); }
 .archive-conversation:hover { border-color: var(--warn); color: var(--warn); }
 .archive-badge { color: var(--muted); font: 600 0.62rem/1 var(--mono); text-transform: uppercase; }
 .conversation-item.active {
