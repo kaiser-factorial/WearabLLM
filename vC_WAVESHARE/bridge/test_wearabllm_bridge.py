@@ -1593,7 +1593,7 @@ class BridgeHandlerTest(unittest.TestCase):
         )
 
     def request(self, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None, device_token: str = "") -> tuple[int, dict[str, object]]:
-        handler = make_handler(self.make_state(device_token))
+        handler = make_handler(self.make_state(device_token), event_sink=lambda _line: None)
         handler.log_message = lambda *_args: None  # type: ignore[method-assign]
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1797,6 +1797,21 @@ class BridgeHandlerTest(unittest.TestCase):
         )
         self.assertEqual(status, 403)
         self.assertIn("does not match", str(payload["error"]))
+
+
+class StartupPrivacyTest(unittest.TestCase):
+    def test_hosted_bridge_rejects_content_logging(self):
+        argv = ["wearabllm_bridge.py", "--dry-run", "--debug-content-logs"]
+        environment = {
+            "WEARABLLM_HOSTED": "1",
+            "WEARABLLM_DEVICE_TOKEN": "test-token",
+        }
+        with (
+            patch.object(wearabllm_bridge.sys, "argv", argv),
+            patch.dict(os.environ, environment, clear=False),
+            self.assertRaisesRegex(SystemExit, "local-only"),
+        ):
+            wearabllm_bridge.main()
 
 
 class TargetedInteractionStateTest(unittest.TestCase):

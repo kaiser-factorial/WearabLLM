@@ -1,0 +1,153 @@
+{
+  "health.success": {
+    "status": 200,
+    "content_type": "application/json",
+    "top_level_keys": ["config", "ok", "service"],
+    "required_values": {"ok": true, "service": "wearabllm-bridge"},
+    "nested_keys": {
+      "config": [
+        "action_queue",
+        "capture_count",
+        "conversation_backend",
+        "conversation_persisted",
+        "device_auth_required",
+        "device_config",
+        "dry_run",
+        "dry_run_command",
+        "dry_run_sequence",
+        "durable_memory",
+        "durable_memory_records",
+        "embedding_model",
+        "history_messages",
+        "history_turns",
+        "household_memory_retrieval",
+        "household_memory_tools",
+        "latest_capture",
+        "llm_model",
+        "max_audio_bytes",
+        "max_conversation_turn_chars",
+        "max_output_tokens",
+        "max_tool_rounds",
+        "memory_backend",
+        "memory_retrieval_limit",
+        "model_tools",
+        "provider",
+        "save_wav_dir",
+        "session_idle_seconds",
+        "source_code_tools",
+        "stt",
+        "stt_model",
+        "tts_instructions",
+        "tts_model",
+        "tts_voice",
+        "typed_bypass",
+        "web_search"
+      ]
+    }
+  },
+  "query.success": {
+    "status": 200,
+    "content_type": "application/json",
+    "top_level_keys": [
+      "audio_bytes",
+      "command",
+      "persistence",
+      "reply",
+      "saved_wav",
+      "sources",
+      "tool_results",
+      "transcript",
+      "wav_info"
+    ],
+    "nested_keys": {"persistence": ["backend", "message", "session_id", "status"]}
+  },
+  "tts.success": {
+    "status": 200,
+    "content_type": "audio/wav",
+    "body_prefix": "RIFF"
+  },
+  "interaction.success": {
+    "status": 200,
+    "content_type": "application/json",
+    "top_level_keys": [
+      "action",
+      "action_created",
+      "audio_bytes",
+      "command",
+      "ok",
+      "persistence",
+      "reply",
+      "saved_wav",
+      "sources",
+      "tool_results",
+      "transcript",
+      "wav_info"
+    ],
+    "nested_keys": {
+      "action": [
+        "action_type",
+        "attempts",
+        "command",
+        "created_at",
+        "error",
+        "expires_at",
+        "expression",
+        "id",
+        "idempotency_key",
+        "leased_until",
+        "origin_device_id",
+        "reply",
+        "status",
+        "target_device_id",
+        "transcript",
+        "updated_at"
+      ]
+    }
+  },
+  "conversation.success": {
+    "status": 200,
+    "content_type": "application/json",
+    "top_level_keys": [
+      "active_session_id",
+      "conversation_backend",
+      "devices",
+      "filter_device_id",
+      "ok",
+      "session",
+      "sessions",
+      "turns"
+    ]
+  },
+  "sensor_manifest.success": {
+    "status": 200,
+    "content_type": "application/json",
+    "top_level_keys": ["manifest", "ok"],
+    "nested_keys": {
+      "manifest": ["device_id", "firmware_version", "sensors", "updated_at", "version"]
+    }
+  },
+  "admin_config.success": {
+    "status": 200,
+    "content_type": "application/json",
+    "top_level_keys": ["config", "ok"],
+    "nested_keys": {
+      "config": [
+        "llm_model",
+        "source",
+        "system_prompt",
+        "tts_instructions",
+        "tts_model",
+        "tts_voice",
+        "updated_at"
+      ]
+    }
+  },
+  "error.legacy": {
+    "content_type": "application/json",
+    "top_level_keys": ["error"]
+  },
+  "device_config_error.legacy": {
+    "content_type": "application/json",
+    "top_level_keys": ["error", "ok"]
+  }
+}

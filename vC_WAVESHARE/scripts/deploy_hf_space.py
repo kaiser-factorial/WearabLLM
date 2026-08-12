@@ -100,6 +100,7 @@ def staged_space(destination: Path) -> list[Path]:
         "agent_config.py",
         "durable_memory.py",
         "household_memory.py",
+        "observability.py",
         "source_code.py",
         "sphere_tools.py",
         "wearabllm_bridge.py",

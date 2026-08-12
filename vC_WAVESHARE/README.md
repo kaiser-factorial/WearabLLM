@@ -181,7 +181,7 @@ Hardware last verified on 2026-08-09; software last verified on 2026-08-12:
 - Android typechecking and protocol tests pass (retained 2026-08-09 evidence)
 - firmware builds, passes the image gate, flashes, and boots on hardware
   (retained 2026-08-09 evidence)
-- all 14 Supabase migrations through `20260812000000` match remote
+- all 15 Supabase migrations through `20260812010000` match remote
 - live health reports Supabase conversation/memory/action backends, hybrid
   memory, source tools, and an eight-round tool limit
 
