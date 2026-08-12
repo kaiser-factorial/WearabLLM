@@ -1,6 +1,6 @@
 # WearabLLM Bridge Refactor Roadmap
 
-Status: Phase 6 software-complete; physical Waveshare regression passed
+Status: Phase 7 deployed from `protocol/v2-envelopes`; client rollout remains incremental
 Created: 2026-08-12  
 Scope: `vC_WAVESHARE/bridge/wearabllm_bridge.py` and its client-facing contracts
 
@@ -11,6 +11,10 @@ first work is contract capture and observability, followed by typed internal
 results, HTTP extraction, service extraction, policy and privileged-action
 isolation, model/tool pipeline cleanup, and configuration/adapters. A normalized
 response envelope is a later protocol-versioning project, not an early cleanup.
+
+Phase 7 completed that separately versioned edge. Remaining client migration
+and evidence-based cleanup are tracked in `BRIDGE_PROTOCOL_MIGRATION_ROADMAP.md`;
+they are not additional refactor phases.
 
 The refactor must preserve the working shared-Sphere system:
 

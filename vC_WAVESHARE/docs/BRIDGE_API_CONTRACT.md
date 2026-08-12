@@ -93,3 +93,42 @@ Persistence failure is explicit while the generated reply remains usable.
 - Error envelopes are inconsistent. They remain frozen under `/v1`.
 - The shared device token authenticates the principal but is not yet a
   per-device credential. Target-device equality remains a second boundary.
+
+## Parallel `/v2` Contract
+
+Phase 7 adds `/v2` aliases for every `/v1` route without changing the frozen
+`/v1` behavior. `/v2/health` is the versioned alias for public `/health`.
+
+JSON successes use:
+
+```json
+{"ok": true, "data": {}}
+```
+
+JSON failures use:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "bad_request",
+    "message": "Missing transcript",
+    "request_id": "..."
+  }
+}
+```
+
+Endpoint-specific data retains the typed fields already proven under `/v1`;
+only the outer response is normalized. `POST /v2/tts` remains `audio/wav` on
+success because wrapping binary audio in JSON would increase latency and memory
+use. Its JSON failures use the v2 error envelope.
+
+Canonical machine-readable artifacts live in `protocol/v2/`:
+
+- `envelope.schema.json`
+- `fixtures.json`
+- `routes.json`
+
+Android is the first migrated client. The Web console and Waveshare firmware
+remain on `/v1` during this slice, proving mixed-version operation against one
+bridge.

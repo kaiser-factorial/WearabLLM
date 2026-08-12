@@ -27,6 +27,7 @@ SOURCE_PATTERNS = (
     "vC_WAVESHARE/docs/*.md",
     "vC_WAVESHARE/bridge/*.py",
     "vC_WAVESHARE/protocol/*.md",
+    "vC_WAVESHARE/protocol/v2/*.json",
     "vC_WAVESHARE/hosted_agent/Dockerfile",
     "vC_WAVESHARE/hosted_agent/README.md",
     "vC_WAVESHARE/scripts/*.py",
@@ -115,6 +116,7 @@ def staged_space(destination: Path) -> list[Path]:
         "source_code.py",
         "sphere_tools.py",
         "tool_activity.py",
+        "v2_protocol.py",
         "wearabllm_bridge.py",
         "requirements.txt",
     ]

@@ -15,7 +15,10 @@ import {
   parseBridgeResponse,
   parseDeviceWifiConfigResponse,
   summarizeBridgeBenchStatus,
+  unwrapBridgeV2Envelope,
 } from './bridgeClient';
+import v2Fixtures from '../../../protocol/v2/fixtures.json';
+import v2Schema from '../../../protocol/v2/envelope.schema.json';
 
 function assertEqual(actual: string, expected: string): void {
   if (actual !== expected) {
@@ -28,6 +31,7 @@ assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/'), 'http://192.0.2.1
 assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/v1/query'), 'http://192.0.2.10:8765');
 assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/v1/query_text'), 'http://192.0.2.10:8765');
 assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/v1/tts'), 'http://192.0.2.10:8765');
+assertEqual(normalizeBridgeBaseUrl('http://192.0.2.10:8765/v2/query_text'), 'http://192.0.2.10:8765');
 assertEqual(normalizeBridgeBaseUrl('  http://192.0.2.10:8765/v1/query?x=1#frag  '), 'http://192.0.2.10:8765');
 assertEqual(bridgeTargetKey('http://192.0.2.10:8765/v1/query'), '192.0.2.10:8765');
 assertEqual(bridgeTargetKey('http://192.0.2.10/v1/query'), '192.0.2.10:80');
@@ -44,6 +48,12 @@ assertEqual(bridgeErrorMessage({ error: 'Missing transcript' }, 'fallback'), 'Mi
 assertEqual(bridgeErrorMessage({ reply: 'Bridge error: bad audio' }, 'fallback'), 'Bridge error: bad audio');
 assertEqual(bridgeErrorMessage({ message: 'Updated' }, 'fallback'), 'Updated');
 assertEqual(bridgeErrorMessage({}, 'plain text failure'), 'plain text failure');
+assertEqual(bridgeErrorMessage(v2Fixtures.error, 'fallback'), 'Missing transcript');
+
+const sharedV2Reply = parseBridgeResponse(unwrapBridgeV2Envelope(v2Fixtures.success));
+assertEqual(sharedV2Reply.command, 'GP');
+assertEqual(sharedV2Reply.reply, 'Protocol v2 is ready.');
+assertEqual(String(v2Schema.oneOf.length), '2');
 
 const unsavedReply = parseBridgeResponse({
   command: 'BS',

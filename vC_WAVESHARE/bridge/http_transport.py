@@ -15,7 +15,7 @@ import urllib.parse
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
-from typing import Any, Pattern
+from typing import Any, Literal, Pattern
 
 from action_queue import validate_device_id
 from bridge_contracts import InteractionInput, QueryInput
@@ -27,6 +27,8 @@ from observability import (
     emit_exception,
     new_request_id,
 )
+from v2_protocol import error_envelope as v2_error_envelope
+from v2_protocol import success_envelope as v2_success_envelope
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +52,7 @@ class RouteMatch:
     path_arguments: tuple[str, ...] = ()
     auth_required: bool = True
     privileged_operation: PrivilegedOperation | None = None
+    protocol_version: Literal[1, 2] = 1
 
 
 GET_ROUTES = {
@@ -117,6 +120,14 @@ POST_PATTERN_ROUTES = (
 
 def match_route(method: str, path: str) -> RouteMatch | None:
     """Match an HTTP route without reading or mutating bridge state."""
+    protocol_version: Literal[1, 2] = 1
+    route_path = path
+    if path == "/v2/health":
+        protocol_version = 2
+        route_path = "/health"
+    elif path.startswith("/v2/"):
+        protocol_version = 2
+        route_path = f"/v1/{path.removeprefix('/v2/')}"
     routes = GET_ROUTES if method == "GET" else POST_ROUTES if method == "POST" else {}
     pattern_routes = (
         GET_PATTERN_ROUTES
@@ -125,21 +136,23 @@ def match_route(method: str, path: str) -> RouteMatch | None:
         if method == "POST"
         else ()
     )
-    route = routes.get(path)
+    route = routes.get(route_path)
     if route:
         return RouteMatch(
             route.endpoint,
             auth_required=route.auth_required,
             privileged_operation=route.privileged_operation,
+            protocol_version=protocol_version,
         )
     for candidate in pattern_routes:
-        matched = candidate.pattern.fullmatch(path)
+        matched = candidate.pattern.fullmatch(route_path)
         if matched:
             return RouteMatch(
                 candidate.endpoint,
                 path_arguments=matched.groups(),
                 auth_required=candidate.auth_required,
                 privileged_operation=candidate.privileged_operation,
+                protocol_version=protocol_version,
             )
     return None
 
@@ -287,6 +300,11 @@ def make_handler(
         def _dispatch_route(self, method: str) -> None:
             parsed = urllib.parse.urlsplit(self.path)
             matched = match_route(method, parsed.path)
+            self._protocol_version = (
+                matched.protocol_version
+                if matched is not None
+                else 2 if parsed.path == "/v2" or parsed.path.startswith("/v2/") else 1
+            )
             authorized = self._is_authorized()
             self._request_authenticated = authorized
             if matched is None:
@@ -998,7 +1016,19 @@ def make_handler(
             self.send_header("Access-Control-Expose-Headers", REQUEST_ID_HEADER)
 
         def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-            body = json_bytes(payload)
+            response_payload = payload
+            if getattr(self, "_protocol_version", 1) == 2:
+                if int(status) >= 400:
+                    raw_message = payload.get("error", payload.get("message", payload.get("reply", "")))
+                    message = raw_message if isinstance(raw_message, str) and raw_message else status.phrase
+                    response_payload = v2_error_envelope(
+                        status,
+                        message,
+                        request_id=getattr(self, "_request_id", new_request_id()),
+                    )
+                else:
+                    response_payload = v2_success_envelope(payload)
+            body = json_bytes(response_payload)
             self.send_response(status)
             self._send_cors_headers()
             self.send_header(REQUEST_ID_HEADER, getattr(self, "_request_id", new_request_id()))

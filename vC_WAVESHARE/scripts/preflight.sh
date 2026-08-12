@@ -128,6 +128,7 @@ step "Python compile checks"
     vC_WAVESHARE/bridge/privileged_service.py \
     vC_WAVESHARE/bridge/provider_adapters.py \
     vC_WAVESHARE/bridge/tool_activity.py \
+    vC_WAVESHARE/bridge/v2_protocol.py \
     vC_WAVESHARE/bridge/wearabllm_bridge.py
 
 step "Protocol consistency"
@@ -156,6 +157,8 @@ if [ "${RUN_APP}" = "1" ]; then
     npm run test:protocol
     npm run typecheck
     cd "${REPO_ROOT}"
+    node vC_WAVESHARE/transcript_viewer/tests/test_bridge_protocol.js
+    node vC_WAVESHARE/transcript_viewer/tests/test_sensor_protocol.js
 fi
 
 if [ "${RUN_SMOKE}" = "1" ]; then

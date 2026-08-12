@@ -48,6 +48,19 @@ echo "${BRIDGE_DRY_RUN}" | sed -n '/^health ok:/p'
 DRY_RUN_FLAG="$(echo "${BRIDGE_DRY_RUN}" | sed -n 's/^dry_run=//p' | tail -n 1)"
 MAX_AUDIO_BYTES="$(echo "${BRIDGE_DRY_RUN}" | sed -n 's/^max_audio_bytes=//p' | tail -n 1)"
 
+curl -fsS "${BASE_URL}/v2/health" -o "${TMP_DIR}/health_v2.json"
+python3 - "${TMP_DIR}/health_v2.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+assert payload.get("ok") is True, payload
+assert set(payload) == {"ok", "data"}, payload
+assert payload["data"].get("service") == "wearabllm-bridge", payload
+print("v2 health envelope ok")
+PY
+
 python3 - "${TMP_DIR}/query.wav" <<'PY'
 import struct
 import sys
@@ -146,14 +159,17 @@ fi
 curl -fsS \
     -H "Content-Type: application/json" \
     -d '{"transcript":"bridge smoke test"}' \
-    "${BASE_URL}/v1/query_text" \
+    "${BASE_URL}/v2/query_text" \
     -o "${TMP_DIR}/query_text.json"
 python3 - "${TMP_DIR}/query_text.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-payload = json.loads(Path(sys.argv[1]).read_text())
+envelope = json.loads(Path(sys.argv[1]).read_text())
+assert envelope.get("ok") is True, envelope
+payload = envelope.get("data")
+assert isinstance(payload, dict), envelope
 assert payload.get("command") in {"GS", "GP", "GC", "RS", "RF", "YP", "BS", "PS", "PP"}, payload
 assert isinstance(payload.get("reply"), str) and payload["reply"], payload
 assert payload.get("transcript") == "bridge smoke test", payload
@@ -165,14 +181,17 @@ PY
 curl -fsS \
     -H "Content-Type: application/json" \
     -d "{\"transcript\":\"queue smoke test\",\"origin_device_id\":\"wearabllm-smoke\",\"target_device_id\":\"wearabllm-esp32\",\"idempotency_key\":\"${QUEUE_IDEMPOTENCY_KEY}\"}" \
-    "${BASE_URL}/v1/interactions" \
+    "${BASE_URL}/v2/interactions" \
     -o "${TMP_DIR}/interaction.json"
 ACTION_ID="$(python3 - "${TMP_DIR}/interaction.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-payload = json.loads(Path(sys.argv[1]).read_text())
+envelope = json.loads(Path(sys.argv[1]).read_text())
+assert envelope.get("ok") is True, envelope
+payload = envelope.get("data")
+assert isinstance(payload, dict), envelope
 action = payload.get("action")
 assert isinstance(action, dict), payload
 assert action.get("target_device_id") == "wearabllm-esp32", action
@@ -222,7 +241,7 @@ PY
 curl -fsS \
     -H "Content-Type: application/json" \
     -d '{"text":"bridge smoke test tts"}' \
-    "${BASE_URL}/v1/tts" \
+    "${BASE_URL}/v2/tts" \
     -o "${TMP_DIR}/tts.wav"
 python3 - "${TMP_DIR}/tts.wav" <<'PY'
 import sys

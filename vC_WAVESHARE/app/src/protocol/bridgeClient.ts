@@ -270,10 +270,10 @@ export function normalizeBridgeBaseUrl(rawUrl: string): string {
     const url = new URL(trimmed);
     url.hash = '';
     url.search = '';
-    url.pathname = url.pathname.replace(/\/+$/, '').replace(/\/v1\/(query_text|query|tts)$/i, '');
+    url.pathname = url.pathname.replace(/\/+$/, '').replace(/\/v[12]\/(query_text|query|tts)$/i, '');
     return url.toString().replace(/\/+$/, '');
   } catch {
-    return trimmed.replace(/\/+$/, '').replace(/\/v1\/(query_text|query|tts)$/i, '');
+    return trimmed.replace(/\/+$/, '').replace(/\/v[12]\/(query_text|query|tts)$/i, '');
   }
 }
 
@@ -481,7 +481,7 @@ export function summarizeBridgeBenchStatus(health: BridgeHealth, appBridgeUrl = 
 
 export async function fetchBridgeHealth(baseUrl: string, deviceToken = ''): Promise<BridgeHealth> {
   const cleanBaseUrl = normalizeBridgeBaseUrl(baseUrl);
-  const response = await fetch(`${cleanBaseUrl}/health`, { headers: bridgeHeaders(deviceToken) });
+  const response = await fetch(`${cleanBaseUrl}/v2/health`, { headers: bridgeHeaders(deviceToken) });
   const rawText = await response.text();
   let parsed: unknown;
   try {
@@ -494,7 +494,7 @@ export async function fetchBridgeHealth(baseUrl: string, deviceToken = ''): Prom
     throw new Error(`Bridge health error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
 
-  return parseBridgeHealth(parsed);
+  return parseBridgeHealth(unwrapBridgeV2Envelope(parsed));
 }
 
 export async function queryBridgeText(
@@ -505,7 +505,7 @@ export async function queryBridgeText(
   responseDeviceId = '',
 ): Promise<BridgeResponse> {
   const cleanBaseUrl = normalizeBridgeBaseUrl(baseUrl);
-  const response = await fetch(`${cleanBaseUrl}/v1/query_text`, {
+  const response = await fetch(`${cleanBaseUrl}/v2/query_text`, {
     method: 'POST',
     headers: bridgeHeaders(deviceToken, true, originDeviceId),
     body: JSON.stringify({
@@ -526,7 +526,7 @@ export async function queryBridgeText(
     throw new Error(`Bridge error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
 
-  return parseBridgeResponse(parsed);
+  return parseBridgeResponse(unwrapBridgeV2Envelope(parsed));
 }
 
 export async function createBridgeInteraction(
@@ -539,7 +539,7 @@ export async function createBridgeInteraction(
   responseDeviceId = '',
 ): Promise<BridgeInteractionResponse> {
   const cleanBaseUrl = normalizeBridgeBaseUrl(baseUrl);
-  const response = await fetch(`${cleanBaseUrl}/v1/interactions`, {
+  const response = await fetch(`${cleanBaseUrl}/v2/interactions`, {
     method: 'POST',
     headers: bridgeHeaders(deviceToken, true),
     body: JSON.stringify({
@@ -560,7 +560,7 @@ export async function createBridgeInteraction(
   if (!response.ok || !parsed || typeof parsed !== 'object') {
     throw new Error(`Bridge interaction error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  const payload = parsed as Record<string, unknown>;
+  const payload = unwrapBridgeV2Envelope(parsed);
   if (!isLEDCommand(String(payload.command ?? '')) || typeof payload.reply !== 'string') {
     throw new Error('Bridge interaction response is missing a valid action.');
   }
@@ -585,7 +585,7 @@ export async function fetchBridgeConversation(
   if (sessionId) {
     params.set('session_id', sessionId);
   }
-  const response = await fetch(`${cleanBaseUrl}/v1/conversation?${params.toString()}`, {
+  const response = await fetch(`${cleanBaseUrl}/v2/conversation?${params.toString()}`, {
     headers: bridgeHeaders(deviceToken),
   });
   const rawText = await response.text();
@@ -598,7 +598,7 @@ export async function fetchBridgeConversation(
   if (!response.ok) {
     throw new Error(`Bridge conversation error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  return parseBridgeConversation(parsed);
+  return parseBridgeConversation(unwrapBridgeV2Envelope(parsed));
 }
 
 export function parseBridgeConversation(payload: unknown): BridgeConversationSnapshot {
@@ -657,7 +657,7 @@ export async function archiveBridgeSession(
   deviceToken = '',
 ): Promise<{ ok: true; active_session_id: string | null }> {
   const response = await fetch(
-    `${normalizeBridgeBaseUrl(baseUrl)}/v1/conversation/sessions/${encodeURIComponent(sessionId)}/archive`,
+    `${normalizeBridgeBaseUrl(baseUrl)}/v2/conversation/sessions/${encodeURIComponent(sessionId)}/archive`,
     { method: 'POST', headers: bridgeHeaders(deviceToken, true), body: '{}' },
   );
   const rawText = await response.text();
@@ -667,10 +667,10 @@ export async function archiveBridgeSession(
   } catch {
     throw new Error(`Bridge archive response was not JSON: ${rawText.slice(0, 160)}`);
   }
-  if (!response.ok || typeof parsed !== 'object' || parsed === null || (parsed as Record<string, unknown>).ok !== true) {
+  if (!response.ok) {
     throw new Error(`Bridge archive error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  const data = parsed as Record<string, unknown>;
+  const data = unwrapBridgeV2Envelope(parsed);
   return { ok: true, active_session_id: data.active_session_id == null ? null : String(data.active_session_id) };
 }
 
@@ -681,7 +681,7 @@ export async function renameBridgeSession(
   deviceToken = '',
 ): Promise<void> {
   const response = await fetch(
-    `${normalizeBridgeBaseUrl(baseUrl)}/v1/conversation/sessions/${encodeURIComponent(sessionId)}/rename`,
+    `${normalizeBridgeBaseUrl(baseUrl)}/v2/conversation/sessions/${encodeURIComponent(sessionId)}/rename`,
     {
       method: 'POST',
       headers: bridgeHeaders(deviceToken, true),
@@ -695,16 +695,17 @@ export async function renameBridgeSession(
   } catch {
     throw new Error(`Bridge rename response was not JSON: ${rawText.slice(0, 160)}`);
   }
-  if (!response.ok || typeof parsed !== 'object' || parsed === null || (parsed as Record<string, unknown>).ok !== true) {
+  if (!response.ok) {
     throw new Error(`Bridge rename error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
+  unwrapBridgeV2Envelope(parsed);
 }
 
 export async function resetBridgeSession(
   baseUrl: string,
   deviceToken = '',
 ): Promise<{ ok: true; active_session_id: string | null }> {
-  const response = await fetch(`${normalizeBridgeBaseUrl(baseUrl)}/v1/session/reset`, {
+  const response = await fetch(`${normalizeBridgeBaseUrl(baseUrl)}/v2/session/reset`, {
     method: 'POST',
     headers: bridgeHeaders(deviceToken, true),
     body: '{}',
@@ -716,10 +717,10 @@ export async function resetBridgeSession(
   } catch {
     throw new Error(`Bridge new-conversation response was not JSON: ${rawText.slice(0, 160)}`);
   }
-  if (!response.ok || typeof parsed !== 'object' || parsed === null || (parsed as Record<string, unknown>).ok !== true) {
+  if (!response.ok) {
     throw new Error(`Bridge new-conversation error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  const data = parsed as Record<string, unknown>;
+  const data = unwrapBridgeV2Envelope(parsed);
   return {
     ok: true,
     active_session_id: data.active_session_id == null ? null : String(data.active_session_id),
@@ -731,7 +732,7 @@ export async function sendBridgeHeartbeat(
   deviceId: string,
   deviceToken = '',
 ): Promise<void> {
-  const response = await fetch(`${normalizeBridgeBaseUrl(baseUrl)}/v1/heartbeat`, {
+  const response = await fetch(`${normalizeBridgeBaseUrl(baseUrl)}/v2/heartbeat`, {
     method: 'POST',
     headers: bridgeHeaders(deviceToken, true, deviceId),
     body: '{}',
@@ -802,7 +803,7 @@ function parseBridgeToolActivity(payload: unknown): BridgeToolActivity[] {
 }
 
 export async function fetchBridgeAction(baseUrl: string, actionId: string, deviceToken = ''): Promise<BridgeAction> {
-  const response = await fetch(`${normalizeBridgeBaseUrl(baseUrl)}/v1/interactions/${encodeURIComponent(actionId)}`, {
+  const response = await fetch(`${normalizeBridgeBaseUrl(baseUrl)}/v2/interactions/${encodeURIComponent(actionId)}`, {
     headers: bridgeHeaders(deviceToken),
   });
   const rawText = await response.text();
@@ -815,7 +816,7 @@ export async function fetchBridgeAction(baseUrl: string, actionId: string, devic
   if (!response.ok || !parsed || typeof parsed !== 'object') {
     throw new Error(`Bridge action error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  return parseBridgeAction((parsed as Record<string, unknown>).action);
+  return parseBridgeAction(unwrapBridgeV2Envelope(parsed).action);
 }
 
 export async function claimBridgeAction(
@@ -824,7 +825,7 @@ export async function claimBridgeAction(
   deviceToken = '',
 ): Promise<BridgeAction | null> {
   const response = await fetch(
-    `${normalizeBridgeBaseUrl(baseUrl)}/v1/devices/${encodeURIComponent(deviceId)}/actions`,
+    `${normalizeBridgeBaseUrl(baseUrl)}/v2/devices/${encodeURIComponent(deviceId)}/actions`,
     { headers: bridgeHeaders(deviceToken, false, deviceId) },
   );
   const rawText = await response.text();
@@ -837,7 +838,7 @@ export async function claimBridgeAction(
   if (!response.ok || !parsed || typeof parsed !== 'object') {
     throw new Error(`Bridge action claim error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  const action = (parsed as Record<string, unknown>).action;
+  const action = unwrapBridgeV2Envelope(parsed).action;
   return action == null ? null : parseBridgeAction(action);
 }
 
@@ -850,7 +851,7 @@ export async function acknowledgeBridgeAction(
   error = '',
 ): Promise<BridgeAction> {
   const response = await fetch(
-    `${normalizeBridgeBaseUrl(baseUrl)}/v1/devices/${encodeURIComponent(deviceId)}/actions/${encodeURIComponent(actionId)}/ack`,
+    `${normalizeBridgeBaseUrl(baseUrl)}/v2/devices/${encodeURIComponent(deviceId)}/actions/${encodeURIComponent(actionId)}/ack`,
     {
       method: 'POST',
       headers: bridgeHeaders(deviceToken, true, deviceId),
@@ -867,7 +868,7 @@ export async function acknowledgeBridgeAction(
   if (!response.ok || !parsed || typeof parsed !== 'object') {
     throw new Error(`Bridge action acknowledgement error ${response.status}: ${bridgeErrorMessage(parsed, rawText)}`);
   }
-  return parseBridgeAction((parsed as Record<string, unknown>).action);
+  return parseBridgeAction(unwrapBridgeV2Envelope(parsed).action);
 }
 
 export async function configureDeviceWifi(
@@ -894,7 +895,7 @@ export async function configureDeviceWifi(
     display_enabled: config.display_enabled,
     display_self_test: config.display_self_test,
   };
-  const response = await fetch(`${cleanBaseUrl}/v1/device_wifi`, {
+  const response = await fetch(`${cleanBaseUrl}/v2/device_wifi`, {
     method: 'POST',
     headers: bridgeHeaders(deviceToken, true),
     body: JSON.stringify(body),
@@ -908,7 +909,9 @@ export async function configureDeviceWifi(
     throw new Error(`Device Wi-Fi config returned non-JSON response: ${rawText.slice(0, 160)}`);
   }
 
-  const payload = parseDeviceWifiConfigResponse(parsed);
+  const payload = response.ok
+    ? parseDeviceWifiConfigResponse(unwrapBridgeV2Envelope(parsed))
+    : parseDeviceWifiConfigResponse(parsed);
   if (!response.ok || !payload.ok) {
     throw new Error(payload.error || bridgeErrorMessage(parsed, rawText) || `Device Wi-Fi config failed with HTTP ${response.status}`);
   }
@@ -1143,6 +1146,12 @@ export function bridgeErrorMessage(payload: unknown, fallbackText = ''): string 
   if (typeof payload === 'object' && payload !== null) {
     const data = payload as Record<string, unknown>;
     if (data.error != null) {
+      if (typeof data.error === 'object') {
+        const typedError = data.error as Record<string, unknown>;
+        if (typedError.message != null) {
+          return String(typedError.message);
+        }
+      }
       return String(data.error);
     }
     if (data.reply != null) {
@@ -1153,6 +1162,20 @@ export function bridgeErrorMessage(payload: unknown, fallbackText = ''): string 
     }
   }
   return fallbackText.slice(0, 160);
+}
+
+export function unwrapBridgeV2Envelope(payload: unknown): Record<string, unknown> {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error('Bridge v2 response must be a JSON object.');
+  }
+  const envelope = payload as Record<string, unknown>;
+  if (envelope.ok !== true) {
+    throw new Error(bridgeErrorMessage(payload, 'Bridge v2 request failed.'));
+  }
+  if (typeof envelope.data !== 'object' || envelope.data === null || Array.isArray(envelope.data)) {
+    throw new Error('Bridge v2 success data must be a JSON object.');
+  }
+  return { ok: true, ...(envelope.data as Record<string, unknown>) };
 }
 
 function parseBridgeWavInfo(value: unknown): BridgeWavInfo | null {

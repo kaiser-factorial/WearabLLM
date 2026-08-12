@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "success": {
+    "ok": true,
+    "data": {
+      "command": "GP",
+      "reply": "Protocol v2 is ready.",
+      "transcript": "Test protocol v2.",
+      "audio_bytes": 0,
+      "saved_wav": null,
+      "wav_info": null,
+      "sources": [],
+      "tool_results": [],
+      "persistence": {
+        "status": "persisted",
+        "backend": "supabase",
+        "session_id": "00000000-0000-0000-0000-000000000001",
+        "message": ""
+      }
+    }
+  },
+  "error": {
+    "ok": false,
+    "error": {
+      "code": "bad_request",
+      "message": "Missing transcript",
+      "request_id": "00000000000000000000000000000000"
+    }
+  }
+}

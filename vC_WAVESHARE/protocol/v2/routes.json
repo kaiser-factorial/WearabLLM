@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "json_aliases": [
+    "GET /v2/health",
+    "GET /v2/admin/config",
+    "GET /v2/admin/catalog",
+    "GET /v2/interactions",
+    "GET /v2/interactions/{action_id}",
+    "GET /v2/sensors",
+    "GET /v2/conversation",
+    "GET /v2/devices",
+    "GET /v2/conversation/sessions",
+    "GET /v2/devices/{device_id}/actions",
+    "POST /v2/query",
+    "POST /v2/query_text",
+    "POST /v2/heartbeat",
+    "POST /v2/session/reset",
+    "POST /v2/device_wifi",
+    "POST /v2/interactions",
+    "POST /v2/admin/config",
+    "POST /v2/admin/api-key",
+    "POST /v2/devices/{device_id}/sensor-manifest",
+    "POST /v2/conversation/sessions/{session_id}/archive",
+    "POST /v2/conversation/sessions/{session_id}/rename",
+    "POST /v2/devices/{device_id}/actions/{action_id}/ack"
+  ],
+  "binary_aliases": [
+    "POST /v2/tts"
+  ],
+  "compatibility": {
+    "v1_frozen": true,
+    "firmware_version": 1,
+    "first_v2_client": "android",
+    "v1_removal_scheduled": false
+  }
+}
