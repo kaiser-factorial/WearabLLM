@@ -46,7 +46,7 @@ the phone. `localhost` refers to the phone itself, not the development laptop.
 ## Development
 
 ```bash
-cd v3_WAVESHARE/app
+cd vC_WAVESHARE/app
 npm install
 npm run typecheck
 npm run test:protocol

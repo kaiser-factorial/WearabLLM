@@ -22,10 +22,10 @@ class SourceManifestTest(unittest.TestCase):
             output_size = output.stat().st_size
 
         files = payload["files"]
-        self.assertIn("v3_WAVESHARE/bridge/sphere_tools.py", files)
-        self.assertIn("v3_WAVESHARE/bridge/source_code.py", files)
-        self.assertIn("v3_WAVESHARE/app/src/App.tsx", files)
-        self.assertIn("v3_WAVESHARE/firmware/main/main.c", files)
+        self.assertIn("vC_WAVESHARE/bridge/sphere_tools.py", files)
+        self.assertIn("vC_WAVESHARE/bridge/source_code.py", files)
+        self.assertIn("vC_WAVESHARE/app/src/App.tsx", files)
+        self.assertIn("vC_WAVESHARE/firmware/main/main.c", files)
         self.assertIn("supabase/migrations/20260810030000_add_hybrid_memory_search.sql", files)
         lowered = "\n".join(files).lower()
         for forbidden in ("sdkconfig", "/build/", ".env", "node_modules", "credentials"):

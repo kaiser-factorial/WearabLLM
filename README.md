@@ -161,23 +161,26 @@ the next TTS chunk to reduce pauses between cards.
 
 | Path | Purpose |
 |---|---|
-| [`v3_WAVESHARE/`](v3_WAVESHARE/) | Active ESP32, bridge, Android, dashboard, protocol, and tooling |
-| [`v3_WAVESHARE/firmware/`](v3_WAVESHARE/firmware/) | ESP-IDF firmware for the Waveshare body |
-| [`v3_WAVESHARE/bridge/`](v3_WAVESHARE/bridge/) | Local and hosted Python agent/API implementation |
-| [`v3_WAVESHARE/app/`](v3_WAVESHARE/app/) | Expo/React Native Android companion |
-| [`v3_WAVESHARE/transcript_viewer/`](v3_WAVESHARE/transcript_viewer/) | Local Sphere dashboard and server-side proxy |
-| [`v3_WAVESHARE/hosted_agent/`](v3_WAVESHARE/hosted_agent/) | Private Hugging Face Docker Space image |
-| [`v3_WAVESHARE/protocol/`](v3_WAVESHARE/protocol/) | Shared API and command contract |
-| [`v3_WAVESHARE/docs/`](v3_WAVESHARE/docs/) | Bring-up, architecture, pin map, and status notes |
-| [`v3_WAVESHARE/docs/TOOLS.md`](v3_WAVESHARE/docs/TOOLS.md) | Sphere model tools, safety boundaries, limitations, and deferred decisions |
+| [`vC_WAVESHARE/`](vC_WAVESHARE/) | Active ESP32, bridge, Android, dashboard, protocol, and tooling |
+| [`vC_WAVESHARE/firmware/`](vC_WAVESHARE/firmware/) | ESP-IDF firmware for the Waveshare body |
+| [`vC_WAVESHARE/bridge/`](vC_WAVESHARE/bridge/) | Local and hosted Python agent/API implementation |
+| [`vC_WAVESHARE/app/`](vC_WAVESHARE/app/) | Expo/React Native Android companion |
+| [`vC_WAVESHARE/transcript_viewer/`](vC_WAVESHARE/transcript_viewer/) | Local Sphere dashboard and server-side proxy |
+| [`vC_WAVESHARE/hosted_agent/`](vC_WAVESHARE/hosted_agent/) | Private Hugging Face Docker Space image |
+| [`vC_WAVESHARE/protocol/`](vC_WAVESHARE/protocol/) | Shared API and command contract |
+| [`vC_WAVESHARE/docs/`](vC_WAVESHARE/docs/) | Bring-up, architecture, pin map, and status notes |
+| [`vC_WAVESHARE/docs/TOOLS.md`](vC_WAVESHARE/docs/TOOLS.md) | Sphere model tools, safety boundaries, limitations, and deferred decisions |
 | [`supabase/`](supabase/) | Database migrations and private backend schema |
-| [`v1/`](v1/) | Historical Bluefruit and phone-app baseline |
-| [`v2_servo_bluefruit/`](v2_servo_bluefruit/) | Documented servo-era archive |
+| [`vA_claudeWearable/`](vA_claudeWearable/) | Historical Bluefruit and phone-app baseline |
+| `vB_servo_bluefruit/` | Local, fully ignored servo-era archive; not published to GitHub |
 | [`hardware_tests/`](hardware_tests/) | Standalone hardware probes |
 
 Project intent and longer-term design are documented in [SPEC.md](SPEC.md).
 Some deep v3 status documents still describe earlier bring-up phases; the root
 README reflects the current verified architecture.
+
+Repository generations use letters (`vA`, `vB`, `vC`). HTTP paths such as
+`/v1/query` use an independent API version and are intentionally unchanged.
 
 ## Getting Started
 
@@ -197,18 +200,18 @@ Choose the pieces relevant to the surface you are working on:
 Bridge:
 
 ```bash
-python3 -m venv v3_WAVESHARE/bridge/.venv
-v3_WAVESHARE/bridge/.venv/bin/pip install \
-  -r v3_WAVESHARE/bridge/requirements.txt
+python3 -m venv vC_WAVESHARE/bridge/.venv
+vC_WAVESHARE/bridge/.venv/bin/pip install \
+  -r vC_WAVESHARE/bridge/requirements.txt
 OPENAI_API_KEY=test-key \
-  v3_WAVESHARE/bridge/.venv/bin/python -m unittest discover \
-  -s v3_WAVESHARE/bridge -p 'test_*.py'
+  vC_WAVESHARE/bridge/.venv/bin/python -m unittest discover \
+  -s vC_WAVESHARE/bridge -p 'test_*.py'
 ```
 
 Android:
 
 ```bash
-cd v3_WAVESHARE/app
+cd vC_WAVESHARE/app
 npm install
 npm run typecheck
 npm run test:protocol
@@ -228,19 +231,19 @@ Open `http://127.0.0.1:8787`. If the universal `dev` launcher is not installed,
 the project wrapper is:
 
 ```bash
-./v3_WAVESHARE/scripts/run_transcript_viewer.sh --no-open
+./vC_WAVESHARE/scripts/run_transcript_viewer.sh --no-open
 ```
 
 The server reads the bridge URL and token from ignored firmware configuration,
 or accepts explicit `--bridge-url` and `--bridge-token` arguments. See the
-[dashboard README](v3_WAVESHARE/transcript_viewer/README.md).
+[dashboard README](vC_WAVESHARE/transcript_viewer/README.md).
 
 ### Build the Android app
 
 Run Expo from the app root:
 
 ```bash
-cd v3_WAVESHARE/app
+cd vC_WAVESHARE/app
 export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
@@ -254,11 +257,11 @@ dictation replaces a custom press-to-talk control.
 ### Configure, build, and flash firmware
 
 Real Wi-Fi credentials and device tokens belong only in ignored
-`v3_WAVESHARE/firmware/sdkconfig`. Prefer environment variables so secrets do
+`vC_WAVESHARE/firmware/sdkconfig`. Prefer environment variables so secrets do
 not enter shell history:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 export WEARABLLM_WIFI_PASSWORD='replace-me'
 export WEARABLLM_BRIDGE_AUTH_TOKEN='replace-me'
 
@@ -303,13 +306,13 @@ Set `WEARABLLM_PRINCIPAL_ID` as a Space variable, then deploy only the selected
 hosted files:
 
 ```bash
-python3 v3_WAVESHARE/scripts/deploy_hf_space.py \
+python3 vC_WAVESHARE/scripts/deploy_hf_space.py \
   --repo-id YOUR_HF_ACCOUNT/wearabllm-agent
 ```
 
 The deploy script does not read or upload firmware `sdkconfig`, local captures,
 or secrets. See [supabase/README.md](supabase/README.md) and the
-[hosted-agent README](v3_WAVESHARE/hosted_agent/README.md).
+[hosted-agent README](vC_WAVESHARE/hosted_agent/README.md).
 
 ## Security Model
 
@@ -333,7 +336,7 @@ Before publishing:
 
 ```bash
 git status --short
-git check-ignore -v v3_WAVESHARE/firmware/sdkconfig
+git check-ignore -v vC_WAVESHARE/firmware/sdkconfig
 ```
 
 ## Project Boundaries

@@ -23,7 +23,7 @@ from sphere_tools import (
 class SphereToolExecutorTest(unittest.TestCase):
     def test_source_continuations_route_to_source_read(self) -> None:
         self.assertTrue(source_read_requested_for_turn("yes please, starting line 1201"))
-        self.assertTrue(source_read_requested_for_turn("v3_WAVESHARE/bridge/wearabllm_bridge.py"))
+        self.assertTrue(source_read_requested_for_turn("vC_WAVESHARE/bridge/wearabllm_bridge.py"))
         self.assertFalse(source_read_requested_for_turn("What should we build next?"))
 
     def test_web_routing_does_not_treat_current_profile_data_as_a_search_request(self) -> None:
@@ -387,9 +387,9 @@ class SphereToolExecutorTest(unittest.TestCase):
         self.assertIn("source_list", names)
         self.assertIn("source_read", names)
         source = Mock()
-        source.list.return_value = [{"path": "v3_WAVESHARE/bridge", "type": "directory"}]
+        source.list.return_value = [{"path": "vC_WAVESHARE/bridge", "type": "directory"}]
         source.read.return_value = {
-            "path": "v3_WAVESHARE/bridge/sphere_tools.py",
+            "path": "vC_WAVESHARE/bridge/sphere_tools.py",
             "content": "tool source",
             "start_line": 1,
             "end_line": 1,
@@ -406,13 +406,13 @@ class SphereToolExecutorTest(unittest.TestCase):
 
         listed = executor.execute(
             "source_list",
-            {"path": "v3_WAVESHARE", "recursive": False, "limit": 50},
+            {"path": "vC_WAVESHARE", "recursive": False, "limit": 50},
             call_id="call-list-source",
         )
         read = executor.execute(
             "source_read",
             {
-                "path": "v3_WAVESHARE/bridge/sphere_tools.py",
+                "path": "vC_WAVESHARE/bridge/sphere_tools.py",
                 "start_line": 1,
                 "line_count": 120,
             },
@@ -421,9 +421,9 @@ class SphereToolExecutorTest(unittest.TestCase):
 
         self.assertTrue(listed["ok"])
         self.assertEqual(read["file"]["content"], "tool source")
-        source.list.assert_called_once_with("v3_WAVESHARE", recursive=False, limit=50)
+        source.list.assert_called_once_with("vC_WAVESHARE", recursive=False, limit=50)
         source.read.assert_called_once_with(
-            "v3_WAVESHARE/bridge/sphere_tools.py",
+            "vC_WAVESHARE/bridge/sphere_tools.py",
             start_line=1,
             line_count=120,
         )

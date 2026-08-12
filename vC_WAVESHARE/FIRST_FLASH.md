@@ -38,7 +38,7 @@ directly to the Mac where possible.
 Open Terminal and enter:
 
 ```bash
-cd $HOME/Projects/wearabLLM/WearabLLM/v3_WAVESHARE
+cd $HOME/Projects/wearabLLM/WearabLLM/vC_WAVESHARE
 ./scripts/bringup_info.py
 ```
 
@@ -63,7 +63,7 @@ Do not continue until a USB modem or USB serial port appears.
 
 ## 3. Check The Staged Firmware Configuration
 
-Run this from `v3_WAVESHARE`:
+Run this from `vC_WAVESHARE`:
 
 ```bash
 ./scripts/bench_doctor.py
@@ -103,7 +103,7 @@ not print the Wi-Fi password.
 Open a second Terminal window and keep it open during the device test:
 
 ```bash
-cd $HOME/Projects/wearabLLM/WearabLLM/v3_WAVESHARE
+cd $HOME/Projects/wearabLLM/WearabLLM/vC_WAVESHARE
 ./scripts/run_bridge_dryrun.sh
 ```
 
@@ -113,7 +113,7 @@ without using OpenAI or incurring API charges.
 Open a third Terminal window and verify the bridge:
 
 ```bash
-cd $HOME/Projects/wearabLLM/WearabLLM/v3_WAVESHARE
+cd $HOME/Projects/wearabLLM/WearabLLM/vC_WAVESHARE
 ./scripts/bridge_smoke.sh
 ```
 
@@ -124,7 +124,7 @@ Do not flash for the full interaction test until the smoke check passes.
 Return to the first Terminal:
 
 ```bash
-cd $HOME/Projects/wearabLLM/WearabLLM/v3_WAVESHARE
+cd $HOME/Projects/wearabLLM/WearabLLM/vC_WAVESHARE
 ./scripts/firmware_build.sh
 ```
 

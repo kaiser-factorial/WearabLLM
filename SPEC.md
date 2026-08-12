@@ -53,18 +53,19 @@ The project began on an Adafruit Circuit Playground Bluefruit because that board
 
 The repository root is the active Git root. Project folders are:
 
-- `v3_WAVESHARE/`: active Waveshare firmware, optional Python bridge, Android
+- `vC_WAVESHARE/`: active Waveshare firmware, optional Python bridge, Android
   app scaffold, local transcript viewer, protocol docs, and
   bring-up/deployment scripts.
 - `supabase/`: private transcript-table migration and token-gated Edge Function.
-- `v1/`: readable historical Bluefruit/phone-app baseline.
-- `v2_servo_bluefruit/`: local ignored servo-era archive; only its README is
-  published by the top-level repository.
+- `vA_claudeWearable/`: readable historical Bluefruit/phone-app baseline.
+- `vB_servo_bluefruit/`: local fully ignored servo-era archive; its audio,
+  images, native artifacts, and source files are not published by the
+  top-level repository.
 - `hardware_tests/`: standalone hardware probes.
 
 ### v3 Waveshare Prototype
 
-Path: `v3_WAVESHARE/`
+Path: `vC_WAVESHARE/`
 
 Target board:
 
@@ -93,12 +94,12 @@ direct-OpenAI firmware profile remains an optional fallback.
 
 Current v3 implementation:
 
-- ESP-IDF firmware in `v3_WAVESHARE/firmware`
-- local Python bridge in `v3_WAVESHARE/bridge`
-- Android-first Expo scaffold in `v3_WAVESHARE/app`
-- HTTP protocol docs in `v3_WAVESHARE/protocol`
-- hardware bring-up docs in `v3_WAVESHARE/docs`
-- bench helpers in `v3_WAVESHARE/scripts`
+- ESP-IDF firmware in `vC_WAVESHARE/firmware`
+- local Python bridge in `vC_WAVESHARE/bridge`
+- Android-first Expo scaffold in `vC_WAVESHARE/app`
+- HTTP protocol docs in `vC_WAVESHARE/protocol`
+- hardware bring-up docs in `vC_WAVESHARE/docs`
+- bench helpers in `vC_WAVESHARE/scripts`
 - Supabase migration and Edge Function in `supabase`
 
 Current v3 firmware capabilities:
@@ -248,7 +249,7 @@ Not yet verified or integrated:
 
 ### v1 Phone App
 
-Path: `WearabLLM/phone-app/`
+Path: `vA_claudeWearable/phone-app/`
 
 Stack:
 
@@ -271,9 +272,9 @@ The app has a known iOS 26 workaround: speech recognition event listeners were r
 
 ### LLM Layer And Response Contract
 
-Historical v1 path: `WearabLLM/phone-app/src/api/llm.ts`
+Historical v1 path: `vA_claudeWearable/phone-app/src/api/llm.ts`
 
-Current v3 bridge path: `v3_WAVESHARE/bridge/wearabllm_bridge.py`
+Current v3 bridge path: `vC_WAVESHARE/bridge/wearabllm_bridge.py`
 
 The v1 phone app has a provider abstraction for:
 
@@ -306,7 +307,7 @@ Current 9-code response scale:
 
 Older docs mention a 7-code scale without the two purple states. Treat the 9-code scale as the newer direction.
 
-The v3 repo includes `v3_WAVESHARE/scripts/validate_protocol.py` to check that the bridge, Android app, firmware self-test list, v3 protocol docs, and this spec still agree on the same 9 commands.
+The v3 repo includes `vC_WAVESHARE/scripts/validate_protocol.py` to check that the bridge, Android app, firmware self-test list, v3 protocol docs, and this spec still agree on the same 9 commands.
 
 ### BLE Protocol
 
@@ -560,13 +561,13 @@ OpenAI or local Whisper. ESP-SR handles wake-word detection, not arbitrary STT.
 
 ## Agent Handoff Notes
 
-- Start by reading this file, then inspect `v3_WAVESHARE/README.md`, `v3_WAVESHARE/docs/STATUS.md`, and `v3_WAVESHARE/docs/BRINGUP.md` for current work.
-- For project history, inspect `v1/docs/session-log.md` and
-  `v1/phone-app/src/api/llm.ts`. The full v2 servo archive is intentionally
+- Start by reading this file, then inspect `vC_WAVESHARE/README.md`, `vC_WAVESHARE/docs/STATUS.md`, and `vC_WAVESHARE/docs/BRINGUP.md` for current work.
+- For project history, inspect `vA_claudeWearable/docs/session-log.md` and
+  `vA_claudeWearable/phone-app/src/api/llm.ts`. The full v2 servo archive is intentionally
   local/ignored.
 - Do not assume the servo is still a requirement. Treat it as legacy unless the user explicitly asks to revive it.
 - Do not break the existing 9-command response scale unless replacing it with an intentional migration plan.
-- Run `v3_WAVESHARE/scripts/validate_protocol.py` after changing command names, meanings, prompt text, bridge parsing, app command definitions, firmware command handling, or protocol docs.
+- Run `vC_WAVESHARE/scripts/validate_protocol.py` after changing command names, meanings, prompt text, bridge parsing, app command definitions, firmware command handling, or protocol docs.
 - Before changing BLE code, remember BLE is legacy/future provisioning work;
   the current direct profile uses Wi-Fi HTTPS.
 - Before changing the LLM prompt, update the parser and firmware/app command schema together.

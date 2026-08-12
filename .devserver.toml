@@ -1,18 +1,18 @@
 default = "app"
 
 [targets.app]
-dir = "v3_WAVESHARE/app"
+dir = "vC_WAVESHARE/app"
 cmd = "npm run start"
 health_path = "/"
 
 [targets.bridge]
-dir = "v3_WAVESHARE"
+dir = "vC_WAVESHARE"
 cmd = "./scripts/run_bridge_live.sh"
 port = 8765
 health_path = "/health"
 
 [targets.dashboard]
-dir = "v3_WAVESHARE"
+dir = "vC_WAVESHARE"
 cmd = "python3 transcript_viewer/server.py --no-open"
 port = 8787
 health_path = "/health"

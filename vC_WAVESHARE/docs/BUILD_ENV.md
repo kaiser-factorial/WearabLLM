@@ -39,7 +39,7 @@ Do not set `WEARABLLM_IDF_SANDBOX` for a normal Terminal build; the ordinary
 Before a bench session, run the v3 preflight:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/preflight.sh
 ```
 
@@ -58,7 +58,7 @@ To check local bench readiness without flashing or resetting the board:
 From the repo root:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/firmware_build.sh
 ```
 
@@ -81,7 +81,7 @@ To run all firmware build variants:
 Raw equivalent:
 
 ```bash
-cd v3_WAVESHARE/firmware
+cd vC_WAVESHARE/firmware
 PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
   bash -c '. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
 ```
@@ -99,7 +99,7 @@ idf.py build
 With the bridge already running:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/bridge_smoke.sh
 ```
 
@@ -114,7 +114,7 @@ To target a different host/port:
 After setting Wi-Fi and bridge URL in `idf.py menuconfig`:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/firmware_flash_monitor.sh PORT
 ```
 

@@ -25,7 +25,7 @@ Use this order so each layer is proven before adding the next one.
 Helper scripts exist for the repeated bench commands:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/bringup_info.py
 ./scripts/configure_firmware.py --dry-run
 ./scripts/configure_firmware.py --status
@@ -68,7 +68,7 @@ On boot, the firmware runs all 9 command animations once and returns to idle blu
 From the repo root:
 
 ```bash
-cd v3_WAVESHARE/bridge
+cd vC_WAVESHARE/bridge
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -78,7 +78,7 @@ python wearabllm_bridge.py --host 0.0.0.0 --port 8765 --dry-run --save-wav-dir .
 Or use the helper:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/run_bridge_dryrun.sh
 ```
 
@@ -111,7 +111,7 @@ Useful no-API animation checks:
 In a second terminal, verify all dry-run bridge endpoints:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/bridge_smoke.sh
 ```
 
@@ -128,7 +128,7 @@ WEARABLLM_SMOKE_AUDIO=1 ./scripts/bridge_smoke.sh
 Keep this terminal open. Find your computer's LAN IP from another terminal:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/bringup_info.py
 ```
 
@@ -205,7 +205,7 @@ internet.
 In another terminal:
 
 ```bash
-cd v3_WAVESHARE/firmware
+cd vC_WAVESHARE/firmware
 . $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
 idf.py set-target esp32s3
 idf.py menuconfig
@@ -237,7 +237,7 @@ For a simple external pushbutton:
 To print the exact bridge query/TTS URLs before opening `menuconfig`:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/bringup_info.py
 ```
 
@@ -246,7 +246,7 @@ configuration helper. This writes only ignored `firmware/sdkconfig` values and
 keeps your Wi-Fi password out of git:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 export WEARABLLM_WIFI_SSID="your-wifi-name"
 export WEARABLLM_WIFI_PASSWORD="your-wifi-password"
 ./scripts/configure_firmware.py
@@ -343,7 +343,7 @@ idf.py -p /dev/tty.usbmodem* flash monitor
 Or use:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/firmware_build.sh
 ./scripts/firmware_flash_monitor.sh
 ```
@@ -386,7 +386,7 @@ Ctrl+]
 To save a bounded boot log instead of opening an interactive monitor:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/serial_capture.sh --seconds 20 --reset /dev/cu.usbmodem101
 ```
 
@@ -462,7 +462,7 @@ The serial analyzer looks for these same boot and interaction signals and
 prints the most likely next check if the loop is incomplete:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/analyze_serial_log.py logs/serial-YYYYmmdd-HHMMSS.log
 ```
 
@@ -526,7 +526,7 @@ open captures/wearabllm-*.wav
 Or inspect the bridge's saved WAV metadata and audio levels from the repo:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 python3 scripts/inspect_captures.py --latest
 ```
 
@@ -550,7 +550,7 @@ Do not move to live OpenAI/STT until this saved WAV has real audible mic audio.
 After the dry-run audio file sounds usable, restart the bridge without `--dry-run`:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/run_bridge_live.sh
 ```
 
@@ -637,7 +637,7 @@ Start with the bridge in `--dry-run` mode. Dry-run TTS returns a valid silent WA
 Start the bridge without API calls:
 
 ```bash
-cd v3_WAVESHARE/bridge
+cd vC_WAVESHARE/bridge
 python3 wearabllm_bridge.py --dry-run --typed "is this working?"
 ```
 
@@ -693,7 +693,7 @@ Dry-run TTS returns a valid silent `16 kHz`, mono, 16-bit WAV. Live TTS requires
 ## OpenAI Bridge Test
 
 ```bash
-cd v3_WAVESHARE/bridge
+cd vC_WAVESHARE/bridge
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -785,7 +785,7 @@ $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5
 ```
 
 ```bash
-cd v3_WAVESHARE/firmware
+cd vC_WAVESHARE/firmware
 PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
   bash -c '. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
 ```
@@ -793,7 +793,7 @@ PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:
 For normal interactive work:
 
 ```bash
-cd v3_WAVESHARE/firmware
+cd vC_WAVESHARE/firmware
 . $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh
 idf.py set-target esp32s3
 idf.py menuconfig
@@ -900,7 +900,7 @@ next-flash settings. Enabling TTS also enables the speaker output path:
 For a no-API hardware smoke test, run the bridge in dry-run mode:
 
 ```bash
-cd v3_WAVESHARE/bridge
+cd vC_WAVESHARE/bridge
 python wearabllm_bridge.py --host 0.0.0.0 --port 8765 --dry-run
 ```
 
@@ -955,10 +955,10 @@ The current downmix path reads 32-bit stereo I2S samples and converts them to 16
 Current local checks:
 
 ```bash
-python3 -m unittest discover -s v3_WAVESHARE/bridge -p 'test_*.py'
-python3 -m py_compile v3_WAVESHARE/bridge/wearabllm_bridge.py v3_WAVESHARE/bridge/test_wearabllm_bridge.py
+python3 -m unittest discover -s vC_WAVESHARE/bridge -p 'test_*.py'
+python3 -m py_compile vC_WAVESHARE/bridge/wearabllm_bridge.py vC_WAVESHARE/bridge/test_wearabllm_bridge.py
 
-cd v3_WAVESHARE/firmware
+cd vC_WAVESHARE/firmware
 PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:$PATH" \
   bash -c '. $HOME/Projects/wearabLLM/.toolchains/esp-idf-v5.5/export.sh && idf.py build'
 ```
@@ -969,7 +969,7 @@ To compile-check optional firmware paths without changing the repo's normal
 ignored `firmware/sdkconfig`, use the variant helper:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/firmware_variant_build.sh display
 ./scripts/firmware_variant_build.sh display-test
 ./scripts/firmware_variant_build.sh audio-out

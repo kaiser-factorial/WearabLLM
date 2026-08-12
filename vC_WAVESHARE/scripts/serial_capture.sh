@@ -18,7 +18,7 @@ usage() {
     cat <<'EOF'
 Usage: ./scripts/serial_capture.sh [options] [PORT]
 
-Capture ESP32 serial logs for a bounded time and save them to v3_WAVESHARE/logs/.
+Capture ESP32 serial logs for a bounded time and save them to vC_WAVESHARE/logs/.
 
 Options:
   --seconds N      Capture duration in seconds. Default: 20.

@@ -25,7 +25,7 @@ fi
 
 if ! "${PYTHON_BIN}" -c 'import audioop' >/dev/null 2>&1; then
     echo "No Python runtime with audioop support was found." >&2
-    echo "Install v3_WAVESHARE/bridge/requirements.txt or set WEARABLLM_PYTHON." >&2
+    echo "Install vC_WAVESHARE/bridge/requirements.txt or set WEARABLLM_PYTHON." >&2
     exit 1
 fi
 
@@ -102,32 +102,32 @@ cd "${REPO_ROOT}"
 
 step "Python compile checks"
 "${PYTHON_BIN}" -m py_compile \
-    v3_WAVESHARE/scripts/analyze_serial_log.py \
-    v3_WAVESHARE/scripts/bench_doctor.py \
-    v3_WAVESHARE/scripts/bench_report.py \
-    v3_WAVESHARE/scripts/bringup_info.py \
-    v3_WAVESHARE/scripts/configure_firmware.py \
-    v3_WAVESHARE/scripts/inspect_captures.py \
-    v3_WAVESHARE/scripts/validate_protocol.py \
-    v3_WAVESHARE/scripts/verify_firmware_image.py \
-    v3_WAVESHARE/bridge/wearabllm_bridge.py
+    vC_WAVESHARE/scripts/analyze_serial_log.py \
+    vC_WAVESHARE/scripts/bench_doctor.py \
+    vC_WAVESHARE/scripts/bench_report.py \
+    vC_WAVESHARE/scripts/bringup_info.py \
+    vC_WAVESHARE/scripts/configure_firmware.py \
+    vC_WAVESHARE/scripts/inspect_captures.py \
+    vC_WAVESHARE/scripts/validate_protocol.py \
+    vC_WAVESHARE/scripts/verify_firmware_image.py \
+    vC_WAVESHARE/bridge/wearabllm_bridge.py
 
 step "Protocol consistency"
-"${PYTHON_BIN}" v3_WAVESHARE/scripts/validate_protocol.py
+"${PYTHON_BIN}" vC_WAVESHARE/scripts/validate_protocol.py
 
 bash -n \
-    v3_WAVESHARE/scripts/bridge_smoke.sh \
-    v3_WAVESHARE/scripts/firmware_build.sh \
-    v3_WAVESHARE/scripts/firmware_flash_monitor.sh \
-    v3_WAVESHARE/scripts/preflight.sh \
-    v3_WAVESHARE/scripts/run_bridge_dryrun.sh \
-    v3_WAVESHARE/scripts/serial_capture.sh
+    vC_WAVESHARE/scripts/bridge_smoke.sh \
+    vC_WAVESHARE/scripts/firmware_build.sh \
+    vC_WAVESHARE/scripts/firmware_flash_monitor.sh \
+    vC_WAVESHARE/scripts/preflight.sh \
+    vC_WAVESHARE/scripts/run_bridge_dryrun.sh \
+    vC_WAVESHARE/scripts/serial_capture.sh
 
 step "Bridge unit tests"
-"${PYTHON_BIN}" -m unittest discover -s v3_WAVESHARE/bridge -p 'test_*.py'
+"${PYTHON_BIN}" -m unittest discover -s vC_WAVESHARE/bridge -p 'test_*.py'
 
 step "Bench helper unit tests"
-"${PYTHON_BIN}" -m unittest discover -s v3_WAVESHARE/scripts -p 'test_*.py'
+"${PYTHON_BIN}" -m unittest discover -s vC_WAVESHARE/scripts -p 'test_*.py'
 
 if [ "${RUN_APP}" = "1" ]; then
     step "App protocol and type checks"

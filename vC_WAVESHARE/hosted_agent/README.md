@@ -61,7 +61,7 @@ output-token cap at runtime through the authenticated admin API and Supabase
 From the repository root:
 
 ```bash
-python3 v3_WAVESHARE/scripts/deploy_hf_space.py \
+python3 vC_WAVESHARE/scripts/deploy_hf_space.py \
   --repo-id YOUR_HF_ACCOUNT/wearabllm-agent
 ```
 

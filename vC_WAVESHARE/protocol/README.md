@@ -95,7 +95,7 @@ Content-Type: audio/wav
 The bridge smoke script tests this endpoint automatically when the bridge is in dry-run mode:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/bridge_smoke.sh
 ```
 
@@ -303,7 +303,7 @@ The 9-command scale is intentionally duplicated in firmware, bridge, app, and
 docs for now. Run this after changing command names or meanings:
 
 ```bash
-cd v3_WAVESHARE
+cd vC_WAVESHARE
 ./scripts/validate_protocol.py
 ```
 

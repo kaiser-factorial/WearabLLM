@@ -114,7 +114,7 @@ The onboard 18-pin `DISPLAY` FPC is for Waveshare-compatible display modules. Do
 The perfboard adapter diagram is:
 
 ```text
-v3_WAVESHARE/tft_perfboard_adapter.svg
+vC_WAVESHARE/tft_perfboard_adapter.svg
 ```
 
 ## Pins To Avoid For New Controls

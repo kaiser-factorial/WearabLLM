@@ -18,8 +18,8 @@ class SourceCodeStoreTest(unittest.TestCase):
                     "version": 1,
                     "files": {
                         "README.md": "# Sphere\nPrivate bridge.\n",
-                        "v3_WAVESHARE/bridge/sphere_tools.py": "line one\nline two\nline three\n",
-                        "v3_WAVESHARE/docs/TOOLS.md": "# Tools\nRead only.\n",
+                        "vC_WAVESHARE/bridge/sphere_tools.py": "line one\nline two\nline three\n",
+                        "vC_WAVESHARE/docs/TOOLS.md": "# Tools\nRead only.\n",
                     },
                 }
             ),
@@ -32,18 +32,18 @@ class SourceCodeStoreTest(unittest.TestCase):
 
     def test_lists_only_manifest_paths_and_direct_children(self) -> None:
         root = self.store.list("", recursive=False, limit=20)
-        self.assertEqual([entry["path"] for entry in root], ["README.md", "v3_WAVESHARE"])
-        bridge = self.store.list("v3_WAVESHARE/bridge", recursive=True, limit=20)
+        self.assertEqual([entry["path"] for entry in root], ["README.md", "vC_WAVESHARE"])
+        bridge = self.store.list("vC_WAVESHARE/bridge", recursive=True, limit=20)
         self.assertEqual(
             [entry["path"] for entry in bridge],
-            ["v3_WAVESHARE/bridge/sphere_tools.py"],
+            ["vC_WAVESHARE/bridge/sphere_tools.py"],
         )
         self.assertEqual(bridge[0]["type"], "file")
         self.assertEqual(bridge[0]["lines"], 3)
 
     def test_reads_bounded_line_chunk_with_provenance(self) -> None:
         result = self.store.read(
-            "v3_WAVESHARE/bridge/sphere_tools.py",
+            "vC_WAVESHARE/bridge/sphere_tools.py",
             start_line=2,
             line_count=1,
         )
@@ -55,7 +55,7 @@ class SourceCodeStoreTest(unittest.TestCase):
         self.assertEqual(len(result["sha256"]), 64)
 
     def test_rejects_traversal_absolute_and_unlisted_paths(self) -> None:
-        for path in ("../README.md", "/etc/passwd", "v3_WAVESHARE/bridge/missing.py"):
+        for path in ("../README.md", "/etc/passwd", "vC_WAVESHARE/bridge/missing.py"):
             with self.subTest(path=path), self.assertRaises((ValueError, LookupError)):
                 self.store.read(path, start_line=1, line_count=20)
 

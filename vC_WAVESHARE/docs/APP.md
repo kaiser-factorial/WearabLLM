@@ -1,6 +1,6 @@
 # Android App Notes
 
-The active Android companion lives in `v3_WAVESHARE/app/`. It is an Expo/React
+The active Android companion lives in `vC_WAVESHARE/app/`. It is an Expo/React
 Native client for the shared Sphere conversation, not a firmware-configuration
 console.
 
@@ -42,7 +42,7 @@ limits, and speaker configuration remain in ignored firmware config.
 ## Build
 
 ```bash
-cd v3_WAVESHARE/app
+cd vC_WAVESHARE/app
 npm install
 export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 export ANDROID_HOME="$HOME/Library/Android/sdk"

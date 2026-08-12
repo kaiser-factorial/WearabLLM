@@ -3,7 +3,7 @@
 Local-only multi-device console for the hosted Sphere conversation.
 
 ```bash
-./v3_WAVESHARE/scripts/run_transcript_viewer.sh
+./vC_WAVESHARE/scripts/run_transcript_viewer.sh
 ```
 
 Opens `http://127.0.0.1:8787`.
@@ -74,7 +74,7 @@ Reads ignored firmware `sdkconfig`:
 Overrides:
 
 ```bash
-python3 v3_WAVESHARE/transcript_viewer/server.py \
+python3 vC_WAVESHARE/transcript_viewer/server.py \
   --bridge-url https://your-space.hf.space/v1/query \
   --bridge-token "$WEARABLLM_DEVICE_TOKEN" \
   --no-open

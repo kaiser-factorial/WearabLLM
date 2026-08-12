@@ -16,7 +16,7 @@ phone-app/ios/Pods/
 phone-app/ios/build/
 **/ios/Pods/
 **/ios/build/
-v3_WAVESHARE/app/android/
+vC_WAVESHARE/app/android/
 *.xcworkspace
 !phone-app/ios/ClaudeWearable.xcworkspace
 
@@ -38,11 +38,9 @@ Screenshot *.png
 *.broken-dataless-*/
 **/.git/
 
-# Local servo-era archive. Several files are macOS/iCloud placeholders in this
-# workspace; keep the folder documented without trying to commit unreadable
-# local artifacts.
-v2_servo_bluefruit/*
-!v2_servo_bluefruit/README.md
+# Local servo-era archive. Keep the recovered historical files on this machine
+# without publishing audio, images, Pods, or other local artifacts.
+vB_servo_bluefruit/
 
 # Adafruit bundle and firmware (large, can be re-downloaded)
 adafruit-circuitpython-bundle-*/
@@ -83,19 +81,19 @@ HANDOFF.local.md
 local/
 .local/
 
-# v3 ESP-IDF / Python generated artifacts
-v3_WAVESHARE/firmware/build/
-v3_WAVESHARE/firmware/build_*/
-v3_WAVESHARE/firmware/managed_components/
+# vC ESP-IDF / Python generated artifacts
+vC_WAVESHARE/firmware/build/
+vC_WAVESHARE/firmware/build_*/
+vC_WAVESHARE/firmware/managed_components/
 **/sdkconfig
 **/sdkconfig.old
 **/sdkconfig.bak
-v3_WAVESHARE/bridge/captures/
-v3_WAVESHARE/bridge/.venv/
-v3_WAVESHARE/logs/
-v3_WAVESHARE/bridge/__pycache__/
-v3_WAVESHARE/bridge/*.pyc
-v3_WAVESHARE/scripts/__pycache__/
+vC_WAVESHARE/bridge/captures/
+vC_WAVESHARE/bridge/.venv/
+vC_WAVESHARE/logs/
+vC_WAVESHARE/bridge/__pycache__/
+vC_WAVESHARE/bridge/*.pyc
+vC_WAVESHARE/scripts/__pycache__/
 **/__pycache__/
 **/*.pyc
 
@@ -104,3 +102,6 @@ supabase/.temp/
 supabase/.branches/
 supabase/functions/.env
 supabase/.env*
+
+
+*/electron/

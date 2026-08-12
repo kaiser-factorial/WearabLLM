@@ -33,5 +33,5 @@ python3 "${SCRIPT_DIR}/configure_firmware.py" --enable-transcript-log
 echo
 echo "Supabase transcript logging is deployed and staged in ignored firmware/sdkconfig."
 echo "Build and perform the final USB flash:"
-echo "  ./v3_WAVESHARE/scripts/firmware_build.sh"
-echo "  ./v3_WAVESHARE/scripts/firmware_flash_monitor.sh"
+echo "  ./vC_WAVESHARE/scripts/firmware_build.sh"
+echo "  ./vC_WAVESHARE/scripts/firmware_flash_monitor.sh"

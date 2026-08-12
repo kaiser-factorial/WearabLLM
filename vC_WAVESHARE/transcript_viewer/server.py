@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-V3_DIR = ROOT / "v3_WAVESHARE"
+V3_DIR = ROOT / "vC_WAVESHARE"
 DEFAULT_SDKCONFIG = V3_DIR / "firmware" / "sdkconfig"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEPLOY_SCRIPT = V3_DIR / "scripts" / "deploy_hf_space.py"
