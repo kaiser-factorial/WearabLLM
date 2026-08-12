@@ -9,6 +9,22 @@ export interface BridgeResponse {
   wav_info: BridgeWavInfo | null;
   sources: BridgeSource[];
   tool_results: BridgeToolActivity[];
+  persistence: BridgePersistence;
+}
+
+export type BridgePersistenceStatus =
+  | 'persisted'
+  | 'failed'
+  | 'skipped'
+  | 'not_configured'
+  | 'unknown';
+
+export interface BridgePersistence {
+  status: BridgePersistenceStatus;
+  backend: string;
+  session_id: string | null;
+  error_code?: string;
+  message?: string;
 }
 
 export interface BridgeSource {
@@ -83,6 +99,8 @@ export interface BridgeConversationTurn {
   sources: BridgeSource[];
   tool_results: BridgeToolActivity[];
   created_at: string | null;
+  local_session_id?: string;
+  persistence_status?: BridgePersistenceStatus;
 }
 
 export interface BridgeConversationSession {
@@ -1040,6 +1058,32 @@ export function parseBridgeResponse(payload: unknown): BridgeResponse {
     wav_info: parseBridgeWavInfo(data.wav_info),
     sources: parseBridgeSources(data.sources),
     tool_results: parseBridgeToolActivity(data.tool_results),
+    persistence: parseBridgePersistence(data.persistence),
+  };
+}
+
+export function parseBridgePersistence(payload: unknown): BridgePersistence {
+  if (typeof payload !== 'object' || payload === null) {
+    return { status: 'unknown', backend: '', session_id: null };
+  }
+  const data = payload as Record<string, unknown>;
+  const rawStatus = String(data.status ?? 'unknown');
+  const allowed = new Set<BridgePersistenceStatus>([
+    'persisted',
+    'failed',
+    'skipped',
+    'not_configured',
+    'unknown',
+  ]);
+  const status = allowed.has(rawStatus as BridgePersistenceStatus)
+    ? rawStatus as BridgePersistenceStatus
+    : 'unknown';
+  return {
+    status,
+    backend: String(data.backend ?? ''),
+    session_id: data.session_id == null ? null : String(data.session_id),
+    error_code: data.error_code == null ? undefined : String(data.error_code),
+    message: data.message == null ? undefined : String(data.message),
   };
 }
 

@@ -247,6 +247,7 @@ body {
 }
 .status.online span { background: var(--accent); }
 .status.offline span { background: var(--danger); }
+.status.warning span { background: var(--warn); }
 
 .device-list {
   display: flex;
@@ -820,6 +821,14 @@ body {
   background: var(--assistant-bubble);
   border-bottom-left-radius: 6px;
   box-shadow: inset 0 0 0 1px rgba(124, 240, 194, 0.05);
+}
+.bubble.unsaved { border-color: rgba(251, 191, 36, 0.65); }
+.bubble-persistence-warning {
+  margin-top: 9px;
+  color: var(--warn);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
 }
 .bubble-meta {
   display: flex;

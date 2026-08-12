@@ -144,6 +144,7 @@ export default function App() {
   const messageScrollRef = useRef<ScrollView | null>(null);
   const actionReceiverBusyRef = useRef(false);
   const activeExpressionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unsavedTurnsRef = useRef<BridgeConversationTurn[]>([]);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId),
@@ -185,7 +186,11 @@ export default function App() {
         bridgeTokenRef.current,
         selectedSessionIdRef.current,
       );
-      setTurns(snapshot.turns);
+      const snapshotSessionId = snapshot.session?.id || selectedSessionIdRef.current || snapshot.active_session_id || '';
+      const unsavedTurns = unsavedTurnsRef.current.filter(
+        (turn) => !turn.local_session_id || turn.local_session_id === snapshotSessionId,
+      );
+      setTurns([...snapshot.turns, ...unsavedTurns]);
       setBodies(mergeBodies(snapshot.devices));
       setSessions(snapshot.sessions);
       const nextActiveId = snapshot.active_session_id ?? '';
@@ -318,18 +323,18 @@ export default function App() {
     setIsSending(true);
     isSendingRef.current = true;
     setIsThinking(true);
-    setTurns((current) => [
-      ...current,
-      {
-        id: `optimistic-${Date.now()}`,
-        device_id: appDeviceId,
-        role: 'user',
-        content: cleanTranscript,
-        sources: [],
-        tool_results: [],
-        created_at: new Date().toISOString(),
-      },
-    ]);
+    const localSessionId = selectedSessionIdRef.current || activeSessionId;
+    const optimisticTurn: BridgeConversationTurn = {
+      id: `optimistic-${Date.now()}`,
+      device_id: appDeviceId,
+      role: 'user',
+      content: cleanTranscript,
+      sources: [],
+      tool_results: [],
+      created_at: new Date().toISOString(),
+      local_session_id: localSessionId,
+    };
+    setTurns((current) => [...current, optimisticTurn]);
     setTranscript('');
     setStatus(deliverToWaveshare ? 'Queueing for Waveshare' : 'Sphere is thinking');
     try {
@@ -359,6 +364,35 @@ export default function App() {
 
       const action = deliverToWaveshare ? (response as BridgeInteractionResponse).action : null;
       setLastAction(action);
+      if (response.persistence.status !== 'persisted' && response.persistence.status !== 'unknown') {
+        const persistenceStatus = response.persistence.status;
+        const unsavedUser = { ...optimisticTurn, persistence_status: persistenceStatus };
+        const unsavedAssistant: BridgeConversationTurn = {
+          id: `unsaved-assistant-${Date.now()}`,
+          device_id: deliverToWaveshare ? WAVESHARE_BODY_ID : ANDROID_BODY_ID,
+          role: 'assistant',
+          content: response.reply,
+          sources: response.sources,
+          tool_results: response.tool_results,
+          created_at: new Date().toISOString(),
+          local_session_id: localSessionId,
+          persistence_status: persistenceStatus,
+        };
+        unsavedTurnsRef.current = [...unsavedTurnsRef.current, unsavedUser, unsavedAssistant];
+        setTurns((current) => [
+          ...current.filter((turn) => turn.id !== optimisticTurn.id),
+          unsavedUser,
+          unsavedAssistant,
+        ]);
+        setStatus(action ? `Waveshare ${action.status} · chat not saved` : 'Reply received · not saved');
+        setIsThinking(false);
+        isSendingRef.current = false;
+        Alert.alert(
+          'Conversation not saved',
+          response.persistence.message || 'Sphere answered, but this exchange is only visible on this screen.',
+        );
+        return;
+      }
       setStatus(action ? `Waveshare ${action.status}` : 'Reply shared');
       setIsThinking(false);
       isSendingRef.current = false;
@@ -567,6 +601,9 @@ export default function App() {
                   <Text style={styles.bubbleTime}>{formatTurnTime(turn.created_at)}</Text>
                 </View>
                 <Text style={styles.bubbleText}>{turn.content}</Text>
+                {turn.persistence_status && turn.persistence_status !== 'persisted' ? (
+                  <Text style={styles.persistenceWarning}>Not saved · copy anything important</Text>
+                ) : null}
                 {turn.tool_results.length > 0 ? (
                   <View style={styles.toolActivityList}>
                     {turn.tool_results.map((activity, activityIndex) => (
@@ -842,6 +879,7 @@ const styles = StyleSheet.create({
   bubbleRole: { color: '#64748b', fontSize: 10 },
   bubbleTime: { color: '#64748b', flex: 1, fontSize: 9, textAlign: 'right' },
   bubbleText: { color: '#f8fafc', fontSize: 15, lineHeight: 21 },
+  persistenceWarning: { color: '#fbbf24', fontSize: 10, fontWeight: '800', marginTop: 2 },
   toolActivityList: { borderTopColor: '#273449', borderTopWidth: 1, gap: 4, marginTop: 3, paddingTop: 7 },
   toolActivityText: { color: '#94a3b8', fontFamily: 'monospace', fontSize: 10, lineHeight: 15 },
   toolActivityFailed: { color: '#fca5a5' },

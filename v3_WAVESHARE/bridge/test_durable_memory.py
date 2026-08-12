@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 from durable_memory import (
     DurableMemoryStore,
     LocalConversationStore,
+    MAX_CONVERSATION_TURN_CHARS,
     MemDatabaseStore,
     SupabaseConversationStore,
     SupabaseMemoryStore,
@@ -207,6 +208,34 @@ class LocalConversationStoreTest(unittest.TestCase):
                 "has spaces",
                 "Invalid assistant device.",
             )
+        self.assertEqual(self.store.turns(session["id"]), [])
+
+    def test_conversation_turn_limit_accepts_long_model_output(self):
+        session = self.store.create_session()
+        long_reply = "x" * MAX_CONVERSATION_TURN_CHARS
+
+        self.store.append_exchange(
+            session["id"],
+            "web-console",
+            "Please write a detailed RFC.",
+            "web-console",
+            long_reply,
+        )
+
+        self.assertEqual(len(self.store.turns(session["id"])[1]["content"]), MAX_CONVERSATION_TURN_CHARS)
+
+    def test_conversation_turn_limit_rejects_oversize_exchange_atomically(self):
+        session = self.store.create_session()
+
+        with self.assertRaisesRegex(ValueError, "exceeds 65536 characters"):
+            self.store.append_exchange(
+                session["id"],
+                "web-console",
+                "Please write a detailed RFC.",
+                "web-console",
+                "x" * (MAX_CONVERSATION_TURN_CHARS + 1),
+            )
+
         self.assertEqual(self.store.turns(session["id"]), [])
 
     def test_end_session_preserves_turns_without_archiving(self):

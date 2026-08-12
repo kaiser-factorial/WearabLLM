@@ -237,7 +237,9 @@ class BridgeStateTest(unittest.TestCase):
 
         self.assertEqual(command, "RF")
         self.assertIn("internal error", reply)
-        self.assertEqual(metadata, {"sources": [], "tool_results": []})
+        self.assertEqual(metadata["sources"], [])
+        self.assertEqual(metadata["tool_results"], [])
+        self.assertEqual(metadata["persistence"]["status"], "persisted")
         self.assertEqual(state.conversation_store.append.call_count, 0)
         self.assertEqual(
             state.conversation_store.append_exchange.call_args,
@@ -844,6 +846,41 @@ class BridgeStateTest(unittest.TestCase):
         self.assertIsNone(payload["saved_wav"])
         self.assertIsNone(payload["wav_info"])
         self.assertIn("Dry run transcript", payload["reply"])
+        self.assertEqual(payload["persistence"]["status"], "skipped")
+
+    def test_persistence_failure_is_explicit_in_reply_payload(self):
+        state = BridgeState.__new__(BridgeState)
+        state.args = Namespace(dry_run=False, provider="openai")
+        state.openai_client = object()
+        state.memory_store = None
+        state.memory_retrieval_limit = 3
+        state.history_lock = threading.Lock()
+        state.history = []
+        state.history_turns = 10
+        state.conversation_backend = "supabase"
+        state.conversation_store = Mock()
+        state.conversation_store.history.return_value = []
+        state.conversation_store.append_exchange.side_effect = RuntimeError(
+            "conversation content violates 4000-character check"
+        )
+        state._prepare_active_session = Mock(return_value="session-1")
+        state.current_agent_config = Mock(
+            return_value=SimpleNamespace(system_prompt="Be helpful.", llm_model="test-model")
+        )
+        state.max_output_tokens = 1024
+        state._generate_agent_text = Mock(
+            return_value=("BS\nA long but useful RFC.", {"sources": [], "tool_results": []})
+        )
+
+        payload = state.answer_transcript("Please write the RFC.", device_id="web-console")
+
+        self.assertEqual(payload["command"], "BS")
+        self.assertEqual(payload["reply"], "A long but useful RFC.")
+        self.assertEqual(payload["persistence"]["status"], "failed")
+        self.assertEqual(
+            payload["persistence"]["error_code"], "conversation_write_failed"
+        )
+        self.assertNotIn("4000-character", payload["persistence"]["message"])
 
     def test_response_body_is_recorded_separately_from_android_origin(self):
         state = BridgeState(
@@ -1582,6 +1619,18 @@ class BridgeHandlerTest(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"], "Missing transcript")
+
+    def test_query_response_reports_non_durable_dry_run(self):
+        status, payload = self.request(
+            "POST",
+            "/v1/query_text",
+            body=b'{"transcript":"hello"}',
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["persistence"]["status"], "skipped")
+        self.assertIn("dry-run", str(payload["persistence"]["message"]))
 
     def test_unknown_endpoint_returns_json_error(self):
         status, payload = self.request("GET", "/not-found")

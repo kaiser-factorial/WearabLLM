@@ -12,6 +12,7 @@ import {
   normalizeTtsMaxBytes,
   parseBridgeHealth,
   parseBridgeConversation,
+  parseBridgeResponse,
   parseDeviceWifiConfigResponse,
   summarizeBridgeBenchStatus,
 } from './bridgeClient';
@@ -43,6 +44,30 @@ assertEqual(bridgeErrorMessage({ error: 'Missing transcript' }, 'fallback'), 'Mi
 assertEqual(bridgeErrorMessage({ reply: 'Bridge error: bad audio' }, 'fallback'), 'Bridge error: bad audio');
 assertEqual(bridgeErrorMessage({ message: 'Updated' }, 'fallback'), 'Updated');
 assertEqual(bridgeErrorMessage({}, 'plain text failure'), 'plain text failure');
+
+const unsavedReply = parseBridgeResponse({
+  command: 'BS',
+  reply: 'The RFC was generated.',
+  transcript: 'Write the RFC.',
+  persistence: {
+    status: 'failed',
+    backend: 'supabase',
+    session_id: 'session-1',
+    error_code: 'conversation_write_failed',
+    message: 'Sphere answered, but this exchange could not be saved.',
+  },
+});
+if (
+  unsavedReply.persistence.status !== 'failed' ||
+  unsavedReply.persistence.error_code !== 'conversation_write_failed'
+) {
+  throw new Error(`Expected failed persistence metadata, got ${JSON.stringify(unsavedReply.persistence)}`);
+}
+
+const legacyReply = parseBridgeResponse({ command: 'BS', reply: 'Legacy', transcript: 'Legacy' });
+if (legacyReply.persistence.status !== 'unknown') {
+  throw new Error(`Expected legacy reply persistence to remain compatible, got ${legacyReply.persistence.status}`);
+}
 
 const conversation = parseBridgeConversation({
   ok: true,

@@ -64,6 +64,7 @@ const state = {
   deliverToWaveshare: false,
   latestActionId: "",
   turns: [],
+  unsavedTurns: [],
   session: null,
   view: "chat",
   polling: false,
@@ -290,7 +291,7 @@ function devicesSignature(devices) {
 }
 
 function turnsSignature(turns) {
-  return `${turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${JSON.stringify(t.metadata || {})}|${t.created_at}`).join("\n")}|thinking:${state.thinking}`;
+  return `${turns.map((t) => `${t.id}|${t.role}|${t.device_id}|${t.content}|${JSON.stringify(t.metadata || {})}|${t.created_at}|${t.persistence_status || ""}`).join("\n")}|thinking:${state.thinking}`;
 }
 
 function nearBottom(el, px = 96) {
@@ -660,6 +661,13 @@ function renderThread({ force = false } = {}) {
       <div class="bubble-content"></div>
     `;
     renderMarkdown(article.querySelector(".bubble-content"), turn.content || "");
+    if (turn.persistence_status && turn.persistence_status !== "persisted") {
+      article.classList.add("unsaved");
+      const warning = document.createElement("div");
+      warning.className = "bubble-persistence-warning";
+      warning.textContent = "Not saved · copy anything important";
+      article.append(warning);
+    }
     const toolResults = Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [];
     if (toolResults.length) {
       const activity = document.createElement("div");
@@ -832,7 +840,12 @@ async function refreshConversation({ forceRender = false } = {}) {
     const params = new URLSearchParams({ limit: "300" });
     if (state.selectedSessionId) params.set("session_id", state.selectedSessionId);
     const payload = await fetchJson(`/api/conversation?${params.toString()}`);
-    state.turns = Array.isArray(payload.turns) ? payload.turns : [];
+    const persistedTurns = Array.isArray(payload.turns) ? payload.turns : [];
+    const snapshotSessionId = payload.session?.id || state.selectedSessionId || payload.active_session_id || "";
+    const unsavedTurns = state.unsavedTurns.filter(
+      (turn) => !turn.local_session_id || turn.local_session_id === snapshotSessionId,
+    );
+    state.turns = [...persistedTurns, ...unsavedTurns];
     state.session = payload.session || null;
     state.activeSessionId = payload.active_session_id || "";
     state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
@@ -1399,6 +1412,7 @@ els.replyForm.addEventListener("submit", async (event) => {
     role: "user",
     content: transcript,
     created_at: new Date().toISOString(),
+    local_session_id: state.selectedSessionId || state.activeSessionId,
   };
   state.turns = [...state.turns, optimisticTurn];
   els.replyInput.value = "";
@@ -1419,6 +1433,33 @@ els.replyForm.addEventListener("submit", async (event) => {
     if (payload.action) renderActionDelivery(payload.action);
     else els.composerStatus.textContent = payload.command ? `Got ${payload.command}` : "Reply sent";
     state.thinking = false;
+    const persistenceStatus = String(payload.persistence?.status || "unknown");
+    if (persistenceStatus !== "persisted" && persistenceStatus !== "unknown") {
+      const unsavedUser = { ...optimisticTurn, persistence_status: persistenceStatus };
+      const unsavedAssistant = {
+        id: `unsaved-assistant-${Date.now()}`,
+        device_id: "web-console",
+        role: "assistant",
+        content: String(payload.reply || ""),
+        created_at: new Date().toISOString(),
+        local_session_id: optimisticTurn.local_session_id,
+        persistence_status: persistenceStatus,
+        metadata: {
+          sources: Array.isArray(payload.sources) ? payload.sources : [],
+          tool_results: Array.isArray(payload.tool_results) ? payload.tool_results : [],
+        },
+      };
+      state.unsavedTurns = [...state.unsavedTurns, unsavedUser, unsavedAssistant];
+      state.turns = [
+        ...state.turns.filter((turn) => turn.id !== optimisticTurn.id),
+        unsavedUser,
+        unsavedAssistant,
+      ];
+      els.composerStatus.textContent = payload.persistence?.message || "Reply received, but the exchange was not saved";
+      setStatus("warning", "Not saved");
+      renderThread({ force: true });
+      return;
+    }
     await refreshConversation({ forceRender: true });
   } catch (error) {
     console.error(error);

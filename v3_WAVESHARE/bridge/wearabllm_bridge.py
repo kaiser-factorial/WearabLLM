@@ -46,6 +46,7 @@ from durable_memory import (
     DEFAULT_MEMORY_FILE,
     DEFAULT_MEM_ROOT,
     EXTRACTION_PROMPT,
+    MAX_CONVERSATION_TURN_CHARS,
     DurableMemoryStore,
     LocalConversationStore,
     MemDatabaseStore,
@@ -558,6 +559,7 @@ class BridgeState:
             "capture_count": self.capture_count,
             "latest_capture": self.latest_capture,
             "max_audio_bytes": self.args.max_audio_bytes,
+            "max_conversation_turn_chars": MAX_CONVERSATION_TURN_CHARS,
             "history_turns": self.history_turns,
             "max_output_tokens": self.max_output_tokens,
             "session_idle_seconds": getattr(self.args, "session_idle_seconds", None),
@@ -881,13 +883,20 @@ class BridgeState:
                         ]
                     )
                     self.history = self.history[-(self.history_turns * 2):]
-            return command, reply, {"sources": [], "tool_results": []}
+            return command, reply, {
+                "sources": [],
+                "tool_results": [],
+                "persistence": self._persistence_result("skipped"),
+            }
 
         if self.args.provider not in ("openai", "openrouter"):
             raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
 
+        persistence = self._persistence_result(
+            "pending" if self.conversation_store else "not_configured"
+        )
         memories: list[str] = []
         if self.memory_store:
             try:
@@ -901,9 +910,11 @@ class BridgeState:
             if self.conversation_store:
                 try:
                     active_session_id = self._prepare_active_session()
+                    persistence["session_id"] = active_session_id or None
                     persisted_history = self.conversation_store.history(active_session_id, self.history_turns * 2)
                 except Exception as exc:  # Conversation storage must not break a voice interaction.
                     print(f"WARNING: conversation retrieval failed: {exc}")
+                    persistence = self._persistence_result("failed")
             input_messages = [
                 {
                     "role": str(message.get("role", "user")),
@@ -977,11 +988,47 @@ class BridgeState:
                             reply,
                             assistant_metadata=stored_metadata or None,
                         )
+                        persistence = self._persistence_result(
+                            "persisted", session_id=active_session_id
+                        )
+                    elif persistence.get("status") != "failed":
+                        persistence = self._persistence_result("failed")
                 except Exception as exc:  # Preserve a live reply if storage is temporarily unavailable.
                     print(f"WARNING: conversation persistence failed: {exc}")
+                    persistence = self._persistence_result(
+                        "failed", session_id=active_session_id
+                    )
+            metadata["persistence"] = persistence
         if self.conversation_backend != "supabase":
             self.extract_and_store_memories(transcript, reply)
         return command, reply, metadata
+
+    def _persistence_result(
+        self,
+        status: str,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "status": status,
+            "backend": getattr(self, "conversation_backend", "local"),
+            "session_id": session_id or None,
+        }
+        if status == "failed":
+            result.update(
+                {
+                    "error_code": "conversation_write_failed",
+                    "message": (
+                        "Sphere answered, but this exchange could not be saved. "
+                        "Copy anything important and retry."
+                    ),
+                }
+            )
+        elif status == "skipped":
+            result["message"] = "Conversation persistence is skipped in dry-run mode."
+        elif status == "not_configured":
+            result["message"] = "Conversation persistence is not configured."
+        return result
 
     def _prepare_active_session(self) -> str:
         if not self.conversation_store:
@@ -1693,6 +1740,9 @@ class BridgeState:
             "wav_info": wav_info,
             "sources": metadata.get("sources", []),
             "tool_results": metadata.get("tool_results", []),
+            "persistence": metadata.get(
+                "persistence", self._persistence_result("not_configured")
+            ),
         }
 
     def create_interaction(

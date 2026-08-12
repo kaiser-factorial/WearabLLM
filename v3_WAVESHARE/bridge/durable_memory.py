@@ -32,6 +32,7 @@ SENSITIVE_RE = re.compile(
 )
 MODEL_TOOL_CONTEXT_KEY = "model_tool_context"
 MODEL_TOOL_CONTEXT_MAX_CHARS = 96_000
+MAX_CONVERSATION_TURN_CHARS = 65_536
 
 
 def normalized_conversation_turn(
@@ -48,6 +49,10 @@ def normalized_conversation_turn(
         raise ValueError("Conversation device ID is invalid")
     if not normalized_content:
         raise ValueError("Conversation content is required")
+    if len(normalized_content) > MAX_CONVERSATION_TURN_CHARS:
+        raise ValueError(
+            f"Conversation content exceeds {MAX_CONVERSATION_TURN_CHARS} characters"
+        )
     return {
         "device_id": normalized_device_id,
         "role": role,

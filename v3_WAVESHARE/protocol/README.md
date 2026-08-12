@@ -187,6 +187,11 @@ Bridge returns:
   "tool_results": [
     {"name": "memory_search", "ok": true, "match_count": 2}
   ],
+  "persistence": {
+    "status": "persisted",
+    "backend": "supabase",
+    "session_id": "00000000-0000-4000-8000-000000000000"
+  },
   "wav_info": {
     "valid": true,
     "sample_rate": 16000,
@@ -221,8 +226,16 @@ firmware or the Android app.
 | `wav_info` | object or null | yes | bridge-side audio format debugging |
 | `sources` | array | yes | visual clients; never read aloud automatically |
 | `tool_results` | array | yes | bounded tool audit plus visual activity summary; memory mutations include a short content prefix |
+| `persistence` | object | yes | durable conversation result: `persisted`, `failed`, `skipped`, or `not_configured` |
 
 For `/v1/query_text`, `audio_bytes` is `0`, `saved_wav` is `null`, and `wav_info` is `null`.
+
+If Sphere generates a reply but durable conversation storage fails, the bridge
+still returns the usable command/reply with `persistence.status: "failed"`, a
+stable `error_code`, and a safe user-facing message. Visual clients retain that
+exchange locally and label it **Not saved** instead of refreshing it away or
+claiming it was shared. Conversation and archive rows accept up to 65,536
+characters per turn; larger turns are rejected before a local write.
 
 ## Cross-body expressions
 
