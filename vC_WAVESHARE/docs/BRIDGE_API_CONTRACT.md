@@ -87,9 +87,9 @@ Persistence failure is explicit while the generated reply remains usable.
 
 ## Known Phase 0 Debt, Preserved Deliberately
 
-- `/v1/query_text`, `/v1/tts`, and `/v1/device_wifi` do not yet share an
-  explicit byte limit. Phase 2 will centralize request readers and limits; any
-  newly introduced limit requires compatibility evidence.
+- `/v1/query_text`, `/v1/tts`, and `/v1/device_wifi` now share the Phase 2 JSON
+  reader but retain no explicit byte limit. Any newly introduced limit still
+  requires compatibility evidence.
 - Error envelopes are inconsistent. They remain frozen under `/v1`.
 - The shared device token authenticates the principal but is not yet a
   per-device credential. Target-device equality remains a second boundary.
