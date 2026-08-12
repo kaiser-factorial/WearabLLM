@@ -125,6 +125,99 @@ function shortId(value) {
   return text.length > 12 ? `${text.slice(0, 8)}…` : text;
 }
 
+function appendInlineMarkdown(parent, text) {
+  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_([^_\n]+)_|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\))/g;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > cursor) parent.append(document.createTextNode(text.slice(cursor, match.index)));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      parent.append(code);
+    } else if (token.startsWith("**") || token.startsWith("__")) {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      parent.append(strong);
+    } else if (token.startsWith("*") || token.startsWith("_")) {
+      const em = document.createElement("em");
+      em.textContent = token.slice(1, -1);
+      parent.append(em);
+    } else {
+      const parts = /^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/.exec(token);
+      const link = document.createElement("a");
+      link.textContent = parts?.[1] || token;
+      link.href = parts?.[2] || "#";
+      link.target = "_blank";
+      link.rel = "noreferrer noopener";
+      parent.append(link);
+    }
+    cursor = match.index + token.length;
+  }
+  if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
+}
+
+function renderMarkdown(container, source) {
+  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    if (/^```/.test(line.trim())) {
+      const language = line.trim().slice(3).trim();
+      const body = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index].trim())) body.push(lines[index++]);
+      if (index < lines.length) index += 1;
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (language) code.dataset.language = language;
+      code.textContent = body.join("\n");
+      pre.append(code);
+      container.append(pre);
+      continue;
+    }
+    const heading = /^(#{1,4})\s+(.+)$/.exec(line);
+    if (heading) {
+      const node = document.createElement(`h${Math.min(heading[1].length + 2, 6)}`);
+      appendInlineMarkdown(node, heading[2]);
+      container.append(node);
+      index += 1;
+      continue;
+    }
+    const listMatch = /^\s*(?:([-*+])|(\d+)[.)])\s+(.+)$/.exec(line);
+    if (listMatch) {
+      const ordered = Boolean(listMatch[2]);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (index < lines.length) {
+        const item = /^\s*(?:([-*+])|(\d+)[.)])\s+(.+)$/.exec(lines[index]);
+        if (!item || Boolean(item[2]) !== ordered) break;
+        const li = document.createElement("li");
+        appendInlineMarkdown(li, item[3]);
+        list.append(li);
+        index += 1;
+      }
+      container.append(list);
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const quote = document.createElement("blockquote");
+      const quoted = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) quoted.push(lines[index++].replace(/^\s*>\s?/, ""));
+      appendInlineMarkdown(quote, quoted.join("\n"));
+      container.append(quote);
+      continue;
+    }
+    const paragraph = [];
+    while (index < lines.length && lines[index].trim() && !/^```|^#{1,4}\s|^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s?)/.test(lines[index])) {
+      paragraph.push(lines[index++]);
+    }
+    const p = document.createElement("p");
+    appendInlineMarkdown(p, paragraph.join("\n"));
+    container.append(p);
+  }
+}
+
 function formatTime(value, { relative = false } = {}) {
   if (!value) return "—";
   try {
@@ -428,9 +521,9 @@ function renderThread({ force = false } = {}) {
         <span>${role === "assistant" ? "WearabLLM" : "You"}</span>
         <time class="timestamp" datetime="${escapeHtml(turn.created_at || "")}" title="${escapeHtml(whenTitle)}">${escapeHtml(when)}</time>
       </div>
-      <p></p>
+      <div class="bubble-content"></div>
     `;
-    article.querySelector("p").textContent = turn.content || "";
+    renderMarkdown(article.querySelector(".bubble-content"), turn.content || "");
     const toolResults = Array.isArray(turn.metadata?.tool_results) ? turn.metadata.tool_results : [];
     if (toolResults.length) {
       const activity = document.createElement("div");

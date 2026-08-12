@@ -15,11 +15,17 @@ from sphere_tools import (
     function_tools,
     memory_confirmation_decision_for_turn,
     sensitive_memory_candidate_for_turn,
+    source_read_requested_for_turn,
     web_search_requested_for_turn,
 )
 
 
 class SphereToolExecutorTest(unittest.TestCase):
+    def test_source_continuations_route_to_source_read(self) -> None:
+        self.assertTrue(source_read_requested_for_turn("yes please, starting line 1201"))
+        self.assertTrue(source_read_requested_for_turn("v3_WAVESHARE/bridge/wearabllm_bridge.py"))
+        self.assertFalse(source_read_requested_for_turn("What should we build next?"))
+
     def test_web_routing_does_not_treat_current_profile_data_as_a_search_request(self) -> None:
         self.assertFalse(web_search_requested_for_turn("My current address is 123 Main Street."))
         self.assertTrue(web_search_requested_for_turn("What's the latest OpenAI model today?"))

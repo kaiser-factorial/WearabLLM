@@ -100,6 +100,12 @@ PHONE_RE = re.compile(r"\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b")
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 MEMORY_MUTATION_TOOL_NAMES = {"memory_remember", "memory_correct", "memory_forget"}
 MEMORY_ID_RE = re.compile(r"\b[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\b", re.IGNORECASE)
+SOURCE_READ_REQUEST_RE = re.compile(
+    r"(?:\b(?:read|inspect|continue|resume)\b.{0,80}\b(?:source|file|line|chunk)\b)"
+    r"|(?:\b(?:start|starting|from|at)\s+(?:at\s+)?line\s+\d+\b)"
+    r"|(?:(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:py|js|ts|tsx|md|json|sql|ino)\b)",
+    re.IGNORECASE,
+)
 
 
 TOOL_INSTRUCTIONS = """
@@ -128,6 +134,9 @@ Sphere has model tools with these safety boundaries:
 - Use source_list and source_read to inspect Sphere's own build-time source
   bundle. It is an intentional read-only manifest, not arbitrary filesystem
   access; list first when the path is uncertain and read bounded line ranges.
+  On an explicit continuation such as “starting line 1201,” reuse the latest
+  source path and range from private prior tool context instead of asking the
+  user to repeat parameters.
 - send_to_body creates an additional, durable expression on explicitly named
   bodies. Never use it for the ordinary reply on the body that is already
   handling the current request, and never infer a broadcast target.
@@ -144,6 +153,10 @@ Sphere has model tools with these safety boundaries:
   and audio channels according to their capabilities and local preferences.
 After tools finish, still return exactly the normal two-line LED code + answer.
 """
+
+
+def source_read_requested_for_turn(user_transcript: str) -> bool:
+    return bool(SOURCE_READ_REQUEST_RE.search(user_transcript))
 
 
 def function_tools() -> list[dict[str, Any]]:

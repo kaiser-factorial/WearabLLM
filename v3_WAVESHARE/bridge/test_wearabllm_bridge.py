@@ -23,6 +23,7 @@ from wearabllm_bridge import (
     json_bytes,
     make_silence_wav,
     make_handler,
+    markdown_to_plain_text,
     normalize_tts_wav,
     parse_command_sequence,
     parse_llm_response,
@@ -78,8 +79,47 @@ class ParseLLMResponseTest(unittest.TestCase):
         self.assertEqual(command, "BS")
         self.assertEqual(reply, "")
 
+    def test_preserves_markdown_structure_after_led_code(self):
+        command, reply = parse_llm_response(
+            "BS\n## Result\n\n- First item\n- **Second item**"
+        )
+        self.assertEqual(command, "BS")
+        self.assertEqual(reply, "## Result\n\n- First item\n- **Second item**")
+
+    def test_markdown_plain_text_projection_is_readable(self):
+        self.assertEqual(
+            markdown_to_plain_text("## Result\n\n- **Temperature:** `21.5 C`\n- [Details](https://example.com)"),
+            "Result\n\n• Temperature: 21.5 C\n• Details",
+        )
+
 
 class BridgeStateTest(unittest.TestCase):
+    def test_source_continuation_forces_source_read_tool(self):
+        response = SimpleNamespace(id="resp-source", output=[], output_text="BS\nDone.")
+        create = Mock(return_value=response)
+        state = BridgeState.__new__(BridgeState)
+        state.openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        state.household_memory_store = None
+        state.source_store = Mock()
+        state.web_search_enabled = False
+        state.max_tool_rounds = 8
+        state.action_queue = Mock()
+        state.pending_memory_confirmations = wearabllm_bridge.PendingMemoryConfirmationStore()
+
+        state._generate_agent_text(
+            "instructions",
+            [{"role": "user", "content": "yes please, starting line 1201"}],
+            max_output_tokens=256,
+            model="gpt-5.4-mini",
+            origin_device_id="web-console",
+            user_transcript="yes please, starting line 1201",
+        )
+
+        self.assertEqual(
+            create.call_args.kwargs["tool_choice"],
+            {"type": "function", "name": "source_read"},
+        )
+
     def test_malformed_function_arguments_return_bounded_tool_error(self):
         first = SimpleNamespace(
             id="resp-tool",
@@ -623,6 +663,8 @@ class BridgeStateTest(unittest.TestCase):
             metadata["tool_results"][0]["summary"],
             "Expression queued — wearabllm-esp32",
         )
+        self.assertEqual(metadata["model_tool_context"][0]["name"], "send_to_body")
+        self.assertIn("11111111-1111-4111-8111-111111111111", metadata["model_tool_context"][0]["output"])
         self.assertEqual(
             metadata["tool_results"][0]["action_ids"],
             ["11111111-1111-4111-8111-111111111111"],
@@ -842,6 +884,32 @@ class BridgeStateTest(unittest.TestCase):
         snapshot = state.conversation_snapshot()
         self.assertEqual(snapshot["turns"][0]["device_id"], "web-console")
         self.assertNotIn("local-bridge", {body["id"] for body in snapshot["devices"]})
+
+    def test_conversation_snapshot_hides_private_model_tool_context(self):
+        state = BridgeState.__new__(BridgeState)
+        state.conversation_store = Mock()
+        state.conversation_store.active_session.return_value = {"id": "session-1"}
+        state.conversation_store.list_sessions.return_value = [{"id": "session-1"}]
+        state.conversation_store.turns.return_value = [
+            {
+                "id": 1,
+                "device_id": "web-console",
+                "role": "assistant",
+                "content": "Done.",
+                "metadata": {
+                    "tool_results": [{"name": "source_read", "summary": "Source read"}],
+                    "model_tool_context": [{"output": "private source body"}],
+                },
+            }
+        ]
+        state.conversation_store.list_device_ids.return_value = ["web-console"]
+        state.conversation_backend = "supabase"
+        state.device_presence = {}
+        state.device_presence_lock = threading.Lock()
+        snapshot = state.conversation_snapshot()
+        metadata = snapshot["turns"][0]["metadata"]
+        self.assertIn("tool_results", metadata)
+        self.assertNotIn("model_tool_context", metadata)
 
     def test_answer_transcript_can_include_wav_info(self):
         state = BridgeState(

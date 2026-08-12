@@ -836,11 +836,44 @@ body {
 .bubble-meta .device-pill.home { color: var(--home); border-color: rgba(110, 231, 183, 0.35); }
 .bubble-meta .device-pill.web { color: var(--web); border-color: rgba(147, 197, 253, 0.35); }
 .bubble-meta .device-pill.wearable { color: var(--wearable); border-color: rgba(240, 171, 252, 0.35); }
-.bubble p {
-  margin: 0;
-  white-space: pre-wrap;
+.bubble-content {
   line-height: 1.55;
   font-size: 1.02rem;
+  overflow-wrap: anywhere;
+}
+.bubble-content > :first-child { margin-top: 0; }
+.bubble-content > :last-child { margin-bottom: 0; }
+.bubble-content p { margin: 0 0 0.8em; white-space: pre-wrap; }
+.bubble-content h3,
+.bubble-content h4,
+.bubble-content h5,
+.bubble-content h6 { margin: 0.9em 0 0.35em; line-height: 1.25; }
+.bubble-content ul,
+.bubble-content ol { margin: 0.45em 0 0.8em; padding-left: 1.45em; }
+.bubble-content li + li { margin-top: 0.28em; }
+.bubble-content code {
+  padding: 0.08em 0.3em;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.24);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.86em;
+}
+.bubble-content pre {
+  overflow: auto;
+  margin: 0.6em 0 0.9em;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+}
+.bubble-content pre code { padding: 0; border: 0; background: none; white-space: pre; }
+.bubble-content blockquote {
+  margin: 0.6em 0 0.9em;
+  padding-left: 0.85em;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  white-space: pre-wrap;
 }
 .bubble-tools {
   display: grid;

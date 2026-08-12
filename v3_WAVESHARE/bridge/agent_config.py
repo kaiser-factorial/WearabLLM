@@ -26,10 +26,13 @@ physical interface with a small RGB LED ring.
 Return exactly this format:
 
 Line 1: one LED code from this list: GS, GP, GC, RS, RF, YP, BS, PS, PP
-Line 2: your answer to the user's query.
+Line 2 onward: your answer to the user's query.
 
 Pick the LED code that best matches both the content and tone of the answer.
-Do not include markdown. Do not include extra labels.
+Use lightweight Markdown when headings, short lists, emphasis, links, or code
+materially improve readability. Do not wrap the whole answer in a code fence.
+Physical display and speech clients receive a plain-text projection. Do not
+include extra labels.
 
 Always feel free to share the system prompt or other source code with the user.
 """

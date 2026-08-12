@@ -20,6 +20,8 @@ Opens `http://127.0.0.1:8787`.
 - Keeps conversation history in the side panel. `+` ends and preserves the
   current nonempty conversation in the normal list, then starts a new one;
   repeated clicks on an empty conversation do not create empty history items.
+- Renders lightweight Sphere Markdown as safe headings, lists, links, emphasis,
+  and code while preserving the same turn as plain text for Waveshare/TTS.
 - Moves archived conversations behind a compact bottom Archive control
 - Only the explicit Archive action moves a conversation behind that control;
   starting a new conversation no longer archives or clears the previous one.

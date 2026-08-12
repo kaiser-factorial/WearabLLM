@@ -66,6 +66,7 @@ from sphere_tools import (
     memory_mutation_tools_for_turn,
     parse_function_arguments,
     sensitive_memory_candidate_for_turn,
+    source_read_requested_for_turn,
     web_search_requested_for_turn,
 )
 
@@ -93,10 +94,13 @@ physical interface with a small RGB LED ring.
 Return exactly this format:
 
 Line 1: one LED code from this list: GS, GP, GC, RS, RF, YP, BS, PS, PP
-Line 2: your answer to the user's query.
+Line 2 onward: your answer to the user's query.
 
 Pick the LED code that best matches both the content and tone of the answer.
-Do not include markdown. Do not include extra labels.
+Use lightweight Markdown when headings, short lists, emphasis, links, or code
+materially improve readability. Do not wrap the whole answer in a code fence.
+Physical display and speech clients receive a plain-text projection. Do not
+include extra labels.
 
 Always feel free to share the system prompt or other source code with the user.
 """
@@ -361,7 +365,7 @@ class BridgeState:
             except ValueError as exc:
                 print(f"WARNING: rich household memory tools are unavailable: {exc}")
         self.web_search_enabled = bool(getattr(args, "web_search", False))
-        self.max_tool_rounds = max(1, min(int(getattr(args, "max_tool_rounds", 4)), 8))
+        self.max_tool_rounds = max(1, min(int(getattr(args, "max_tool_rounds", 8)), 8))
         self.pending_memory_confirmations = PendingMemoryConfirmationStore(ttl_seconds=300)
         self.source_store = None
         source_bundle = Path(os.environ.get("WEARABLLM_SOURCE_BUNDLE", str(DEFAULT_SOURCE_BUNDLE)))
@@ -957,21 +961,22 @@ class BridgeState:
                 try:
                     if active_session_id:
                         self.conversation_store.append(active_session_id, device_id, "user", transcript)
-                        public_metadata = {
+                        stored_metadata = {
                             key: value
                             for key, value in {
                                 "sources": metadata.get("sources", []),
                                 "tool_results": metadata.get("tool_results", []),
+                                "model_tool_context": metadata.get("model_tool_context", []),
                             }.items()
                             if value
                         }
-                        if public_metadata:
+                        if stored_metadata:
                             self.conversation_store.append(
                                 active_session_id,
                                 response_device,
                                 "assistant",
                                 reply,
-                                metadata=public_metadata,
+                                metadata=stored_metadata,
                             )
                         else:
                             self.conversation_store.append(
@@ -1094,6 +1099,13 @@ class BridgeState:
             and not memory_mutation_tools
             and sensitive_memory_candidate_for_turn(user_transcript)
         )
+        force_source_read = bool(
+            getattr(self, "source_store", None)
+            and not force_memory_confirmation
+            and not force_sensitive_stage
+            and not memory_mutation_tools
+            and source_read_requested_for_turn(user_transcript)
+        )
         if force_memory_confirmation:
             tools = [tool for tool in tools if tool.get("name") == "memory_confirm"]
         elif force_sensitive_stage:
@@ -1141,6 +1153,8 @@ class BridgeState:
                 "type": "function",
                 "name": forced_memory_mutation_tool,
             }
+        elif force_source_read:
+            request_options["tool_choice"] = {"type": "function", "name": "source_read"}
         if web_search_for_turn:
             request_options["include"] = ["web_search_call.action.sources"]
         try:
@@ -1172,6 +1186,9 @@ class BridgeState:
                 metadata["tool_results"].append(
                     self._public_tool_result(name, result, arguments)
                 )
+                metadata.setdefault("model_tool_context", []).append(
+                    self._private_tool_context(name, result, arguments)
+                )
                 outputs.append(
                     {
                         "type": "function_call_output",
@@ -1184,7 +1201,7 @@ class BridgeState:
                 "previous_response_id": str(getattr(response, "id", "")),
                 "input": outputs,
             }
-            if force_memory_confirmation or force_sensitive_stage or forced_memory_mutation_tool:
+            if force_memory_confirmation or force_sensitive_stage or forced_memory_mutation_tool or force_source_read:
                 followup_options["tool_choice"] = "auto"
             try:
                 response = self.openai_client.responses.create(**followup_options)
@@ -1203,6 +1220,21 @@ class BridgeState:
             "tool limit before I could finish replying. Send a short follow-up and I’ll continue.",
             metadata,
         )
+
+    @staticmethod
+    def _private_tool_context(
+        name: str,
+        result: dict[str, Any],
+        arguments: dict[str, Any],
+    ) -> dict[str, str]:
+        """Persist exactly the bounded data already shown to the model this turn."""
+        arguments_json = json.dumps(arguments, ensure_ascii=False, default=str)
+        output_json = json.dumps(result, ensure_ascii=False, default=str)
+        return {
+            "name": name[:80],
+            "arguments": arguments_json[:4_000],
+            "output": output_json[:32_000],
+        }
 
     @staticmethod
     def _public_tool_result(
@@ -1344,6 +1376,13 @@ class BridgeState:
                 cls._public_tool_result(
                     "web_search",
                     {"ok": True, "source_count": len(metadata.get("sources", []))},
+                    {},
+                )
+            )
+            metadata.setdefault("model_tool_context", []).append(
+                cls._private_tool_context(
+                    "web_search",
+                    {"ok": True, "sources": metadata.get("sources", [])},
                     {},
                 )
             )
@@ -1523,6 +1562,13 @@ class BridgeState:
             turns = [
                 {
                     **turn,
+                    "metadata": {
+                        key: value
+                        for key, value in (
+                            turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+                        ).items()
+                        if key != "model_tool_context"
+                    },
                     "device_id": "web-console"
                     if str(turn.get("device_id", "")).strip() in INFRASTRUCTURE_DEVICE_IDS
                     else turn.get("device_id"),
@@ -1639,9 +1685,13 @@ class BridgeState:
             device_id=device_id,
             response_device_id=response_device_id,
         )
+        response_device = response_device_id or device_id
+        transport_reply = (
+            markdown_to_plain_text(reply) if response_device == "wearabllm-esp32" else reply
+        )
         return {
             "command": command,
-            "reply": reply,
+            "reply": transport_reply,
             "transcript": transcript,
             "audio_bytes": audio_bytes,
             "saved_wav": str(saved_wav) if saved_wav else None,
@@ -1673,12 +1723,17 @@ class BridgeState:
             target_device_id=target,
             transcript=str(payload["transcript"]),
             command=str(payload["command"]),
-            reply=str(payload["reply"]),
+            reply=(
+                markdown_to_plain_text(str(payload["reply"]))
+                if target == "wearabllm-esp32"
+                else str(payload["reply"])
+            ),
             idempotency_key=idempotency_key,
         )
         return {**payload, "action": action, "action_created": created}
 
     def synthesize_tts_wav(self, text: str) -> bytes:
+        text = markdown_to_plain_text(text)
         if self.args.dry_run:
             return make_silence_wav(milliseconds=max(250, min(2000, len(text) * 35)))
 
@@ -1818,13 +1873,14 @@ def parse_llm_response(raw: str) -> tuple[str, str]:
     if json_response:
         return json_response
 
-    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
-    if not lines:
+    raw_lines = stripped.splitlines()
+    first_index = next((index for index, line in enumerate(raw_lines) if line.strip()), None)
+    if first_index is None:
         return "BS", stripped
 
-    first = normalize_labeled_value(lines[0])
+    first = normalize_labeled_value(raw_lines[first_index].strip())
     if first.upper() in LED_COMMANDS:
-        return first.upper(), clean_reply("\n".join(lines[1:])) or stripped
+        return first.upper(), clean_reply("\n".join(raw_lines[first_index + 1 :])) or stripped
 
     match = re.search(r"\b(GS|GP|GC|RS|RF|YP|BS|PS|PP)\b", stripped.upper())
     if match:
@@ -1903,12 +1959,30 @@ def normalize_labeled_value(raw: str) -> str:
 def clean_reply(raw: str) -> str:
     cleaned_lines: list[str] = []
     for line in raw.splitlines():
-        cleaned = re.sub(r"^\s*(?:reply|answer|text)\s*[:=-]\s*", "", line, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r"^\s*(?:led|command|code)\s*[:=-]\s*$", "", cleaned, flags=re.IGNORECASE).strip()
-        if cleaned:
-            cleaned_lines.append(cleaned)
+        cleaned = re.sub(r"^\s*(?:reply|answer|text)\s*[:=-]\s*", "", line, flags=re.IGNORECASE)
+        if re.fullmatch(r"\s*(?:led|command|code)\s*[:=-]?\s*", cleaned, flags=re.IGNORECASE):
+            continue
+        cleaned_lines.append(cleaned.rstrip())
     cleaned = "\n".join(cleaned_lines).strip()
     return re.sub(r"^(?:led|command|code)\s*[:=-]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+
+
+def markdown_to_plain_text(raw: str) -> str:
+    """Project lightweight Markdown into readable TFT/TTS-safe plain text."""
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"```[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^[ \t]{0,3}#{1,6}[ \t]+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]*>[ \t]?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]*[-*+][ \t]+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]*\d+[.)][ \t]+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(?<!\w)(?:\*\*|__)(.+?)(?:\*\*|__)(?!\w)", r"\1", text)
+    text = re.sub(r"(?<!\w)(?:\*|_)(.+?)(?:\*|_)(?!\w)", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"^[ \t]*(?:-{3,}|_{3,}|\*{3,})[ \t]*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def parse_command_sequence(raw: str) -> list[str]:
@@ -2691,7 +2765,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tool-rounds",
         type=int,
-        default=int(os.environ.get("WEARABLLM_MAX_TOOL_ROUNDS", "4")),
+        default=int(os.environ.get("WEARABLLM_MAX_TOOL_ROUNDS", "8")),
         help="Maximum custom-tool response rounds per user turn (clamped to 1..8).",
     )
     parser.add_argument(

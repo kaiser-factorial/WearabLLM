@@ -49,7 +49,7 @@ WEARABLLM_MEMORY_BACKEND=supabase
 WEARABLLM_CONVERSATION_BACKEND=supabase
 WEARABLLM_ACTION_BACKEND=supabase
 WEARABLLM_WEB_SEARCH=1
-WEARABLLM_MAX_TOOL_ROUNDS=4
+WEARABLLM_MAX_TOOL_ROUNDS=8
 ```
 
 Agent settings can override model, voice, system prompt, TTS instructions, and

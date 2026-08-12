@@ -97,14 +97,35 @@ when a valid CA is not configured.
    instead passes a deterministic sensitivity screen at the bridge boundary.
 4. The bridge returns the function result to the same response chain using
    `previous_response_id`, while resending Sphere's instructions.
-5. The loop is bounded to four custom-tool rounds in the hosted profile
+5. The loop is bounded to eight custom-tool rounds in the hosted profile
    (configurable and clamped to 1–8). Parallel function calls are disabled. If
-   Sphere uses all four rounds, the completed activity is preserved and the
+   Sphere uses all eight rounds, the completed activity is preserved and the
    bridge returns a normal fallback reply asking for a short follow-up; it does
    not turn the interaction into an HTTP 500.
 6. Every tool call also produces a concise persisted activity line for visual
    clients. Sphere still finishes with the normal two-line semantic command
    and reply.
+
+## Cross-turn tool context
+
+Each tool result is carried through its active Responses API turn with
+`previous_response_id`. The bridge also stores a bounded private copy of the
+model-facing arguments and output beside the assistant turn. On later turns,
+that private context is restored to model history, so follow-ups such as
+“continue at line 1201” retain the prior source path and contents.
+
+Private tool context is never returned by the conversation/dashboard APIs.
+Clients receive only redacted activity summaries. Each stored call is bounded,
+and restored tool output is explicitly labeled as data rather than instructions.
+The default per-message tool round limit is eight.
+
+## Body-specific rendering
+
+Sphere may use lightweight Markdown for headings, lists, emphasis, links, and
+code. Shared conversation storage preserves its newlines. The dashboard renders
+that Markdown through a small DOM-based allowlist without injecting model HTML.
+Waveshare actions, direct Waveshare replies, and TTS calls receive a deterministic
+plain-text projection of the same semantic answer.
 
 OpenAI distinguishes built-in tools such as web search from application-owned
 function tools. See [Using tools](https://developers.openai.com/api/docs/guides/tools),
