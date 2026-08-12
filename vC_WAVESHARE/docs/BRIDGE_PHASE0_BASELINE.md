@@ -66,6 +66,31 @@ The remaining exit gate is a regression against the deployed candidate from
 the Web console and the Waveshare body. Android live testing remains deferred;
 its automated protocol coverage passed.
 
+## Deployed Candidate Evidence
+
+The Phase 0 bridge candidate was deployed from Git commit `76bc892` to private
+Hugging Face Space revision `850a637d4aaa965227aa0acd2dff3161b1e76e4b`.
+The new replica reached `RUNNING`, returned HTTP 200 from `/health`, and retained
+the OpenAI provider plus Supabase conversation, memory, and action backends.
+Device authentication, hybrid household-memory retrieval, web search, source
+tools, body limits, and bounded tool rounds remained enabled as expected.
+
+Live hosted responses expose a unique 32-character bridge request ID. A run-log
+sample contained 1,244 structured events, including 1,241 correlated request
+completion events across HTTP 200 and 401 outcomes. None contained transcript,
+reply, TTS text, authorization, password, API-key, SSID, prompt, or raw fields.
+
+The Web regression passed against the deployed candidate:
+
+- a unique canary and the assistant response persisted
+- a hard reload preserved both turns
+- a follow-up after reload recalled the exact canary from shared context
+- dashboard-to-Waveshare delivery created a targeted queued action
+
+The final Phase 0 exit gate is physical Waveshare claim, display, audio, and
+terminal acknowledgement of that queued action, followed by one direct voice
+turn. Android live testing remains intentionally deferred.
+
 ## Live and Hardware Baseline
 
 - Hosted `/health`: verified 2026-08-12

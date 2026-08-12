@@ -1,6 +1,6 @@
 # WearabLLM Bridge Refactor Roadmap
 
-Status: Phase 0 candidate verified; deployed Web/Waveshare regression pending
+Status: Phase 0 Web regression verified; physical Waveshare regression pending
 Created: 2026-08-12  
 Scope: `vC_WAVESHARE/bridge/wearabllm_bridge.py` and its client-facing contracts
 
