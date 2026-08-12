@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import audioop
-import base64
 import json
 import math
 import os
@@ -24,12 +23,8 @@ import re
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import wave
 from datetime import datetime, timezone
 from io import BytesIO
@@ -54,6 +49,15 @@ from bridge_contracts import (
     SourceReference,
     ToolActivity,
 )
+from bridge_config import (
+    DEFAULT_ACTION_QUEUE_FILE,
+    DEFAULT_MAX_AUDIO_BYTES,
+    TTS_INSTRUCTIONS,
+    ConfigurationError,
+    parse_args as parse_bridge_args,
+    sanitized_startup_summary,
+    validate_startup,
+)
 from bridge_service import BridgeService
 from bridge_policy import (
     AuthPrincipal,
@@ -63,6 +67,7 @@ from bridge_policy import (
     PrivilegedOperation,
     operation_from_value,
 )
+from bridge_ports import ActionQueuePort, ConversationStorePort, DurableMemoryPort
 from device_config import DeviceConfigExecutor
 from durable_memory import (
     DEFAULT_CONVERSATION_FILE,
@@ -100,6 +105,14 @@ from observability import (
     emit_exception,
 )
 from privileged_service import PrivilegedMutationService
+from provider_adapters import (
+    OPENROUTER_BASE_URL,
+    LocalWhisperTranscriber,
+    OpenRouterTranscriber,
+    SDKProviderAdapter,
+    create_provider_client,
+    validated_openai_client,
+)
 from source_code import DEFAULT_SOURCE_BUNDLE, SourceCodeStore
 from sphere_tools import (
     PendingMemoryConfirmationStore,
@@ -159,18 +172,9 @@ important corrections. Do not include secrets or quote the transcript at length.
 This summary is for a future assistant session, not a user-facing reply.
 """
 
-TTS_INSTRUCTIONS = """Affect: a mysterious noir detective
-
-Tone: Cool, detached, but subtly reassuring—like they've seen it all and know how to handle any minor (or major) inconvenience like it's just another case.
-
-Delivery: Slow and deliberate, with dramatic pauses to build suspense, as if every detail matters in this investigation.
-
-Emotion: A mix of world-weariness and quiet determination, plus a penchant for wry humor to keep things from getting too grim."""
-
 TTS_SAMPLE_RATE = 16000
 TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH = 2
-DEFAULT_MAX_AUDIO_BYTES = 512 * 1024
 DEVICE_PRESENCE_TTL_SECONDS = 20
 
 # Shared device-body catalog for home base + future wearable + web console.
@@ -213,10 +217,8 @@ KNOWN_DEVICE_BODIES: list[dict[str, str]] = [
     },
 ]
 INFRASTRUCTURE_DEVICE_IDS = {"local-bridge"}
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 V3_DIR = Path(__file__).resolve().parents[1]
 CONFIGURE_FIRMWARE = V3_DIR / "scripts" / "configure_firmware.py"
-DEFAULT_ACTION_QUEUE_FILE = Path.home() / ".wearabllm" / "actions.json"
 KEYCHAIN_SERVICE = "wearabllm-openai-api-key"
 DEFAULT_TTS_VOICES = (
     "alloy",
@@ -305,23 +307,12 @@ class BridgeState:
         self.args = args
         self.event_sink = getattr(args, "event_sink", None)
         self.policy = BridgePolicy(shared_token_grants_admin=True)
-        self.openai_client = None
-        if OpenAI and args.provider == "openai":
-            try:
-                self.openai_client = OpenAI()
-            except Exception:
-                if os.environ.get("OPENAI_API_KEY"):
-                    raise
-        elif OpenAI and args.provider == "openrouter":
-            try:
-                self.openai_client = OpenAI(
-                    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-                    base_url=OPENROUTER_BASE_URL,
-                )
-            except Exception:
-                if os.environ.get("OPENROUTER_API_KEY"):
-                    raise
-        self.whisper_model: Any | None = None
+        self.openai_client = create_provider_client(
+            OpenAI,
+            args.provider,
+            environment=os.environ,
+        )
+        self.local_whisper_transcriber: LocalWhisperTranscriber | None = None
         self.capture_count = 0
         self.latest_capture: dict[str, Any] | None = None
         self.dry_run_command = normalize_led_command(getattr(args, "dry_run_command", "BS"))
@@ -336,6 +327,7 @@ class BridgeState:
         self.sensor_manifests: dict[str, dict[str, Any]] = {}
         self.sensor_manifests_lock = threading.Lock()
         self.action_backend = str(getattr(args, "action_backend", "local"))
+        self.action_queue: ActionQueuePort
         if self.action_backend == "supabase":
             self.action_queue = SupabaseActionQueue.from_environment(
                 lease_seconds=getattr(args, "action_lease_seconds", 45),
@@ -360,7 +352,7 @@ class BridgeState:
             principal_id=os.environ.get("WEARABLLM_PRINCIPAL_ID", "primary"),
         )
         self.conversation_backend = str(getattr(args, "conversation_backend", "local"))
-        self.conversation_store = None
+        self.conversation_store: ConversationStorePort | None = None
         if self.conversation_backend == "supabase":
             self.conversation_store = SupabaseConversationStore.from_environment(
                 session_idle_seconds=max(60, int(getattr(args, "session_idle_seconds", 3600)))
@@ -374,7 +366,7 @@ class BridgeState:
         self.durable_memory_enabled = bool(getattr(args, "durable_memory", False))
         self.memory_backend = str(getattr(args, "memory_backend", "local"))
         self.memory_retrieval_limit = max(0, int(getattr(args, "memory_retrieval_limit", 3)))
-        self.memory_store = None
+        self.memory_store: DurableMemoryPort | None = None
         if self.durable_memory_enabled:
             if self.memory_backend == "mem":
                 try:
@@ -429,6 +421,12 @@ class BridgeState:
             except ValueError as exc:
                 self._emit_exception("bridge.source_tools_unavailable", exc, level="warning")
         self.bridge_service = self._build_bridge_service()
+
+    def _provider_adapter(self) -> SDKProviderAdapter:
+        if not self.openai_client:
+            raise RuntimeError("openai package is not installed")
+        provider = str(getattr(getattr(self, "args", None), "provider", "openai"))
+        return SDKProviderAdapter(self.openai_client, provider)
 
     def _build_bridge_service(self) -> BridgeService:
         if not hasattr(self, "history"):
@@ -590,21 +588,11 @@ class BridgeState:
 
     def _embed_household_text(self, text: str) -> list[float]:
         """Generate one normalized-size vector without exposing it outside the bridge."""
-        if self.args.provider != "openai" or not self.openai_client:
-            raise RuntimeError("Household-memory embeddings require the OpenAI provider")
-        response = self.openai_client.embeddings.create(
+        return self._provider_adapter().embedding(
+            text,
             model=self.embedding_model,
-            input=text,
             dimensions=self.embedding_dimensions,
-            encoding_format="float",
         )
-        data = getattr(response, "data", None)
-        if not data:
-            raise RuntimeError("OpenAI returned no household-memory embedding")
-        embedding = getattr(data[0], "embedding", None)
-        if not isinstance(embedding, list):
-            raise RuntimeError("OpenAI returned an invalid household-memory embedding")
-        return embedding
 
     def touch_device(self, device_id: str) -> None:
         self._service().touch_device(device_id)
@@ -665,9 +653,7 @@ class BridgeState:
         """Fetch the account's currently available model IDs without exposing its key."""
         if self.args.provider != "openai":
             raise RuntimeError("Live model discovery is available only for the OpenAI provider")
-        if not self.openai_client:
-            raise RuntimeError("OpenAI client is not configured")
-        model_ids = self._model_ids(self.openai_client.models.list())
+        model_ids = self._provider_adapter().model_ids()
         return self._catalog_from_model_ids(model_ids)
 
     def replace_openai_api_key(
@@ -692,10 +678,7 @@ class BridgeState:
             raise RuntimeError("openai package is not installed")
 
         # Validate before replacing the active client or touching Keychain.
-        client = OpenAI(api_key=candidate)
-        model_ids = self._model_ids(client.models.list())
-        if not model_ids:
-            raise RuntimeError("OpenAI returned no available models for this key")
+        client, model_ids = validated_openai_client(OpenAI, candidate)
 
         if sys.platform != "darwin":
             raise RuntimeError("Dashboard key storage is currently supported on macOS only")
@@ -973,45 +956,15 @@ class BridgeState:
             return "dry-run invalid audio upload"
 
         if self.args.stt == "openai":
-            if not self.openai_client:
-                raise RuntimeError("openai package is not installed")
-            result = self.openai_client.audio.transcriptions.create(
+            return self._provider_adapter().transcribe(
+                wav_bytes,
                 model=self.args.stt_model,
-                file=("wearabllm-capture.wav", wav_bytes, "audio/wav"),
-                response_format="text",
             )
-            return str(result).strip()
 
         if self.args.stt == "openrouter":
-            payload = {
-                "model": self.args.stt_model,
-                "input_audio": {
-                    "data": base64.b64encode(wav_bytes).decode("ascii"),
-                    "format": "wav",
-                },
-                "language": "en",
-            }
-            request = urllib.request.Request(
-                f"{OPENROUTER_BASE_URL}/audio/transcriptions",
-                data=json.dumps(payload).encode("utf-8"),
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY', '')}",
-                    "Content-Type": "application/json",
-                },
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    result = json.loads(response.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"OpenRouter transcription failed ({exc.code}): {detail}") from exc
-            except urllib.error.URLError as exc:
-                raise RuntimeError(f"OpenRouter transcription failed: {exc.reason}") from exc
-            transcript = str(result.get("text", "")).strip() if isinstance(result, dict) else ""
-            if not transcript:
-                raise RuntimeError("OpenRouter transcription returned no text")
-            return transcript
+            return OpenRouterTranscriber(
+                os.environ.get("OPENROUTER_API_KEY", "")
+            ).transcribe(wav_bytes, model=self.args.stt_model)
 
         if self.args.stt == "local-whisper":
             return self._transcribe_local_whisper(wav_bytes)
@@ -1019,25 +972,12 @@ class BridgeState:
         raise RuntimeError(f"Unsupported STT backend: {self.args.stt}")
 
     def _transcribe_local_whisper(self, wav_bytes: bytes) -> str:
-        try:
-            import whisper  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise RuntimeError(
-                "local-whisper selected, but openai-whisper is not installed"
-            ) from exc
-
-        if self.whisper_model is None:
-            self._emit_event(
-                "bridge.local_whisper_loading",
-                model=str(self.args.local_whisper_model),
+        if self.local_whisper_transcriber is None:
+            self.local_whisper_transcriber = LocalWhisperTranscriber(
+                str(self.args.local_whisper_model),
+                self._emit_event,
             )
-            self.whisper_model = whisper.load_model(self.args.local_whisper_model)
-
-        with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
-            audio_file.write(wav_bytes)
-            audio_file.flush()
-            result = self.whisper_model.transcribe(audio_file.name, language="en", fp16=False)
-        return str(result.get("text", "")).strip()
+        return self.local_whisper_transcriber.transcribe(wav_bytes)
 
     def ask_llm(
         self,
@@ -1309,26 +1249,13 @@ class BridgeState:
         max_output_tokens: int,
         model: str | None = None,
     ) -> str:
-        if not self.openai_client:
-            raise RuntimeError("openai package is not installed")
         selected_model = model or self.current_agent_config().llm_model
-        if self.args.provider == "openai":
-            response = self.openai_client.responses.create(
-                model=selected_model,
-                instructions=instructions,
-                input=input_messages,
-                max_output_tokens=max_output_tokens,
-            )
-            return str(response.output_text).strip()
-        if self.args.provider == "openrouter":
-            response = self.openai_client.chat.completions.create(
-                model=selected_model,
-                messages=[{"role": "system", "content": instructions}, *input_messages],
-                max_tokens=max_output_tokens,
-            )
-            content = response.choices[0].message.content if response.choices else ""
-            return str(content or "").strip()
-        raise RuntimeError(f"Unsupported LLM provider: {self.args.provider}")
+        return self._provider_adapter().generate_text(
+            instructions,
+            input_messages,
+            model=selected_model,
+            max_output_tokens=max_output_tokens,
+        )
 
     def _generate_agent_text(
         self,
@@ -1387,7 +1314,7 @@ class BridgeState:
             audit_sink=self._audit_privileged,
         )
         pipeline = ModelToolPipeline(
-            response_create=self.openai_client.responses.create,
+            response_create=self._provider_adapter().create_response,
             tool_execute=executor.execute,
             max_tool_rounds=self.max_tool_rounds,
             emit_exception=lambda event, exc: self._emit_exception(event, exc),
@@ -1680,27 +1607,13 @@ class BridgeState:
         if self.args.dry_run:
             return make_silence_wav(milliseconds=max(250, min(2000, len(text) * 35)))
 
-        if self.args.provider not in ("openai", "openrouter"):
-            raise RuntimeError(f"Unsupported TTS provider: {self.args.provider}")
-        if not self.openai_client:
-            raise RuntimeError("openai package is not installed")
-
         agent = self.current_agent_config()
-        request_args: dict[str, Any] = {
-            "model": agent.tts_model,
-            "voice": agent.tts_voice,
-            "input": text,
-            "response_format": "wav",
-        }
-        if self.args.provider == "openai":
-            request_args["instructions"] = agent.tts_instructions
-        response = self.openai_client.audio.speech.create(**request_args)
-        if hasattr(response, "read"):
-            wav_bytes = bytes(response.read())
-        elif isinstance(response, bytes):
-            wav_bytes = response
-        else:
-            raise RuntimeError("Unexpected TTS response type")
+        wav_bytes = self._provider_adapter().synthesize(
+            text,
+            model=agent.tts_model,
+            voice=agent.tts_voice,
+            instructions=agent.tts_instructions,
+        )
         return normalize_tts_wav(wav_bytes)
 
     def configure_device_wifi(
@@ -1861,205 +1774,33 @@ def make_handler(
     )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="WearabLLM v3 local bridge")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument(
-        "--provider",
-        choices=["openai", "openrouter"],
-        default=os.environ.get("WEARABLLM_PROVIDER", "openai"),
-    )
-    parser.add_argument("--llm-model", default=os.environ.get("WEARABLLM_LLM_MODEL", "gpt-5.4-mini"))
-    parser.add_argument("--stt", choices=["openai", "openrouter", "local-whisper"], default=os.environ.get("WEARABLLM_STT", "openai"))
-    parser.add_argument("--stt-model", default=os.environ.get("WEARABLLM_STT_MODEL", "gpt-4o-transcribe"))
-    parser.add_argument("--tts-model", default=os.environ.get("WEARABLLM_TTS_MODEL", "gpt-4o-mini-tts"))
-    parser.add_argument("--tts-voice", default=os.environ.get("WEARABLLM_TTS_VOICE", "marin"))
-    parser.add_argument(
-        "--tts-instructions",
-        default=os.environ.get("WEARABLLM_TTS_INSTRUCTIONS", TTS_INSTRUCTIONS),
-        help="Delivery instructions supplied to the speech model.",
-    )
-    parser.add_argument(
-        "--history-turns",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_HISTORY_TURNS", "20")),
-        help="Number of user/assistant turns retained in memory for this bridge process.",
-    )
-    parser.add_argument(
-        "--max-output-tokens",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_MAX_OUTPUT_TOKENS", "512")),
-        help="Maximum assistant output tokens per response (clamped to 64..4096; default: 512).",
-    )
-    parser.add_argument(
-        "--session-idle-seconds",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_SESSION_IDLE_SECONDS", "3600")),
-        help="End and archive a shared session after this many seconds without a turn (default: 3600).",
-    )
-    parser.add_argument(
-        "--conversation-backend",
-        choices=("local", "supabase"),
-        default=os.environ.get("WEARABLLM_CONVERSATION_BACKEND", "local"),
-        help="Recent-conversation backend: process-local or shared Supabase turns.",
-    )
-    parser.add_argument(
-        "--conversation-file",
-        default=os.environ.get("WEARABLLM_CONVERSATION_FILE", str(DEFAULT_CONVERSATION_FILE)),
-        help="Private local conversation JSON path (default: ~/.wearabllm/conversations.json).",
-    )
-    parser.add_argument(
-        "--device-id",
-        default=os.environ.get("WEARABLLM_DEVICE_ID", "wearabllm-unknown"),
-        help="Fallback source device ID when a request does not send X-WearabLLM-Device-Id.",
-    )
-    parser.add_argument(
-        "--durable-memory",
-        action="store_true",
-        default=os.environ.get("WEARABLLM_DURABLE_MEMORY", "") == "1",
-        help="Auto-extract stable user facts into a private cross-session memory file.",
-    )
-    parser.add_argument(
-        "--memory-file",
-        default=os.environ.get("WEARABLLM_MEMORY_FILE", str(DEFAULT_MEMORY_FILE)),
-        help="Private durable-memory JSON path (default: ~/.wearabllm/memory.json).",
-    )
-    parser.add_argument(
-        "--memory-backend",
-        choices=("local", "mem", "supabase"),
-        default=os.environ.get("WEARABLLM_MEMORY_BACKEND", "local"),
-        help="Durable-memory backend: local JSON, shared MEM, or hosted Supabase.",
-    )
-    parser.add_argument(
-        "--mem-root",
-        default=os.environ.get("WEARABLLM_MEM_ROOT", str(DEFAULT_MEM_ROOT)),
-        help="Path to the shared MEM project when --memory-backend=mem.",
-    )
-    parser.add_argument(
-        "--memory-retrieval-limit",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_MEMORY_RETRIEVAL_LIMIT", "3")),
-        help="Maximum relevant durable memories included in each LLM request.",
-    )
-    parser.add_argument(
-        "--memory-model",
-        default=os.environ.get("WEARABLLM_MEMORY_MODEL", os.environ.get("WEARABLLM_LLM_MODEL", "gpt-5.4-mini")),
-        help="Model used for automatic memory extraction.",
-    )
-    parser.add_argument(
-        "--embedding-model",
-        default=os.environ.get("WEARABLLM_EMBEDDING_MODEL", EMBEDDING_MODEL),
-        help="OpenAI embedding model used by hybrid household-memory retrieval.",
-    )
-    parser.add_argument(
-        "--embedding-dimensions",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_EMBEDDING_DIMENSIONS", str(EMBEDDING_DIMENSIONS))),
-        help=f"Household-memory vector width (schema-fixed at {EMBEDDING_DIMENSIONS}).",
-    )
-    parser.add_argument(
-        "--web-search",
-        action="store_true",
-        default=os.environ.get("WEARABLLM_WEB_SEARCH", "") == "1",
-        help="Expose OpenAI's built-in web search to normal Sphere turns.",
-    )
-    parser.add_argument(
-        "--max-tool-rounds",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_MAX_TOOL_ROUNDS", "8")),
-        help="Maximum custom-tool response rounds per user turn (clamped to 1..8).",
-    )
-    parser.add_argument(
-        "--device-token",
-        default=os.environ.get("WEARABLLM_DEVICE_TOKEN", ""),
-        help="Require this device token in X-WearabLLM-Device-Token on every POST request.",
-    )
-    parser.add_argument(
-        "--action-backend",
-        choices=("local", "supabase"),
-        default=os.environ.get(
-            "WEARABLLM_ACTION_BACKEND",
-            "supabase" if os.environ.get("WEARABLLM_HOSTED", "") == "1" else "local",
-        ),
-        help="Device-action queue backend: local JSON or hosted Supabase.",
-    )
-    parser.add_argument(
-        "--action-queue-file",
-        default=os.environ.get("WEARABLLM_ACTION_QUEUE_FILE", str(DEFAULT_ACTION_QUEUE_FILE)),
-        help="Durable local JSON queue for responses targeted at a device.",
-    )
-    parser.add_argument(
-        "--action-lease-seconds",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_ACTION_LEASE_SECONDS", "45")),
-        help="Seconds before an unacknowledged board action is eligible for redelivery.",
-    )
-    parser.add_argument(
-        "--agent-config-file",
-        default=os.environ.get("WEARABLLM_CONFIG_FILE", str(Path.home() / ".wearabllm" / "agent_config.json")),
-        help="Private local persistence path for dashboard-editable agent settings.",
-    )
-    parser.add_argument("--local-whisper-model", default=os.environ.get("WEARABLLM_LOCAL_WHISPER_MODEL", "base"))
-    parser.add_argument("--typed", default="", help="Bypass STT and use this transcript for hardware-loop testing")
-    parser.add_argument(
-        "--max-audio-bytes",
-        type=int,
-        default=int(os.environ.get("WEARABLLM_MAX_AUDIO_BYTES", str(DEFAULT_MAX_AUDIO_BYTES))),
-        help="Reject /v1/query audio uploads larger than this many bytes.",
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Skip LLM API and return BS with the transcript")
-    parser.add_argument(
-        "--dry-run-command",
-        choices=sorted(LED_COMMANDS),
-        default=os.environ.get("WEARABLLM_DRY_RUN_COMMAND", "BS"),
-        help="LED command returned when --dry-run is set; useful for ring animation testing",
-    )
-    parser.add_argument(
-        "--dry-run-sequence",
-        default=os.environ.get("WEARABLLM_DRY_RUN_SEQUENCE", ""),
-        help="Comma-separated LED commands to cycle through in dry-run mode, for example GS,GP,GC,RS,RF,YP,BS,PS,PP",
-    )
-    parser.add_argument("--save-wav-dir", default="", help="Save each received WAV for audio debugging")
-    parser.add_argument(
-        "--debug-content-logs",
-        action="store_true",
-        help=(
-            "Locally log transcript/reply/TTS content for debugging. "
-            "Rejected when WEARABLLM_HOSTED=1."
-        ),
-    )
-    parser.add_argument(
-        "--allow-device-config",
-        action="store_true",
-        default=os.environ.get("WEARABLLM_ALLOW_DEVICE_CONFIG", "") == "1",
-        help="Enable /v1/device_wifi to update ignored firmware/sdkconfig for the next flash",
-    )
-    return parser.parse_args()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Compatibility export for CLI callers and tests."""
+    return parse_bridge_args(argv)
 
 
 def main() -> None:
     args = parse_args()
-    provider_key = "OPENROUTER_API_KEY" if args.provider == "openrouter" else "OPENAI_API_KEY"
-    if not args.dry_run and not os.environ.get(provider_key):
-        raise SystemExit(f"{provider_key} is required unless --dry-run is set")
-    if os.environ.get("WEARABLLM_HOSTED", "") == "1" and not args.device_token:
-        raise SystemExit("WEARABLLM_DEVICE_TOKEN is required when WEARABLLM_HOSTED=1")
-    if os.environ.get("WEARABLLM_HOSTED", "") == "1" and args.debug_content_logs:
-        raise SystemExit("--debug-content-logs is local-only and cannot run when WEARABLLM_HOSTED=1")
+    try:
+        validate_startup(args)
+    except ConfigurationError as exc:
+        raise SystemExit(str(exc)) from exc
 
     state = BridgeState(args)
     handler = make_handler(state)
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    emit_event(
-        "bridge.started",
-        host=args.host,
-        port=args.port,
-        provider=args.provider,
-        debug_content_logs=args.debug_content_logs,
-    )
+    emit_event("bridge.started", **sanitized_startup_summary(args))
+    emit_event("bridge.stt_backend", backend=args.stt)
     emit_event("bridge.conversation_backend", backend=state.conversation_backend)
     emit_event("bridge.action_backend", backend=state.action_backend)
+    emit_event(
+        "bridge.memory_backend",
+        backend=state.memory_backend if state.durable_memory_enabled else "disabled",
+    )
+    emit_event("bridge.web_search", enabled=state.web_search_enabled)
+    emit_event("bridge.device_auth", enabled=bool(args.device_token))
+    emit_event("bridge.hosted", enabled=os.environ.get("WEARABLLM_HOSTED", "") == "1")
+    emit_event("bridge.device_config", enabled=bool(args.allow_device_config))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

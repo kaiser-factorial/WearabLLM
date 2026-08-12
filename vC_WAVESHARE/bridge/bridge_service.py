@@ -19,6 +19,7 @@ from bridge_contracts import (
     QueryInput,
     QueryResult,
 )
+from bridge_ports import ActionQueuePort, ConversationStorePort
 
 
 class ServiceValidationError(ValueError):
@@ -90,8 +91,8 @@ class BridgeService:
         self,
         *,
         assistant_gateway: Callable[..., AssistantResult],
-        action_queue: Any,
-        conversation_store: Any | None,
+        action_queue: ActionQueuePort,
+        conversation_store: ConversationStorePort | None,
         conversation_backend: str,
         history_provider: Callable[[], list[dict[str, Any]]],
         history_clearer: Callable[[], None],

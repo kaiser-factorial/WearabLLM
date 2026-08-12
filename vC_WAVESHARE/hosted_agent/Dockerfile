@@ -9,6 +9,8 @@ COPY bridge/durable_memory.py ./durable_memory.py
 COPY bridge/action_queue.py ./action_queue.py
 COPY bridge/agent_config.py ./agent_config.py
 COPY bridge/bridge_contracts.py ./bridge_contracts.py
+COPY bridge/bridge_config.py ./bridge_config.py
+COPY bridge/bridge_ports.py ./bridge_ports.py
 COPY bridge/bridge_policy.py ./bridge_policy.py
 COPY bridge/bridge_service.py ./bridge_service.py
 COPY bridge/device_config.py ./device_config.py
@@ -18,6 +20,7 @@ COPY bridge/model_pipeline.py ./model_pipeline.py
 COPY bridge/model_protocol.py ./model_protocol.py
 COPY bridge/observability.py ./observability.py
 COPY bridge/privileged_service.py ./privileged_service.py
+COPY bridge/provider_adapters.py ./provider_adapters.py
 COPY bridge/source_code.py ./source_code.py
 COPY bridge/sphere_tools.py ./sphere_tools.py
 COPY bridge/tool_activity.py ./tool_activity.py
