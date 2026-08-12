@@ -708,7 +708,8 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(create.call_args_list[1].kwargs["input"][0]["type"], "function_call_output")
         action_queue.create.assert_called_once()
 
-    def test_public_tool_activity_includes_memory_content_prefix(self):
+    def test_public_tool_activity_excludes_memory_content(self):
+        private_content = "Corina prefers curious, direct, playful replies with concrete evidence."
         summary = BridgeState._public_tool_result(
             "memory_remember",
             {
@@ -717,17 +718,15 @@ class BridgeStateTest(unittest.TestCase):
                 "created": True,
                 "memory": {
                     "id": "11111111-1111-4111-8111-111111111111",
-                    "content": "Corina prefers curious, direct, playful replies with concrete evidence.",
+                    "content": private_content,
                 },
             },
-            {"content": "Corina prefers curious, direct, playful replies with concrete evidence."},
+            {"content": private_content},
         )
 
-        self.assertEqual(
-            summary["summary"],
-            "Memory updated — Corina prefers curious, direct, playful replies with concrete evidence.",
-        )
+        self.assertEqual(summary["summary"], "Memory updated")
         self.assertNotIn("memory", summary)
+        self.assertNotIn(private_content, json.dumps(summary))
 
     def test_public_tool_failure_hides_raw_backend_details(self):
         summary = BridgeState._public_tool_result(

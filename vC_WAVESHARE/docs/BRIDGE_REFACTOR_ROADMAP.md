@@ -1,6 +1,6 @@
 # WearabLLM Bridge Refactor Roadmap
 
-Status: Phase 0 Web regression verified; physical Waveshare regression pending
+Status: Phase 5 software-complete; physical Waveshare regression pending
 Created: 2026-08-12  
 Scope: `vC_WAVESHARE/bridge/wearabllm_bridge.py` and its client-facing contracts
 
@@ -88,6 +88,8 @@ wearabllm_bridge.py        process startup and compatibility facade
         +-- bridge_policy.py       allow/deny and sensitive-operation decisions
         +-- bridge_contracts.py    typed internal request/result objects
         +-- model_protocol.py      model reply parsing and normalization
+        +-- model_pipeline.py      context, eligibility, and bounded tool loop
+        +-- tool_activity.py       public sanitization and private model context
         +-- device_config.py       privileged config validation/preview/execution
         +-- audit.py               redacted structured events and request IDs
         |
@@ -449,3 +451,14 @@ Phase 4 implementation and verification evidence is recorded in:
 - `../bridge/device_config.py`
 - `../bridge/test_bridge_policy.py`
 - `../bridge/test_device_config.py`
+
+Phase 5 implementation and verification evidence is recorded in:
+
+- `BRIDGE_PHASE5_MODEL_TOOL_PIPELINE.md`
+- `../bridge/model_protocol.py`
+- `../bridge/model_pipeline.py`
+- `../bridge/tool_activity.py`
+- `../bridge/model_fixtures/v1/model_protocol.json`
+- `../bridge/test_model_protocol.py`
+- `../bridge/test_model_pipeline.py`
+- `../bridge/test_tool_activity.py`

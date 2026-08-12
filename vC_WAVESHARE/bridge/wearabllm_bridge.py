@@ -79,6 +79,22 @@ from durable_memory import (
 )
 from household_memory import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, SupabaseHouseholdMemoryStore
 from http_transport import json_bytes, make_handler as make_http_handler, optional_bool
+from model_pipeline import (
+    ModelRequestContext,
+    ModelToolPipeline,
+    build_model_request_context,
+    build_tool_turn_plan,
+)
+from model_protocol import (
+    clean_reply,
+    item_field,
+    normalize_labeled_value,
+    parse_embedded_json_reply as parse_embedded_json_llm_response,
+    parse_json_reply as parse_json_llm_response,
+    parse_llm_response,
+    parse_model_reply,
+    strip_markdown_fence,
+)
 from observability import (
     emit_event,
     emit_exception,
@@ -89,16 +105,16 @@ from sphere_tools import (
     PendingMemoryConfirmationStore,
     TOOL_INSTRUCTIONS,
     SphereToolExecutor,
-    explicit_web_search_requested,
-    forced_memory_mutation_tool_for_turn,
     function_tools,
-    memory_confirmation_decision_for_turn,
     memory_sensitivity,
-    memory_mutation_tools_for_turn,
-    parse_function_arguments,
-    sensitive_memory_candidate_for_turn,
-    source_read_requested_for_turn,
-    web_search_requested_for_turn,
+)
+from tool_activity import (
+    collect_response_sources,
+    model_tool_context,
+    public_tool_activity,
+    public_tool_error,
+    record_web_search_activity,
+    tool_activity_summary,
 )
 
 try:
@@ -1112,41 +1128,36 @@ class BridgeState:
                 except Exception as exc:  # Conversation storage must not break a voice interaction.
                     self._emit_exception("bridge.conversation_retrieval_failed", exc, level="warning")
                     persistence = self._make_persistence_result(PersistenceStatus.FAILED)
-            input_messages = [
-                {
-                    "role": str(message.get("role", "user")),
-                    "content": str(message.get("content", "")),
-                }
-                for message in persisted_history
-            ]
-            input_messages.append({"role": "user", "content": transcript})
             agent = self.current_agent_config()
-            instructions = agent.system_prompt
-            if memories:
-                memory_context = "\n".join(f"- {memory}" for memory in memories)
-                instructions += (
-                    "\n\nRelevant durable user memory follows. Treat it as potentially stale, "
-                    "use it only when relevant, and prefer the user's current statement if it conflicts:\n"
-                    f"{memory_context}"
-                )
+            request_context = build_model_request_context(
+                system_instructions=agent.system_prompt,
+                history_messages=persisted_history,
+                user_transcript=transcript,
+                memories=memories,
+                model=agent.llm_model,
+                max_output_tokens=self.max_output_tokens,
+                tool_instructions=(
+                    TOOL_INSTRUCTIONS if self.args.provider == "openai" else ""
+                ),
+            )
             generated = GeneratedModelText(raw_text="", activity=ModelActivity())
             try:
                 if self.args.provider == "openai":
                     generated = self._generate_agent_result(
-                        instructions + TOOL_INSTRUCTIONS,
-                        input_messages,
-                        max_output_tokens=self.max_output_tokens,
-                        model=agent.llm_model,
+                        request_context.instructions,
+                        list(request_context.input_messages),
+                        max_output_tokens=request_context.max_output_tokens,
+                        model=request_context.model,
                         origin_device_id=device_id,
                         user_transcript=transcript,
                     )
                 else:
                     generated = GeneratedModelText(
                         raw_text=self._generate_text(
-                            instructions,
-                            input_messages,
-                            max_output_tokens=self.max_output_tokens,
-                            model=agent.llm_model,
+                            request_context.instructions,
+                            list(request_context.input_messages),
+                            max_output_tokens=request_context.max_output_tokens,
+                            model=request_context.model,
                         )
                     )
             except Exception as exc:
@@ -1352,50 +1363,17 @@ class BridgeState:
         """Run a bounded Responses tool loop for normal assistant turns only."""
         if not self.openai_client:
             raise RuntimeError("openai package is not installed")
-        tools = function_tools()
-        memory_mutation_tools = memory_mutation_tools_for_turn(user_transcript)
-        forced_memory_mutation_tool = forced_memory_mutation_tool_for_turn(user_transcript)
-        if explicit_web_search_requested(user_transcript):
-            # A combined research-and-remember request must be allowed to research first.
-            forced_memory_mutation_tool = None
-        confirmation_decision = memory_confirmation_decision_for_turn(user_transcript)
-        force_memory_confirmation = bool(
-            getattr(self, "pending_memory_confirmations", None)
-            and self.pending_memory_confirmations.has_pending()
-            and confirmation_decision is not None
-        )
-        force_sensitive_stage = bool(
-            not force_memory_confirmation
-            and not memory_mutation_tools
-            and sensitive_memory_candidate_for_turn(user_transcript)
-        )
-        force_source_read = bool(
-            getattr(self, "source_store", None)
-            and not force_memory_confirmation
-            and not force_sensitive_stage
-            and not memory_mutation_tools
-            and source_read_requested_for_turn(user_transcript)
-        )
         policy = getattr(self, "policy", BridgePolicy())
-        eligible_names = policy.eligible_tool_names(
-            (
-                str(tool.get("name"))
-                for tool in tools
-                if tool.get("type") == "function" and tool.get("name")
-            ),
+        pending = getattr(self, "pending_memory_confirmations", None)
+        plan = build_tool_turn_plan(
+            policy=policy,
+            base_tools=function_tools(),
+            user_transcript=user_transcript,
             memory_available=bool(self.household_memory_store),
             source_available=bool(getattr(self, "source_store", None)),
-            memory_mutation_tool_names=memory_mutation_tools,
-            force_memory_confirmation=force_memory_confirmation,
-            force_sensitive_stage=force_sensitive_stage,
+            web_search_configured=bool(self.web_search_enabled),
+            pending_memory_confirmation=bool(pending and pending.has_pending()),
         )
-        tools = [tool for tool in tools if str(tool.get("name")) in eligible_names]
-        web_search_for_turn = policy.web_search_eligible(
-            configured=self.web_search_enabled,
-            requested_for_turn=web_search_requested_for_turn(user_transcript),
-        )
-        if web_search_for_turn:
-            tools.append({"type": "web_search"})
         executor = SphereToolExecutor(
             memory_store=self.household_memory_store,
             action_queue=self.action_queue,
@@ -1408,99 +1386,25 @@ class BridgeState:
             policy=policy,
             audit_sink=self._audit_privileged,
         )
-        activity = ModelActivity()
-        request_options: dict[str, Any] = {
-            "model": model,
-            "instructions": instructions,
-            "input": input_messages,
-            "tools": tools,
-            "parallel_tool_calls": False,
-            "max_output_tokens": max_output_tokens,
-        }
-        if force_memory_confirmation:
-            request_options["tool_choice"] = {"type": "function", "name": "memory_confirm"}
-        elif force_sensitive_stage:
-            request_options["tool_choice"] = {"type": "function", "name": "memory_remember"}
-        elif forced_memory_mutation_tool:
-            request_options["tool_choice"] = {
-                "type": "function",
-                "name": forced_memory_mutation_tool,
-            }
-        elif force_source_read:
-            request_options["tool_choice"] = {"type": "function", "name": "source_read"}
-        if web_search_for_turn:
-            request_options["include"] = ["web_search_call.action.sources"]
-        try:
-            response = self.openai_client.responses.create(
-                **request_options,
-            )
-        except Exception as exc:
-            self._emit_exception("bridge.initial_agent_response_failed", exc)
-            return GeneratedModelText(
-                raw_text="RF\nI hit an internal error before I could finish that request. Please try again.",
-                activity=activity,
-            )
-        self._collect_response_sources(response, activity.sources)
-        self._record_web_search_activity(response, activity)
-        for _ in range(self.max_tool_rounds):
-            calls = [item for item in getattr(response, "output", []) if self._item_field(item, "type") == "function_call"]
-            if not calls:
-                return GeneratedModelText(
-                    raw_text=str(getattr(response, "output_text", "") or "").strip(),
-                    activity=activity,
-                )
-            outputs: list[dict[str, Any]] = []
-            for call in calls:
-                name = str(self._item_field(call, "name") or "")
-                call_id = str(self._item_field(call, "call_id") or self._item_field(call, "id") or "")
-                arguments: dict[str, Any] = {}
-                try:
-                    arguments = parse_function_arguments(self._item_field(call, "arguments"))
-                    result = executor.execute(name, arguments, call_id=call_id)
-                except Exception as exc:  # Return bounded tool errors so Sphere can explain them.
-                    result = {"ok": False, "error": str(exc)}
-                activity.tool_results.append(self._public_tool_activity(name, result, arguments))
-                activity.model_tool_context.append(
-                    self._model_tool_context(name, result, arguments)
-                )
-                outputs.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(result, ensure_ascii=False, default=str),
-                    }
-                )
-            followup_options = {
-                **request_options,
-                "previous_response_id": str(getattr(response, "id", "")),
-                "input": outputs,
-            }
-            if force_memory_confirmation or force_sensitive_stage or forced_memory_mutation_tool or force_source_read:
-                followup_options["tool_choice"] = "auto"
-            try:
-                response = self.openai_client.responses.create(**followup_options)
-            except Exception as exc:
-                self._emit_exception("bridge.agent_followup_failed", exc)
-                return GeneratedModelText(
-                    raw_text=(
-                        "RF\nI completed the tool attempts shown above, but hit an internal error "
-                        "before I could finish replying. Please try again."
-                    ),
-                    activity=activity,
-                )
-            self._collect_response_sources(response, activity.sources)
-            self._record_web_search_activity(response, activity)
-        self._emit_event(
-            "bridge.tool_round_limit_reached",
-            level="warning",
-            count=self.max_tool_rounds,
-        )
-        return GeneratedModelText(
-            raw_text=(
-                "RF\nI completed the tool attempts shown above, but reached my per-message "
-                "tool limit before I could finish replying. Send a short follow-up and I’ll continue."
+        pipeline = ModelToolPipeline(
+            response_create=self.openai_client.responses.create,
+            tool_execute=executor.execute,
+            max_tool_rounds=self.max_tool_rounds,
+            emit_exception=lambda event, exc: self._emit_exception(event, exc),
+            emit_round_limit=lambda count: self._emit_event(
+                "bridge.tool_round_limit_reached",
+                level="warning",
+                count=count,
             ),
-            activity=activity,
+        )
+        return pipeline.run(
+            ModelRequestContext(
+                instructions=instructions,
+                input_messages=tuple(input_messages),
+                model=model,
+                max_output_tokens=max_output_tokens,
+            ),
+            plan,
         )
 
     @staticmethod
@@ -1519,13 +1423,7 @@ class BridgeState:
         arguments: dict[str, Any],
     ) -> ModelToolContext:
         """Persist exactly the bounded data already shown to the model this turn."""
-        arguments_json = json.dumps(arguments, ensure_ascii=False, default=str)
-        output_json = json.dumps(result, ensure_ascii=False, default=str)
-        return ModelToolContext(
-            name=name[:80],
-            arguments=arguments_json[:4_000],
-            output=output_json[:32_000],
-        )
+        return model_tool_context(name, result, arguments)
 
     @staticmethod
     def _public_tool_result(
@@ -1543,54 +1441,11 @@ class BridgeState:
         arguments: dict[str, Any] | None = None,
     ) -> ToolActivity:
         """Return audit metadata without leaking private memory contents to clients."""
-        arguments = arguments or {}
-        ok = bool(result.get("ok"))
-        details: dict[str, Any] = {}
-        if "created" in result:
-            details["created"] = bool(result.get("created"))
-        if "saved" in result:
-            details["saved"] = bool(result.get("saved"))
-        if result.get("confirmation_required"):
-            details["confirmation_required"] = True
-            details["sensitive_categories"] = list(result.get("sensitive_categories", []))
-        memory = result.get("memory")
-        if isinstance(memory, dict) and memory.get("id"):
-            details["memory_id"] = str(memory["id"])
-        memories = result.get("memories")
-        if isinstance(memories, list):
-            details["match_count"] = len(memories)
-        actions = result.get("actions")
-        if isinstance(actions, list):
-            details["action_ids"] = [
-                str(item.get("action", {}).get("id"))
-                for item in actions
-                if isinstance(item, dict)
-                and isinstance(item.get("action"), dict)
-                and item["action"].get("id")
-            ]
-        bodies = result.get("bodies")
-        if name == "sphere_status" and isinstance(bodies, list):
-            details["body_count"] = len(bodies)
-        if not ok and result.get("error"):
-            details["error"] = BridgeState._public_tool_error(name, result.get("error"))
-        return ToolActivity(
-            name=name,
-            ok=ok,
-            summary=BridgeState._tool_activity_summary(name, result, arguments),
-            details=details,
-        )
+        return public_tool_activity(name, result, arguments)
 
     @staticmethod
     def _public_tool_error(name: str, error: Any) -> str:
-        text = " ".join(str(error or "").split()).strip()
-        lowered = text.lower()
-        if "supabase" in lowered:
-            return "The private data backend rejected the request."
-        if "source" in name and ("not found" in lowered or "path" in lowered):
-            return "That path is not available in Sphere's published source manifest."
-        if "permission" in lowered or "explicit" in lowered or "intent" in lowered:
-            return "The current message did not authorize that operation."
-        return f"{name} failed." if text else "Tool failed."
+        return public_tool_error(name, error)
 
     @staticmethod
     def _tool_activity_summary(
@@ -1598,69 +1453,7 @@ class BridgeState:
         result: dict[str, Any],
         arguments: dict[str, Any],
     ) -> str:
-        def clip(value: Any, limit: int = 96) -> str:
-            text = " ".join(str(value or "").split()).strip()
-            return f"{text[:limit]}…" if len(text) > limit else text
-
-        if not result.get("ok"):
-            return BridgeState._public_tool_error(name, result.get("error"))
-        memory = result.get("memory") if isinstance(result.get("memory"), dict) else {}
-        preview = clip(result.get("memory_preview") or memory.get("content"))
-        if name == "memory_search":
-            count = len(result.get("memories", [])) if isinstance(result.get("memories"), list) else 0
-            return f"Memory searched — {count} match{'es' if count != 1 else ''} for “{clip(arguments.get('query'), 64)}”"
-        if name == "memory_remember":
-            if result.get("confirmation_required"):
-                return f"Memory needs confirmation — {preview}"
-            if result.get("created") is False:
-                return f"Memory already present — {preview}"
-            return f"Memory updated — {preview}"
-        if name == "memory_confirm":
-            return f"Memory updated — {preview}" if result.get("saved") else f"Memory not saved — {preview}"
-        if name == "memory_correct":
-            if result.get("confirmation_required"):
-                return f"Memory correction needs confirmation — {preview}"
-            return f"Memory updated — {preview}"
-        if name == "memory_forget":
-            return f"Memory forgotten — {preview}"
-        if name == "sphere_status":
-            bodies = result.get("bodies", [])
-            count = len(bodies) if isinstance(bodies, list) else 0
-            return f"Sphere state checked — {count} bod{'y' if count == 1 else 'ies'}"
-        if name == "send_to_body":
-            targets = [str(value) for value in arguments.get("target_device_ids", [])]
-            return f"Expression queued — {', '.join(targets) or 'no target'}"
-        if name == "sensor_list":
-            return f"Sensors inspected — {len(result.get('devices', []))} registered device(s)"
-        if name == "sensor_read":
-            reading = result.get("result") if isinstance(result.get("result"), dict) else None
-            if reading:
-                return f"Sensors measured — {len(reading.get('readings', []))} confirmed reading(s)"
-            return f"Sensor reading requested — {result.get('status', 'queued')}"
-        if name == "sensor_loop":
-            return (
-                f"Sensor loop scheduled — {result.get('count', '?')} readings every "
-                f"{result.get('interval_seconds', '?')}s · {clip(result.get('schedule_id'), 64)}"
-            )
-        if name == "loop_cancel":
-            return (
-                f"Loop cancelled — {result.get('cancelled', 0)} pending action"
-                f"{'s' if result.get('cancelled', 0) != 1 else ''}"
-            )
-        if name == "source_list":
-            entries = result.get("entries", [])
-            count = len(entries) if isinstance(entries, list) else 0
-            return f"Source listed — {clip(arguments.get('path') or '/', 72)} ({count} entries)"
-        if name == "source_read":
-            file = result.get("file") if isinstance(result.get("file"), dict) else {}
-            return (
-                f"Source read — {clip(file.get('path') or arguments.get('path'), 72)} "
-                f"(lines {file.get('start_line', '?')}–{file.get('end_line', '?')})"
-            )
-        if name == "web_search":
-            count = int(result.get("source_count", 0))
-            return f"Web searched — {count} source{'s' if count != 1 else ''}"
-        return f"Tool used — {name}"
+        return tool_activity_summary(name, result, arguments)
 
     @classmethod
     def _record_web_search_activity(
@@ -1668,33 +1461,11 @@ class BridgeState:
         response: Any,
         activity: ModelActivity,
     ) -> None:
-        calls = sum(
-            1
-            for item in getattr(response, "output", []) or []
-            if cls._item_field(item, "type") == "web_search_call"
-        )
-        for _ in range(calls):
-            activity.tool_results.append(
-                cls._public_tool_activity(
-                    "web_search",
-                    {"ok": True, "source_count": len(activity.sources)},
-                    {},
-                )
-            )
-            activity.model_tool_context.append(
-                cls._model_tool_context(
-                    "web_search",
-                    {
-                        "ok": True,
-                        "sources": [source.to_legacy_dict() for source in activity.sources],
-                    },
-                    {},
-                )
-            )
+        record_web_search_activity(response, activity)
 
     @staticmethod
     def _item_field(item: Any, field: str) -> Any:
-        return item.get(field) if isinstance(item, dict) else getattr(item, field, None)
+        return item_field(item, field)
 
     @classmethod
     def _collect_response_sources(
@@ -1702,32 +1473,7 @@ class BridgeState:
         response: Any,
         destination: list[SourceReference],
     ) -> None:
-        seen = {source.url for source in destination}
-        for item in getattr(response, "output", []) or []:
-            if cls._item_field(item, "type") == "web_search_call":
-                action = cls._item_field(item, "action")
-                sources = cls._item_field(action, "sources") or []
-                for source in sources:
-                    url = str(cls._item_field(source, "url") or "").strip()
-                    if url and url not in seen:
-                        destination.append(
-                            SourceReference(
-                                url=url,
-                                title=str(cls._item_field(source, "title") or url),
-                            )
-                        )
-                        seen.add(url)
-            for content in cls._item_field(item, "content") or []:
-                for annotation in cls._item_field(content, "annotations") or []:
-                    url = str(cls._item_field(annotation, "url") or "").strip()
-                    if url and url not in seen:
-                        destination.append(
-                            SourceReference(
-                                url=url,
-                                title=str(cls._item_field(annotation, "title") or url),
-                            )
-                        )
-                        seen.add(url)
+        collect_response_sources(response, destination)
 
     def clear_history(self) -> None:
         self._service().clear_history()
@@ -2027,117 +1773,11 @@ class BridgeState:
         )
 
 
-def parse_llm_response(raw: str) -> tuple[str, str]:
-    """Compatibility adapter for the former tuple parser contract."""
-    return parse_model_reply(raw).to_legacy_tuple()
-
-
-def parse_model_reply(raw: str) -> ParsedModelReply:
-    """Parse provider output into the bridge's validated model reply contract."""
-    stripped = strip_markdown_fence(raw.strip())
-    json_response = parse_json_llm_response(stripped)
-    if json_response:
-        return ParsedModelReply.from_legacy_tuple(json_response)
-    json_response = parse_embedded_json_llm_response(stripped)
-    if json_response:
-        return ParsedModelReply.from_legacy_tuple(json_response)
-
-    raw_lines = stripped.splitlines()
-    first_index = next((index for index, line in enumerate(raw_lines) if line.strip()), None)
-    if first_index is None:
-        return ParsedModelReply(command="BS", reply=stripped)
-
-    first = normalize_labeled_value(raw_lines[first_index].strip())
-    if first.upper() in LED_COMMANDS:
-        return ParsedModelReply(
-            command=first.upper(),
-            reply=clean_reply("\n".join(raw_lines[first_index + 1 :])) or stripped,
-        )
-
-    match = re.search(r"\b(GS|GP|GC|RS|RF|YP|BS|PS|PP)\b", stripped.upper())
-    if match:
-        command = match.group(1)
-        cleaned = clean_reply(re.sub(r"\b(GS|GP|GC|RS|RF|YP|BS|PS|PP)\b", "", stripped, count=1))
-        cleaned = re.sub(r"\b(?:led|command|code)\s*[:=-]\s*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return ParsedModelReply(command=command, reply=cleaned or stripped)
-
-    return ParsedModelReply(command="BS", reply=stripped)
-
-
 def normalize_led_command(raw: str) -> str:
     command = raw.strip().upper()
     if command not in LED_COMMANDS:
         raise ValueError(f"Invalid LED command: {raw}")
     return command
-
-
-def strip_markdown_fence(raw: str) -> str:
-    match = re.fullmatch(r"```(?:json|text)?\s*(.*?)\s*```", raw, flags=re.DOTALL | re.IGNORECASE)
-    return match.group(1).strip() if match else raw
-
-
-def parse_json_llm_response(raw: str) -> tuple[str, str] | None:
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    command = str(payload.get("command") or payload.get("code") or "").strip().upper()
-    if command not in LED_COMMANDS:
-        return None
-
-    reply = str(payload.get("reply") or payload.get("answer") or payload.get("text") or "").strip()
-    return command, reply or raw
-
-
-def parse_embedded_json_llm_response(raw: str) -> tuple[str, str] | None:
-    start = raw.find("{")
-    while start >= 0:
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(raw)):
-            ch = raw[index]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\" and in_string:
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    parsed = parse_json_llm_response(raw[start : index + 1])
-                    if parsed:
-                        return parsed
-                    break
-        start = raw.find("{", start + 1)
-    return None
-
-
-def normalize_labeled_value(raw: str) -> str:
-    return re.sub(r"^\s*(?:led|command|code)\s*[:=-]\s*", "", raw, flags=re.IGNORECASE).strip()
-
-
-def clean_reply(raw: str) -> str:
-    cleaned_lines: list[str] = []
-    for line in raw.splitlines():
-        cleaned = re.sub(r"^\s*(?:reply|answer|text)\s*[:=-]\s*", "", line, flags=re.IGNORECASE)
-        if re.fullmatch(r"\s*(?:led|command|code)\s*[:=-]?\s*", cleaned, flags=re.IGNORECASE):
-            continue
-        cleaned_lines.append(cleaned.rstrip())
-    cleaned = "\n".join(cleaned_lines).strip()
-    return re.sub(r"^(?:led|command|code)\s*[:=-]\s*", "", cleaned, flags=re.IGNORECASE).strip()
-
 
 def markdown_to_plain_text(raw: str) -> str:
     """Project lightweight Markdown into readable TFT/TTS-safe plain text."""
