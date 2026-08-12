@@ -434,3 +434,9 @@ Phase 2 implementation and verification evidence is recorded in:
 - `BRIDGE_PHASE2_HTTP_TRANSPORT.md`
 - `../bridge/http_transport.py`
 - `../bridge/test_http_transport.py`
+
+Phase 3 implementation and verification evidence is recorded in:
+
+- `BRIDGE_PHASE3_SERVICE.md`
+- `../bridge/bridge_service.py`
+- `../bridge/test_bridge_service.py`

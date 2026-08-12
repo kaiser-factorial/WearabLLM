@@ -49,7 +49,6 @@ class RouteMatchingTest(unittest.TestCase):
     def test_every_route_targets_a_handler_endpoint(self) -> None:
         handler = make_handler(
             SimpleNamespace(),
-            wav_inspector=lambda _body: {},
         )
         routes = [
             *GET_ROUTES.values(),
@@ -93,6 +92,8 @@ class TransportBoundaryTest(unittest.TestCase):
         self.assertEqual(transport.count("def _device_id("), 1)
         self.assertNotIn("class Handler(BaseHTTPRequestHandler)", bridge)
         self.assertNotIn("json.loads(self.rfile", bridge)
+        self.assertNotIn("state.action_queue", transport)
+        self.assertNotIn("state.conversation_store", transport)
 
 
 if __name__ == "__main__":

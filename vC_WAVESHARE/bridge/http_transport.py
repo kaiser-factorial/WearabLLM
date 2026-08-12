@@ -15,7 +15,7 @@ import urllib.parse
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
-from typing import Any, Callable, Pattern
+from typing import Any, Pattern
 
 from action_queue import validate_device_id
 from bridge_contracts import InteractionInput, QueryInput
@@ -164,7 +164,6 @@ def make_handler(
     state: Any,
     *,
     event_sink: Any | None = None,
-    wav_inspector: Callable[[bytes], dict[str, Any]],
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "WearabLLMBridge/0.1"
@@ -290,7 +289,7 @@ def make_handler(
 
         def _handle_get_admin_config(self, _parsed: urllib.parse.SplitResult) -> None:
             self._send_json(
-                {"ok": True, "config": state.agent_config.snapshot().public_dict()}
+                {"ok": True, "config": state.public_agent_config()}
             )
 
         def _handle_admin_catalog(self, _parsed: urllib.parse.SplitResult) -> None:
@@ -311,7 +310,7 @@ def make_handler(
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid limit")
                 return
             try:
-                actions = state.action_queue.list(
+                actions = state.list_actions(
                     target_device_id=target,
                     limit=int(limit_raw),
                 )
@@ -336,12 +335,12 @@ def make_handler(
             action_id: str,
         ) -> None:
             try:
-                action = state.action_queue.get(action_id)
+                action = state.get_action(action_id)
+            except LookupError as exc:
+                self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                return
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-                return
-            if not action:
-                self._send_error_json(HTTPStatus.NOT_FOUND, "Action not found")
                 return
             self._send_json({"ok": True, "action": action})
 
@@ -351,14 +350,13 @@ def make_handler(
             target_device_id: str,
         ) -> None:
             try:
-                if self._device_id() != target_device_id:
-                    self._send_error_json(
-                        HTTPStatus.FORBIDDEN,
-                        "Device ID does not match action target",
-                    )
-                    return
-                state.touch_device(target_device_id)
-                action = state.action_queue.claim_next(target_device_id)
+                action = state.claim_action(
+                    requesting_device_id=self._device_id(),
+                    target_device_id=target_device_id,
+                )
+            except PermissionError as exc:
+                self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
+                return
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -521,27 +519,10 @@ def make_handler(
             wav_bytes = self.rfile.read(length)
             try:
                 device_id = self._device_id()
-                state.touch_device(device_id)
-                saved_path = state.save_debug_wav(wav_bytes)
-                wav_info = wav_inspector(wav_bytes)
-                transcript = state.transcribe(wav_bytes)
-                result = state.answer_query(
-                    QueryInput(
-                        transcript=transcript,
-                        device_id=device_id,
-                        audio_bytes=len(wav_bytes),
-                        saved_wav=saved_path,
-                        wav_info=wav_info,
-                    )
-                )
+                audio_result = state.answer_audio_query(wav_bytes, device_id=device_id)
+                result = audio_result.query
                 payload = result.to_legacy_dict()
-                state.record_capture(
-                    wav_bytes=len(wav_bytes),
-                    saved_wav=saved_path,
-                    wav_info=wav_info,
-                    transcript=transcript,
-                    command=result.command,
-                )
+                saved_path = audio_result.saved_wav
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -581,7 +562,6 @@ def make_handler(
                 if response_device:
                     response_device = validate_device_id(response_device)
                 device_id = self._device_id()
-                state.touch_device(device_id)
                 result = state.answer_query(
                     QueryInput(
                         transcript=transcript,
@@ -625,7 +605,6 @@ def make_handler(
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "transcript and target_device_id are required")
                 return
             try:
-                state.touch_device(origin)
                 result = state.create_interaction_result(
                     InteractionInput(
                         transcript=transcript,
@@ -658,16 +637,17 @@ def make_handler(
             action_id: str,
         ) -> None:
             try:
-                if self._device_id() != target_device_id:
-                    self._audit(
-                        "action_acknowledge",
-                        "denied",
-                        status=HTTPStatus.FORBIDDEN,
-                        error_code="target_mismatch",
-                    )
-                    self._send_error_json(HTTPStatus.FORBIDDEN, "Device ID does not match action target")
-                    return
-                state.touch_device(target_device_id)
+                requesting_device_id = self._device_id()
+                state.assert_target_device(requesting_device_id, target_device_id)
+            except PermissionError as exc:
+                self._audit(
+                    "action_acknowledge",
+                    "denied",
+                    status=HTTPStatus.FORBIDDEN,
+                    error_code="target_mismatch",
+                )
+                self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
+                return
             except ValueError as exc:
                 self._audit(
                     "action_acknowledge",
@@ -687,14 +667,27 @@ def make_handler(
                 )
                 return
             try:
-                previous = state.action_queue.get(action_id)
-                action = state.action_queue.acknowledge(
-                    target_device_id,
-                    action_id,
-                    str(request.get("status", "")),
-                    str(request.get("error", "")),
-                    request.get("result") if isinstance(request.get("result"), dict) else None,
+                action = state.acknowledge_action(
+                    requesting_device_id=requesting_device_id,
+                    target_device_id=target_device_id,
+                    action_id=action_id,
+                    status=str(request.get("status", "")),
+                    error=str(request.get("error", "")),
+                    result=(
+                        request.get("result")
+                        if isinstance(request.get("result"), dict)
+                        else None
+                    ),
                 )
+            except PermissionError as exc:
+                self._audit(
+                    "action_acknowledge",
+                    "denied",
+                    status=HTTPStatus.FORBIDDEN,
+                    error_code="target_mismatch",
+                )
+                self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
+                return
             except LookupError:
                 self._audit(
                     "action_acknowledge",
@@ -713,12 +706,6 @@ def make_handler(
                 )
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
-            if (
-                action.get("action_type") in {"temperature_measurement", "sensor_read"}
-                and action.get("status") == "completed"
-                and (previous or {}).get("status") != "completed"
-            ):
-                state.record_sensor_action(action)
             self._audit(
                 "action_acknowledge",
                 "accepted",
@@ -738,7 +725,7 @@ def make_handler(
                 )
                 return
             try:
-                config = state.agent_config.update(request)
+                config = state.update_agent_config(request)
             except ValueError as exc:
                 self._audit(
                     "admin_config_update",

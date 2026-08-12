@@ -111,6 +111,7 @@ step "Python compile checks"
     vC_WAVESHARE/scripts/validate_protocol.py \
     vC_WAVESHARE/scripts/verify_firmware_image.py \
     vC_WAVESHARE/bridge/bridge_contracts.py \
+    vC_WAVESHARE/bridge/bridge_service.py \
     vC_WAVESHARE/bridge/http_transport.py \
     vC_WAVESHARE/bridge/wearabllm_bridge.py
 
