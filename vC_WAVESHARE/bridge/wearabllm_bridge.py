@@ -55,6 +55,13 @@ from durable_memory import (
     parse_memory_candidates,
 )
 from household_memory import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, SupabaseHouseholdMemoryStore
+from observability import (
+    REQUEST_ID_HEADER,
+    emit_debug_content,
+    emit_event,
+    emit_exception,
+    new_request_id,
+)
 from source_code import DEFAULT_SOURCE_BUNDLE, SourceCodeStore
 from sphere_tools import (
     PendingMemoryConfirmationStore,
@@ -257,6 +264,7 @@ def inspect_wav(wav_bytes: bytes) -> dict[str, Any]:
 class BridgeState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        self.event_sink = getattr(args, "event_sink", None)
         self.openai_client = None
         if OpenAI and args.provider == "openai":
             try:
@@ -332,7 +340,12 @@ class BridgeState:
                 try:
                     self.memory_store = MemDatabaseStore(getattr(args, "mem_root", DEFAULT_MEM_ROOT))
                 except (OSError, ValueError) as exc:
-                    print(f"WARNING: shared MEM unavailable; using local durable memory: {exc}")
+                    self._emit_exception(
+                        "bridge.memory_backend_fallback",
+                        exc,
+                        level="warning",
+                        backend="local-fallback",
+                    )
                     self.memory_backend = "local-fallback"
                     self.memory_store = DurableMemoryStore(getattr(args, "memory_file", DEFAULT_MEMORY_FILE))
             elif self.memory_backend == "supabase":
@@ -360,11 +373,11 @@ class BridgeState:
                     try:
                         backfilled = self.household_memory_store.backfill_missing_embeddings(limit=50)
                         if backfilled:
-                            print(f"Backfilled {backfilled} household-memory embeddings")
+                            self._emit_event("bridge.embedding_backfill", count=backfilled)
                     except Exception as exc:
-                        print(f"WARNING: household-memory embedding backfill failed: {exc}")
+                        self._emit_exception("bridge.embedding_backfill_failed", exc, level="warning")
             except ValueError as exc:
-                print(f"WARNING: rich household memory tools are unavailable: {exc}")
+                self._emit_exception("bridge.household_tools_unavailable", exc, level="warning")
         self.web_search_enabled = bool(getattr(args, "web_search", False))
         self.max_tool_rounds = max(1, min(int(getattr(args, "max_tool_rounds", 8)), 8))
         self.pending_memory_confirmations = PendingMemoryConfirmationStore(ttl_seconds=300)
@@ -374,7 +387,26 @@ class BridgeState:
             try:
                 self.source_store = SourceCodeStore(source_bundle)
             except ValueError as exc:
-                print(f"WARNING: Sphere source tools are unavailable: {exc}")
+                self._emit_exception("bridge.source_tools_unavailable", exc, level="warning")
+
+    def _emit_event(self, event: str, *, level: str = "info", **fields: Any) -> None:
+        emit_event(event, level=level, sink=getattr(self, "event_sink", None), **fields)
+
+    def _emit_exception(
+        self,
+        event: str,
+        exc: BaseException,
+        *,
+        level: str = "error",
+        **fields: Any,
+    ) -> None:
+        emit_exception(
+            event,
+            exc,
+            level=level,
+            sink=getattr(self, "event_sink", None),
+            **fields,
+        )
 
     def current_agent_config(self) -> AgentConfig:
         """Return live settings, with a lightweight fallback for focused unit tests."""
@@ -840,7 +872,10 @@ class BridgeState:
             ) from exc
 
         if self.whisper_model is None:
-            print(f"Loading local Whisper model: {self.args.local_whisper_model}")
+            self._emit_event(
+                "bridge.local_whisper_loading",
+                model=str(self.args.local_whisper_model),
+            )
             self.whisper_model = whisper.load_model(self.args.local_whisper_model)
 
         with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
@@ -902,7 +937,7 @@ class BridgeState:
             try:
                 memories = self.memory_store.retrieve(transcript, self.memory_retrieval_limit)
             except Exception as exc:  # Durable memory must not break the voice loop.
-                print(f"WARNING: durable-memory retrieval failed: {exc}")
+                self._emit_exception("bridge.durable_retrieval_failed", exc, level="warning")
 
         with self.history_lock:
             persisted_history = self.history
@@ -913,7 +948,7 @@ class BridgeState:
                     persistence["session_id"] = active_session_id or None
                     persisted_history = self.conversation_store.history(active_session_id, self.history_turns * 2)
                 except Exception as exc:  # Conversation storage must not break a voice interaction.
-                    print(f"WARNING: conversation retrieval failed: {exc}")
+                    self._emit_exception("bridge.conversation_retrieval_failed", exc, level="warning")
                     persistence = self._persistence_result("failed")
             input_messages = [
                 {
@@ -954,7 +989,7 @@ class BridgeState:
                 # A model/provider failure must not make an accepted user turn vanish.
                 # Convert it into an ordinary, persistable assistant turn while keeping
                 # the full diagnostic server-side.
-                print(f"ERROR: assistant generation failed: {exc}")
+                self._emit_exception("bridge.assistant_generation_failed", exc)
                 raw = (
                     "RF\nI hit an internal error before I could finish that request. "
                     "Please try again."
@@ -994,7 +1029,7 @@ class BridgeState:
                     elif persistence.get("status") != "failed":
                         persistence = self._persistence_result("failed")
                 except Exception as exc:  # Preserve a live reply if storage is temporarily unavailable.
-                    print(f"WARNING: conversation persistence failed: {exc}")
+                    self._emit_exception("bridge.conversation_persistence_failed", exc, level="warning")
                     persistence = self._persistence_result(
                         "failed", session_id=active_session_id
                     )
@@ -1041,7 +1076,7 @@ class BridgeState:
                 summary = self._summarize_session(turns)
                 self.extract_and_store_session_memories(summary)
             except Exception as exc:
-                print(f"WARNING: session consolidation failed: {exc}")
+                self._emit_exception("bridge.session_consolidation_failed", exc, level="warning")
             self.conversation_store.archive(session, summary)
             session = None
         if not session:
@@ -1079,7 +1114,7 @@ class BridgeState:
             candidates = parse_memory_candidates(raw)
             return sum(1 for candidate in candidates if self.memory_store.add(candidate))
         except Exception as exc:  # Durable memory must not break the voice loop.
-            print(f"WARNING: durable-memory extraction failed: {exc}")
+            self._emit_exception("bridge.durable_extraction_failed", exc, level="warning")
         return 0
 
     def _generate_text(
@@ -1204,7 +1239,7 @@ class BridgeState:
                 **request_options,
             )
         except Exception as exc:
-            print(f"ERROR: initial agent response failed: {exc}")
+            self._emit_exception("bridge.initial_agent_response_failed", exc)
             return (
                 "RF\nI hit an internal error before I could finish that request. Please try again.",
                 metadata,
@@ -1248,7 +1283,7 @@ class BridgeState:
             try:
                 response = self.openai_client.responses.create(**followup_options)
             except Exception as exc:
-                print(f"ERROR: agent follow-up after tool use failed: {exc}")
+                self._emit_exception("bridge.agent_followup_failed", exc)
                 return (
                     "RF\nI completed the tool attempts shown above, but hit an internal error "
                     "before I could finish replying. Please try again.",
@@ -1256,7 +1291,11 @@ class BridgeState:
                 )
             self._collect_response_sources(response, metadata["sources"])
             self._record_web_search_activity(response, metadata)
-        print("WARNING: Sphere reached the configured tool-call round limit")
+        self._emit_event(
+            "bridge.tool_round_limit_reached",
+            level="warning",
+            count=self.max_tool_rounds,
+        )
         return (
             "RF\nI completed the tool attempts shown above, but reached my per-message "
             "tool limit before I could finish replying. Send a short follow-up and I’ll continue.",
@@ -1492,7 +1531,7 @@ class BridgeState:
                 },
             )
         except Exception as exc:
-            print(f"WARNING: temperature reading persistence failed: {exc}")
+            self._emit_exception("bridge.sensor_persistence_failed", exc, level="warning")
 
     def start_new_conversation(self) -> dict[str, Any]:
         """End and preserve a nonempty active thread, then create its replacement."""
@@ -2100,11 +2139,92 @@ def normalize_tts_wav(wav_bytes: bytes) -> bytes:
         return buffer.getvalue()
 
 
-def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    state: BridgeState,
+    *,
+    event_sink: Any | None = None,
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "WearabLLMBridge/0.1"
 
+        def _begin_request(self) -> None:
+            self._request_id = new_request_id()
+            self._request_started = time.monotonic()
+            self._response_logged = False
+            self._request_route = urllib.parse.urlsplit(self.path).path
+            length_raw = self.headers.get("Content-Length", "")
+            self._request_bytes = int(length_raw) if length_raw.isdecimal() else None
+
+        def _emit_event(self, event: str, *, level: str = "info", **fields: Any) -> None:
+            emit_event(event, level=level, sink=event_sink, **fields)
+
+        def _emit_exception(
+            self,
+            event: str,
+            exc: BaseException,
+            *,
+            level: str = "error",
+            **fields: Any,
+        ) -> None:
+            emit_exception(event, exc, level=level, sink=event_sink, **fields)
+
+        def _log_device_id(self) -> str | None:
+            supplied = self.headers.get("X-WearabLLM-Device-Id", "").strip()
+            if supplied and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", supplied):
+                return supplied
+            fallback = str(getattr(state.args, "device_id", "")).strip()
+            if fallback and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", fallback):
+                return fallback
+            return None
+
+        def _finish_request(
+            self,
+            status: HTTPStatus,
+            *,
+            response_bytes: int,
+            error_code: str | None = None,
+        ) -> None:
+            if getattr(self, "_response_logged", False):
+                return
+            self._response_logged = True
+            started = getattr(self, "_request_started", time.monotonic())
+            self._emit_event(
+                "http.request_complete",
+                level="warning" if int(status) >= 400 else "info",
+                request_id=getattr(self, "_request_id", new_request_id()),
+                method=self.command,
+                route=getattr(self, "_request_route", urllib.parse.urlsplit(self.path).path),
+                status=int(status),
+                duration_ms=(time.monotonic() - started) * 1000.0,
+                request_bytes=getattr(self, "_request_bytes", None),
+                response_bytes=response_bytes,
+                device_id=self._log_device_id(),
+                error_code=error_code,
+            )
+
+        def _audit(
+            self,
+            operation: str,
+            outcome: str,
+            *,
+            status: HTTPStatus,
+            error_code: str | None = None,
+            action_status: str | None = None,
+        ) -> None:
+            self._emit_event(
+                "audit.privileged_operation",
+                level="warning" if int(status) >= 400 else "info",
+                request_id=getattr(self, "_request_id", new_request_id()),
+                operation=operation,
+                outcome=outcome,
+                status=int(status),
+                device_id=self._log_device_id(),
+                error_code=error_code,
+                action_status=action_status,
+            )
+
         def do_GET(self) -> None:
+            self._begin_request()
             parsed = urllib.parse.urlsplit(self.path)
             path = parsed.path
             if path == "/health":
@@ -2129,7 +2249,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 try:
                     self._send_json({"ok": True, "catalog": state.openai_catalog()})
                 except Exception as exc:
-                    self._send_error_json(HTTPStatus.BAD_GATEWAY, str(exc))
+                    self._emit_exception("http.admin_catalog_failed", exc)
+                    self._send_error_json(
+                        HTTPStatus.BAD_GATEWAY,
+                        "OpenAI catalog request failed",
+                    )
                 return
             if path == "/v1/interactions":
                 if not self._is_authorized():
@@ -2225,19 +2349,26 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                         limit=int(limit_raw),
                     )
                 except Exception as exc:
-                    print(f"ERROR: conversation snapshot failed: {exc}")
-                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self._emit_exception("http.conversation_snapshot_failed", exc)
+                    self._send_error_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "Conversation snapshot failed",
+                    )
                     return
                 self._send_json(snapshot)
                 return
             self._send_error_json(HTTPStatus.NOT_FOUND, "Unknown endpoint")
 
         def do_OPTIONS(self) -> None:
+            self._begin_request()
             self.send_response(HTTPStatus.NO_CONTENT)
             self._send_cors_headers()
+            self.send_header(REQUEST_ID_HEADER, self._request_id)
+            self._finish_request(HTTPStatus.NO_CONTENT, response_bytes=0)
             self.end_headers()
 
         def do_POST(self) -> None:
+            self._begin_request()
             if not self._is_authorized():
                 self._send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid or missing device token")
                 return
@@ -2282,8 +2413,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 try:
                     payload = state.start_new_conversation()
                 except Exception as exc:
-                    print(f"ERROR: {exc}")
-                    self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                    self._emit_exception("http.conversation_reset_failed", exc)
+                    self._send_json(
+                        {"ok": False, "error": "Conversation reset failed"},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
                     return
                 self._send_json(payload)
                 return
@@ -2300,8 +2434,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                     return
                 except Exception as exc:
-                    print(f"ERROR: conversation archive failed: {exc}")
-                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self._emit_exception("http.conversation_archive_failed", exc)
+                    self._send_error_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "Conversation archive failed",
+                    )
                     return
                 self._send_json(payload)
                 return
@@ -2323,8 +2460,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                     return
                 except Exception as exc:
-                    print(f"ERROR: conversation rename failed: {exc}")
-                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    self._emit_exception("http.conversation_rename_failed", exc)
+                    self._send_error_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "Conversation rename failed",
+                    )
                     return
                 self._send_json(payload)
                 return
@@ -2400,18 +2540,16 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             except Exception as exc:  # pragma: no cover - runtime path
-                print(f"ERROR: {exc}")
+                self._emit_exception("http.audio_query_failed", exc)
                 self._send_json(
-                    {"command": "RF", "reply": f"Bridge error: {exc}", "transcript": ""},
+                    {"command": "RF", "reply": "Bridge error: request failed", "transcript": ""},
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
                 return
 
             self._log_response(payload)
             if saved_path:
-                print(f"Saved WAV : {saved_path}")
-            if payload.get("wav_info"):
-                print(f"WAV info  : {json.dumps(payload['wav_info'], sort_keys=True)}")
+                self._emit_event("bridge.capture_saved", saved_capture=True, request_bytes=len(wav_bytes))
             self._send_json(payload)
 
         def _handle_text_query(self) -> None:
@@ -2423,8 +2561,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             raw = self.rfile.read(length)
             try:
                 request = json.loads(raw.decode("utf-8"))
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            if not isinstance(request, dict):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON body must be an object")
                 return
 
             transcript = str(request.get("transcript", "")).strip()
@@ -2447,9 +2588,13 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             except Exception as exc:  # pragma: no cover - runtime path
-                print(f"ERROR: {exc}")
+                self._emit_exception("http.text_query_failed", exc)
                 self._send_json(
-                    {"command": "RF", "reply": f"Bridge error: {exc}", "transcript": transcript},
+                    {
+                        "command": "RF",
+                        "reply": "Bridge error: request failed",
+                        "transcript": transcript,
+                    },
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
                 return
@@ -2486,8 +2631,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             except Exception as exc:  # pragma: no cover - runtime path
-                print(f"ERROR: interaction creation failed: {exc}")
-                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                self._emit_exception("http.interaction_creation_failed", exc)
+                self._send_error_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "Interaction creation failed",
+                )
                 return
             self._log_response(payload)
             self._send_json({"ok": True, **payload})
@@ -2495,14 +2643,32 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
         def _handle_action_ack(self, target_device_id: str, action_id: str) -> None:
             try:
                 if self._device_id() != target_device_id:
+                    self._audit(
+                        "action_acknowledge",
+                        "denied",
+                        status=HTTPStatus.FORBIDDEN,
+                        error_code="target_mismatch",
+                    )
                     self._send_error_json(HTTPStatus.FORBIDDEN, "Device ID does not match action target")
                     return
                 state.touch_device(target_device_id)
             except ValueError as exc:
+                self._audit(
+                    "action_acknowledge",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_device_id",
+                )
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             request = self._read_json_request(max_bytes=2_048)
             if request is None:
+                self._audit(
+                    "action_acknowledge",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_body",
+                )
                 return
             try:
                 previous = state.action_queue.get(action_id)
@@ -2514,9 +2680,21 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     request.get("result") if isinstance(request.get("result"), dict) else None,
                 )
             except LookupError:
+                self._audit(
+                    "action_acknowledge",
+                    "rejected",
+                    status=HTTPStatus.NOT_FOUND,
+                    error_code="action_not_found",
+                )
                 self._send_error_json(HTTPStatus.NOT_FOUND, "Action not found")
                 return
             except ValueError as exc:
+                self._audit(
+                    "action_acknowledge",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_acknowledgement",
+                )
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             if (
@@ -2525,36 +2703,86 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 and (previous or {}).get("status") != "completed"
             ):
                 state.record_sensor_action(action)
+            self._audit(
+                "action_acknowledge",
+                "accepted",
+                status=HTTPStatus.OK,
+                action_status=str(action.get("status", "")),
+            )
             self._send_json({"ok": True, "action": action})
 
         def _handle_admin_config(self) -> None:
             request = self._read_json_request(max_bytes=64_000)
             if request is None:
+                self._audit(
+                    "admin_config_update",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_body",
+                )
                 return
             try:
                 config = state.agent_config.update(request)
             except ValueError as exc:
+                self._audit(
+                    "admin_config_update",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_config",
+                )
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             except Exception as exc:  # pragma: no cover - persistence/runtime path
-                print(f"ERROR: agent config update failed: {exc}")
-                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                self._emit_exception("http.admin_config_update_failed", exc)
+                self._audit(
+                    "admin_config_update",
+                    "failed",
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    error_code="persistence_failed",
+                )
+                self._send_error_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "Agent config update failed",
+                )
                 return
+            self._audit("admin_config_update", "accepted", status=HTTPStatus.OK)
             self._send_json({"ok": True, "config": config.public_dict()})
 
         def _handle_admin_api_key(self) -> None:
             request = self._read_json_request(max_bytes=2_048)
             if request is None:
+                self._audit(
+                    "api_key_update",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_body",
+                )
                 return
             try:
                 payload = state.replace_openai_api_key(str(request.get("api_key", "")))
             except ValueError as exc:
+                self._audit(
+                    "api_key_update",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_api_key",
+                )
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             except Exception as exc:
-                print(f"ERROR: OpenAI API key update failed: {exc}")
-                self._send_error_json(HTTPStatus.BAD_GATEWAY, str(exc))
+                self._emit_exception("http.api_key_update_failed", exc)
+                self._audit(
+                    "api_key_update",
+                    "failed",
+                    status=HTTPStatus.BAD_GATEWAY,
+                    error_code="provider_validation_failed",
+                )
+                self._send_error_json(
+                    HTTPStatus.BAD_GATEWAY,
+                    "OpenAI API key update failed",
+                )
                 return
+            self._audit("api_key_update", "accepted", status=HTTPStatus.OK)
             self._send_json(payload)
 
         def _read_json_request(self, *, max_bytes: int) -> dict[str, Any] | None:
@@ -2564,7 +2792,7 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                 return None
             try:
                 request = json.loads(self.rfile.read(length).decode("utf-8"))
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
                 return None
             if not isinstance(request, dict):
@@ -2581,8 +2809,11 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             raw = self.rfile.read(length)
             try:
                 request = json.loads(raw.decode("utf-8"))
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            if not isinstance(request, dict):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON body must be an object")
                 return
 
             text = str(request.get("text", "")).strip()
@@ -2593,15 +2824,15 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             try:
                 wav_bytes = state.synthesize_tts_wav(text)
             except Exception as exc:  # pragma: no cover - runtime path
-                print(f"ERROR: {exc}")
+                self._emit_exception("http.tts_failed", exc)
                 self._send_json(
-                    {"error": f"Bridge TTS error: {exc}"},
+                    {"error": "Bridge TTS error: request failed"},
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
                 return
 
-            print(f"TTS text  : {text}")
-            print(f"TTS bytes : {len(wav_bytes)}")
+            if bool(getattr(state.args, "debug_content_logs", False)):
+                emit_debug_content("debug.tts_content", tts_text=text, sink=event_sink)
             self._send_bytes(wav_bytes, content_type="audio/wav")
 
         def _handle_device_wifi(self) -> None:
@@ -2613,8 +2844,17 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             raw = self.rfile.read(length)
             try:
                 request = json.loads(raw.decode("utf-8"))
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            if not isinstance(request, dict):
+                self._audit(
+                    "device_config_update",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_body",
+                )
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "JSON body must be an object")
                 return
 
             ssid = str(request.get("ssid", "")).strip()
@@ -2649,39 +2889,74 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
                     display_self_test,
                 )
             except PermissionError as exc:
+                self._audit(
+                    "device_config_update",
+                    "denied",
+                    status=HTTPStatus.FORBIDDEN,
+                    error_code="device_config_disabled",
+                )
                 self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
                 return
             except ValueError as exc:
+                self._audit(
+                    "device_config_update",
+                    "rejected",
+                    status=HTTPStatus.BAD_REQUEST,
+                    error_code="invalid_device_config",
+                )
                 self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             except Exception as exc:  # pragma: no cover - runtime path
-                print(f"ERROR: {exc}")
-                self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                self._emit_exception("http.device_config_update_failed", exc)
+                self._audit(
+                    "device_config_update",
+                    "failed",
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    error_code="device_config_failed",
+                )
+                self._send_json(
+                    {"ok": False, "error": "Device config update failed"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
                 return
 
-            print(f"Device Wi-Fi config updated for SSID: {ssid}")
+            self._audit("device_config_update", "accepted", status=HTTPStatus.OK)
             self._send_json(payload)
 
         def _log_response(self, payload: dict[str, Any]) -> None:
-            print(f"Transcript: {payload.get('transcript', '')}")
-            print(f"Command   : {payload.get('command', '')}")
-            print(f"Reply     : {payload.get('reply', '')}")
+            if not bool(getattr(state.args, "debug_content_logs", False)):
+                return
+            emit_debug_content(
+                "debug.query_content",
+                transcript=str(payload.get("transcript", "")),
+                reply=str(payload.get("reply", "")),
+                sink=event_sink,
+            )
 
         def log_message(self, fmt: str, *args: Any) -> None:
-            print("%s - %s" % (self.address_string(), fmt % args))
+            # ``http.request_complete`` is the one canonical access event. The
+            # BaseHTTPRequestHandler message can include unsanitized paths.
+            return None
 
         def _send_cors_headers(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-WearabLLM-Device-Token, X-WearabLLM-Device-Id")
+            self.send_header("Access-Control-Expose-Headers", REQUEST_ID_HEADER)
 
         def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json_bytes(payload)
             self.send_response(status)
             self._send_cors_headers()
+            self.send_header(REQUEST_ID_HEADER, getattr(self, "_request_id", new_request_id()))
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self._finish_request(
+                status,
+                response_bytes=len(body),
+                error_code=f"http_{int(status)}" if int(status) >= 400 else None,
+            )
             self.wfile.write(body)
 
         def _send_error_json(self, status: HTTPStatus, message: str) -> None:
@@ -2696,9 +2971,15 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
         ) -> None:
             self.send_response(status)
             self._send_cors_headers()
+            self.send_header(REQUEST_ID_HEADER, getattr(self, "_request_id", new_request_id()))
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self._finish_request(
+                status,
+                response_bytes=len(body),
+                error_code=f"http_{int(status)}" if int(status) >= 400 else None,
+            )
             self.wfile.write(body)
 
     return Handler
@@ -2865,6 +3146,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save-wav-dir", default="", help="Save each received WAV for audio debugging")
     parser.add_argument(
+        "--debug-content-logs",
+        action="store_true",
+        help=(
+            "Locally log transcript/reply/TTS content for debugging. "
+            "Rejected when WEARABLLM_HOSTED=1."
+        ),
+    )
+    parser.add_argument(
         "--allow-device-config",
         action="store_true",
         default=os.environ.get("WEARABLLM_ALLOW_DEVICE_CONFIG", "") == "1",
@@ -2880,19 +3169,25 @@ def main() -> None:
         raise SystemExit(f"{provider_key} is required unless --dry-run is set")
     if os.environ.get("WEARABLLM_HOSTED", "") == "1" and not args.device_token:
         raise SystemExit("WEARABLLM_DEVICE_TOKEN is required when WEARABLLM_HOSTED=1")
+    if os.environ.get("WEARABLLM_HOSTED", "") == "1" and args.debug_content_logs:
+        raise SystemExit("--debug-content-logs is local-only and cannot run when WEARABLLM_HOSTED=1")
 
     state = BridgeState(args)
     handler = make_handler(state)
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    print(f"WearabLLM bridge listening on http://{args.host}:{args.port}")
-    print(f"Runtime config: {json.dumps(state.runtime_config(), sort_keys=True)}")
-    print(f"POST audio/wav to http://<this-computer-ip>:{args.port}/v1/query")
-    print(f"POST JSON transcript to http://<this-computer-ip>:{args.port}/v1/query_text")
-    print(f"POST JSON text to http://<this-computer-ip>:{args.port}/v1/tts for audio/wav")
+    emit_event(
+        "bridge.started",
+        host=args.host,
+        port=args.port,
+        provider=args.provider,
+        debug_content_logs=args.debug_content_logs,
+    )
+    emit_event("bridge.conversation_backend", backend=state.conversation_backend)
+    emit_event("bridge.action_backend", backend=state.action_backend)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nBridge stopped.")
+        emit_event("bridge.stopped")
     finally:
         server.server_close()
 

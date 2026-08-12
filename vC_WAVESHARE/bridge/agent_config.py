@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from observability import emit_exception
+
 
 DEFAULT_SYSTEM_PROMPT = """You are the response engine for WearabLLM, a voice-driven
 physical interface with a small RGB LED ring.
@@ -253,7 +255,7 @@ class AgentConfigStore:
                 f"?principal_id=eq.{principal}&select=*&limit=1",
             )
         except Exception as exc:
-            print(f"WARNING: agent settings load failed: {exc}")
+            emit_exception("bridge.agent_settings_load_failed", exc, level="warning")
             return None
         if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
             return None

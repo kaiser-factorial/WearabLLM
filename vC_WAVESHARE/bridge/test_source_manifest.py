@@ -37,9 +37,12 @@ class SourceManifestTest(unittest.TestCase):
             root = Path(temporary)
             files = deploy.staged_space(root)
             relative = {path.relative_to(root).as_posix() for path in files}
+            dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("source_bundle.json", relative)
         self.assertIn("bridge/source_code.py", relative)
+        self.assertIn("bridge/observability.py", relative)
+        self.assertIn("COPY bridge/observability.py ./observability.py", dockerfile)
 
 
 if __name__ == "__main__":

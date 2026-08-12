@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V3_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${V3_DIR}/.." && pwd)"
 BRIDGE_PORT="${WEARABLLM_PREFLIGHT_PORT:-8766}"
-BRIDGE_LOG="$(mktemp "${TMPDIR:-/tmp}/wearabllm-preflight-bridge.XXXXXX.log")"
+BRIDGE_LOG="$(mktemp "${TMPDIR:-/tmp}/wearabllm-preflight-bridge.XXXXXX")"
 CAPTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wearabllm-preflight-captures.XXXXXX")"
 BRIDGE_PID=""
 RUN_FIRMWARE=1
@@ -149,6 +149,10 @@ if [ "${RUN_SMOKE}" = "1" ]; then
             --port "${BRIDGE_PORT}" \
             --dry-run \
             --dry-run-command PP \
+            --conversation-file "${CAPTURE_DIR}/conversations.json" \
+            --memory-file "${CAPTURE_DIR}/memory.json" \
+            --action-queue-file "${CAPTURE_DIR}/actions.json" \
+            --agent-config-file "${CAPTURE_DIR}/agent_config.json" \
             --save-wav-dir "${CAPTURE_DIR}" \
             >"${BRIDGE_LOG}" 2>&1 &
     BRIDGE_PID="$!"

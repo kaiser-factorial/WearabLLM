@@ -9,6 +9,7 @@ COPY bridge/durable_memory.py ./durable_memory.py
 COPY bridge/action_queue.py ./action_queue.py
 COPY bridge/agent_config.py ./agent_config.py
 COPY bridge/household_memory.py ./household_memory.py
+COPY bridge/observability.py ./observability.py
 COPY bridge/source_code.py ./source_code.py
 COPY bridge/sphere_tools.py ./sphere_tools.py
 COPY bridge/wearabllm_bridge.py ./wearabllm_bridge.py

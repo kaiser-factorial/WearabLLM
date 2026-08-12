@@ -1,6 +1,6 @@
 # WearabLLM Bridge Refactor Roadmap
 
-Status: proposed  
+Status: Phase 0 Web regression verified; physical Waveshare regression pending
 Created: 2026-08-12  
 Scope: `vC_WAVESHARE/bridge/wearabllm_bridge.py` and its client-facing contracts
 
@@ -413,3 +413,12 @@ Start with Phase 0 on a new branch after selecting the reviewed PR #6 base:
 
 That slice creates the safety net needed for every later move and is independently
 valuable even if the larger refactor pauses.
+
+Phase 0 evidence is recorded in:
+
+- `BRIDGE_PHASE0_BASELINE.md`
+- `BRIDGE_API_CONTRACT.md`
+- `BRIDGE_THREAT_MODEL.md`
+- `../bridge/contract_fixtures/v1/golden_shapes.json`
+- `../bridge/test_bridge_contracts.py`
+- `../bridge/test_observability.py`
