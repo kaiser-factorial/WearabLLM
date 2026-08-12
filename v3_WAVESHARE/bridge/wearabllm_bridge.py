@@ -960,7 +960,6 @@ class BridgeState:
             if self.conversation_store:
                 try:
                     if active_session_id:
-                        self.conversation_store.append(active_session_id, device_id, "user", transcript)
                         stored_metadata = {
                             key: value
                             for key, value in {
@@ -970,18 +969,14 @@ class BridgeState:
                             }.items()
                             if value
                         }
-                        if stored_metadata:
-                            self.conversation_store.append(
-                                active_session_id,
-                                response_device,
-                                "assistant",
-                                reply,
-                                metadata=stored_metadata,
-                            )
-                        else:
-                            self.conversation_store.append(
-                                active_session_id, response_device, "assistant", reply
-                            )
+                        self.conversation_store.append_exchange(
+                            active_session_id,
+                            device_id,
+                            transcript,
+                            response_device,
+                            reply,
+                            assistant_metadata=stored_metadata or None,
+                        )
                 except Exception as exc:  # Preserve a live reply if storage is temporarily unavailable.
                     print(f"WARNING: conversation persistence failed: {exc}")
         if self.conversation_backend != "supabase":

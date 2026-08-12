@@ -34,6 +34,28 @@ MODEL_TOOL_CONTEXT_KEY = "model_tool_context"
 MODEL_TOOL_CONTEXT_MAX_CHARS = 96_000
 
 
+def normalized_conversation_turn(
+    device_id: str,
+    role: str,
+    content: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_device_id = " ".join(device_id.split()).strip()
+    normalized_content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if role not in ("user", "assistant"):
+        raise ValueError("Conversation role must be user or assistant")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", normalized_device_id):
+        raise ValueError("Conversation device ID is invalid")
+    if not normalized_content:
+        raise ValueError("Conversation content is required")
+    return {
+        "device_id": normalized_device_id,
+        "role": role,
+        "content": normalized_content,
+        "metadata": dict(metadata or {}),
+    }
+
+
 def model_history_content(record: dict[str, Any]) -> str:
     """Add private prior tool outputs to model history, never user-facing turns."""
     content = str(record.get("content", ""))
@@ -589,14 +611,7 @@ class LocalConversationStore:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        normalized_device_id = " ".join(device_id.split()).strip()
-        normalized_content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
-        if role not in ("user", "assistant"):
-            raise ValueError("Conversation role must be user or assistant")
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", normalized_device_id):
-            raise ValueError("Conversation device ID is invalid")
-        if not normalized_content:
-            raise ValueError("Conversation content is required")
+        turn = normalized_conversation_turn(device_id, role, content, metadata)
         with self.lock:
             payload = self._load()
             session = next(
@@ -608,14 +623,50 @@ class LocalConversationStore:
             now = self._now()
             record = {
                 "id": int(payload.get("next_turn_id", 1)),
-                "device_id": normalized_device_id,
-                "role": role,
-                "content": normalized_content,
-                "metadata": dict(metadata or {}),
+                **turn,
                 "created_at": now,
             }
             payload["next_turn_id"] = record["id"] + 1
             session.setdefault("turns", []).append(record)
+            session["last_turn_at"] = now
+            self._save(payload)
+
+    def append_exchange(
+        self,
+        session_id: str,
+        user_device_id: str,
+        user_content: str,
+        assistant_device_id: str,
+        assistant_content: str,
+        *,
+        assistant_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist one user/assistant exchange in a single local-file save."""
+        turns = [
+            normalized_conversation_turn(user_device_id, "user", user_content),
+            normalized_conversation_turn(
+                assistant_device_id,
+                "assistant",
+                assistant_content,
+                assistant_metadata,
+            ),
+        ]
+        with self.lock:
+            payload = self._load()
+            session = next(
+                (item for item in payload["sessions"] if str(item.get("id")) == session_id),
+                None,
+            )
+            if not session:
+                raise ValueError("Conversation session does not exist")
+            now = self._now()
+            next_id = int(payload.get("next_turn_id", 1))
+            records = [
+                {"id": next_id + index, **turn, "created_at": now}
+                for index, turn in enumerate(turns)
+            ]
+            payload["next_turn_id"] = next_id + len(records)
+            session.setdefault("turns", []).extend(records)
             session["last_turn_at"] = now
             self._save(payload)
 
@@ -866,25 +917,55 @@ class SupabaseConversationStore:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        normalized_device_id = " ".join(device_id.split()).strip()
-        normalized_content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
-        if role not in ("user", "assistant"):
-            raise ValueError("Conversation role must be user or assistant")
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", normalized_device_id):
-            raise ValueError("Conversation device ID is invalid")
-        if not normalized_content:
-            raise ValueError("Conversation content is required")
+        turn = normalized_conversation_turn(device_id, role, content, metadata)
         self._request(
             "POST",
             "/rest/v1/wearabllm_conversation_turns",
             {
                 "principal_id": self.principal_id,
                 "session_id": session_id,
-                "device_id": normalized_device_id,
-                "role": role,
-                "content": normalized_content,
-                "metadata": dict(metadata or {}),
+                **turn,
             },
+        )
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        encoded_session_id = urllib.parse.quote(session_id, safe="")
+        self._request(
+            "PATCH",
+            f"/rest/v1/wearabllm_conversation_sessions?id=eq.{encoded_session_id}",
+            {"last_turn_at": now},
+        )
+
+    def append_exchange(
+        self,
+        session_id: str,
+        user_device_id: str,
+        user_content: str,
+        assistant_device_id: str,
+        assistant_content: str,
+        *,
+        assistant_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Insert both sides of an exchange with one atomic PostgREST write."""
+        turns = [
+            normalized_conversation_turn(user_device_id, "user", user_content),
+            normalized_conversation_turn(
+                assistant_device_id,
+                "assistant",
+                assistant_content,
+                assistant_metadata,
+            ),
+        ]
+        self._request(
+            "POST",
+            "/rest/v1/wearabllm_conversation_turns",
+            [
+                {
+                    "principal_id": self.principal_id,
+                    "session_id": session_id,
+                    **turn,
+                }
+                for turn in turns
+            ],
         )
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         encoded_session_id = urllib.parse.quote(session_id, safe="")

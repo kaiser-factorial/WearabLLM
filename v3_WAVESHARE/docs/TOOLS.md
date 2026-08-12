@@ -127,6 +127,10 @@ that Markdown through a small DOM-based allowlist without injecting model HTML.
 Waveshare actions, direct Waveshare replies, and TTS calls receive a deterministic
 plain-text projection of the same semantic answer.
 
+The bridge persists each completed user/assistant exchange with one bulk turn
+insert. This prevents a partial database failure from leaving a user turn that
+appears to have received a Sphere reply when no assistant turn was stored.
+
 OpenAI distinguishes built-in tools such as web search from application-owned
 function tools. See [Using tools](https://developers.openai.com/api/docs/guides/tools),
 [Function calling](https://developers.openai.com/api/docs/guides/function-calling),

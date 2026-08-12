@@ -25,6 +25,8 @@ Opens `http://127.0.0.1:8787`.
 - Downloads any current or archived conversation as standalone HTML, structured
   JSON, or plain UTF-8 text. Exports use the client-visible API and never include
   private model tool context.
+- Keeps the conversation in a centered, bounded reading lane at extreme browser
+  zoom-out so left/right message alignment remains visually connected.
 - Moves archived conversations behind a compact bottom Archive control
 - Only the explicit Archive action moves a conversation behind that control;
   starting a new conversation no longer archives or clears the previous one.

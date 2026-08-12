@@ -238,14 +238,17 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(command, "RF")
         self.assertIn("internal error", reply)
         self.assertEqual(metadata, {"sources": [], "tool_results": []})
-        self.assertEqual(state.conversation_store.append.call_count, 2)
+        self.assertEqual(state.conversation_store.append.call_count, 0)
         self.assertEqual(
-            state.conversation_store.append.call_args_list[0],
-            call("session-1", "web-console", "user", "Remember several things about me."),
-        )
-        self.assertEqual(
-            state.conversation_store.append.call_args_list[1],
-            call("session-1", "web-console", "assistant", reply),
+            state.conversation_store.append_exchange.call_args,
+            call(
+                "session-1",
+                "web-console",
+                "Remember several things about me.",
+                "web-console",
+                reply,
+                assistant_metadata=None,
+            ),
         )
 
     def test_memory_mutation_withholds_web_search_even_after_prior_web_turn(self):
@@ -1444,10 +1447,14 @@ class BridgeStateTest(unittest.TestCase):
                 {"role": "user", "content": "What did we discuss?"},
             ],
         )
-        store.append.assert_has_calls([
-            call("session-1", "wearabllm-esp32", "user", "What did we discuss?"),
-            call("session-1", "wearabllm-esp32", "assistant", "Current shared reply."),
-        ])
+        store.append_exchange.assert_called_once_with(
+            "session-1",
+            "wearabllm-esp32",
+            "What did we discuss?",
+            "wearabllm-esp32",
+            "Current shared reply.",
+            assistant_metadata=None,
+        )
         state.clear_history()
         store.clear.assert_called_once_with()
 
@@ -1502,10 +1509,14 @@ class BridgeStateTest(unittest.TestCase):
 
         self.assertEqual(state.ask_llm("What should we do next?")[1], "Fresh session reply.")
         store.archive.assert_called_once_with({"id": "old-session", "last_turn_at": "2026-01-01T00:00:00Z"}, "The user was planning a move.")
-        store.append.assert_has_calls([
-            call("new-session", "wearabllm-unknown", "user", "What should we do next?"),
-            call("new-session", "wearabllm-unknown", "assistant", "Fresh session reply."),
-        ])
+        store.append_exchange.assert_called_once_with(
+            "new-session",
+            "wearabllm-unknown",
+            "What should we do next?",
+            "wearabllm-unknown",
+            "Fresh session reply.",
+            assistant_metadata=None,
+        )
 
     def test_parse_command_sequence_rejects_unknown_code(self):
         with self.assertRaises(ValueError):
