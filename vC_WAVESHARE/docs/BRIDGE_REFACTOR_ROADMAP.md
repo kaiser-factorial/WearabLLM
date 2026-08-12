@@ -1,6 +1,6 @@
 # WearabLLM Bridge Refactor Roadmap
 
-Status: Phase 6 software-complete; physical Waveshare regression passed
+Status: Phase 7 software-complete on `protocol/v2-envelopes`; live rollout pending
 Created: 2026-08-12  
 Scope: `vC_WAVESHARE/bridge/wearabllm_bridge.py` and its client-facing contracts
 

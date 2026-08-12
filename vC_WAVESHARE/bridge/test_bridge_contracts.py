@@ -570,6 +570,94 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(sorted(missing), ["error"])
 
+    def test_v2_success_error_binary_and_mixed_client_contracts(self) -> None:
+        status, _, health = self.request_json("GET", "/v2/health", authorized=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(sorted(health), ["data", "ok"])
+        self.assertTrue(health["ok"])
+        self.assertEqual(health["data"]["service"], "wearabllm-bridge")  # type: ignore[index]
+
+        status, _, query = self.request_json(
+            "POST",
+            "/v2/query_text",
+            body=b'{"transcript":"hello from v2"}',
+            headers={"Content-Type": "application/json"},
+            device_id="wearabllm-android",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(sorted(query), ["data", "ok"])
+        self.assertEqual(query["data"]["transcript"], "hello from v2")  # type: ignore[index]
+        self.assertNotIn("ok", query["data"])  # type: ignore[operator]
+
+        status, headers, failure = self.request_json(
+            "POST",
+            "/v2/query_text",
+            body=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(sorted(failure), ["error", "ok"])
+        self.assertFalse(failure["ok"])
+        self.assertEqual(failure["error"]["code"], "bad_request")  # type: ignore[index]
+        self.assertEqual(failure["error"]["message"], "Missing transcript")  # type: ignore[index]
+        self.assertEqual(failure["error"]["request_id"], headers[REQUEST_ID_HEADER])  # type: ignore[index]
+
+        for method, path, expected_status, expected_code, request_kwargs in (
+            ("GET", "/v2/admin/config", 401, "unauthorized", {"authorized": False}),
+            ("GET", "/v2/not-found", 404, "not_found", {}),
+            (
+                "POST",
+                "/v2/query",
+                413,
+                "payload_too_large",
+                {
+                    "body": b"x" * (self.state.args.max_audio_bytes + 1),
+                    "headers": {"Content-Type": "audio/wav"},
+                },
+            ),
+        ):
+            with self.subTest(path=path):
+                status, _, typed_failure = self.request_json(
+                    method,
+                    path,
+                    **request_kwargs,
+                )
+                self.assertEqual(status, expected_status)
+                self.assertFalse(typed_failure["ok"])
+                self.assertEqual(typed_failure["error"]["code"], expected_code)  # type: ignore[index]
+
+        status, _, body = self.request(
+            "POST",
+            "/v2/tts",
+            body=b'{"text":"binary remains binary"}',
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body[:4], b"RIFF")
+
+        status, _, created = self.request_json(
+            "POST",
+            "/v2/interactions",
+            body=json.dumps(
+                {
+                    "transcript": "mixed protocol delivery",
+                    "origin_device_id": "wearabllm-android",
+                    "target_device_id": "wearabllm-esp32",
+                    "idempotency_key": "phase-seven-mixed-contract",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            device_id="wearabllm-android",
+        )
+        action_id = created["data"]["action"]["id"]  # type: ignore[index]
+        status, _, claimed = self.request_json(
+            "GET",
+            "/v1/devices/wearabllm-esp32/actions",
+            device_id="wearabllm-esp32",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(claimed["action"]["id"], action_id)  # type: ignore[index]
+
 
 if __name__ == "__main__":
     unittest.main()

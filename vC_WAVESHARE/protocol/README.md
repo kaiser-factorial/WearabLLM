@@ -313,3 +313,8 @@ the same 9-command set at bridge startup.
 The `/v1/tts` endpoint is intentionally separate from `/v1/query` for now. The default firmware can keep the LED/display loop stable while speaker playback and TTS transport are tested independently.
 
 When `CONFIG_WEARABLLM_AUDIO_OUT_ENABLED` and `CONFIG_WEARABLLM_TTS_ENABLED` are both enabled, firmware posts the bridge `reply` text to `CONFIG_WEARABLLM_TTS_URL` after a successful `/v1/query` response and attempts to play the returned WAV. TTS fetch/play failures are logged and should not block the LED/display response.
+# HTTP protocol versions
+
+The bridge's frozen legacy contract remains under `/v1`. The normalized JSON
+envelope, shared fixtures, and route inventory for parallel `/v2` clients live
+in [`v2/`](v2/). Firmware remains on `/v1` until a separately verified rollout.

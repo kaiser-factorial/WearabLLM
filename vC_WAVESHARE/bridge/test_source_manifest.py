@@ -25,6 +25,8 @@ class SourceManifestTest(unittest.TestCase):
         self.assertIn("vC_WAVESHARE/bridge/sphere_tools.py", files)
         self.assertIn("vC_WAVESHARE/bridge/source_code.py", files)
         self.assertIn("vC_WAVESHARE/app/src/App.tsx", files)
+        self.assertIn("vC_WAVESHARE/protocol/v2/envelope.schema.json", files)
+        self.assertIn("vC_WAVESHARE/protocol/v2/fixtures.json", files)
         self.assertIn("vC_WAVESHARE/firmware/main/main.c", files)
         self.assertIn("supabase/migrations/20260810030000_add_hybrid_memory_search.sql", files)
         lowered = "\n".join(files).lower()
@@ -54,6 +56,7 @@ class SourceManifestTest(unittest.TestCase):
         self.assertIn("bridge/privileged_service.py", relative)
         self.assertIn("bridge/provider_adapters.py", relative)
         self.assertIn("bridge/tool_activity.py", relative)
+        self.assertIn("bridge/v2_protocol.py", relative)
         self.assertIn("COPY bridge/bridge_contracts.py ./bridge_contracts.py", dockerfile)
         self.assertIn("COPY bridge/bridge_config.py ./bridge_config.py", dockerfile)
         self.assertIn("COPY bridge/bridge_ports.py ./bridge_ports.py", dockerfile)
@@ -67,6 +70,7 @@ class SourceManifestTest(unittest.TestCase):
         self.assertIn("COPY bridge/privileged_service.py ./privileged_service.py", dockerfile)
         self.assertIn("COPY bridge/provider_adapters.py ./provider_adapters.py", dockerfile)
         self.assertIn("COPY bridge/tool_activity.py ./tool_activity.py", dockerfile)
+        self.assertIn("COPY bridge/v2_protocol.py ./v2_protocol.py", dockerfile)
 
 
 if __name__ == "__main__":

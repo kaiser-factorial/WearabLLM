@@ -46,6 +46,26 @@ class RouteMatchingTest(unittest.TestCase):
         self.assertIsNone(match_route("POST", "/v1/devices/not valid/actions"))
         self.assertIsNone(match_route("DELETE", "/v1/query_text"))
 
+    def test_v2_routes_share_handlers_but_report_their_protocol_version(self) -> None:
+        query = match_route("POST", "/v2/query_text")
+        health = match_route("GET", "/v2/health")
+        action_id = "00000000-0000-0000-0000-000000000000"
+        ack = match_route(
+            "POST",
+            f"/v2/devices/wearabllm-esp32/actions/{action_id}/ack",
+        )
+
+        assert query is not None
+        assert health is not None
+        assert ack is not None
+        self.assertEqual(query.endpoint, "_handle_text_query")
+        self.assertEqual(health.endpoint, "_handle_health")
+        self.assertEqual(ack.path_arguments, ("wearabllm-esp32", action_id))
+        self.assertEqual(query.protocol_version, 2)
+        self.assertEqual(health.protocol_version, 2)
+        self.assertEqual(ack.protocol_version, 2)
+        self.assertEqual(match_route("POST", "/v1/query_text").protocol_version, 1)  # type: ignore[union-attr]
+
     def test_every_route_targets_a_handler_endpoint(self) -> None:
         handler = make_handler(
             SimpleNamespace(),

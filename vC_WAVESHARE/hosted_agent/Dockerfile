@@ -24,6 +24,7 @@ COPY bridge/provider_adapters.py ./provider_adapters.py
 COPY bridge/source_code.py ./source_code.py
 COPY bridge/sphere_tools.py ./sphere_tools.py
 COPY bridge/tool_activity.py ./tool_activity.py
+COPY bridge/v2_protocol.py ./v2_protocol.py
 COPY bridge/wearabllm_bridge.py ./wearabllm_bridge.py
 COPY source_bundle.json ./source_bundle.json
 
