@@ -23,6 +23,12 @@ Android and the browser share the same conversation and can optionally target
 the Waveshare. Targeted messages remain queued until the board claims them and
 are marked played only after display/TTS finishes successfully.
 
+Sphere also has bounded model-facing tools for passive body status, hybrid
+household memory, read-only source inspection, cross-body expression, and
+capability-driven sensors. The external `ducati-temp-sensor` ESP32-S3 body can
+register sensors, return authenticated readings, and service bounded scheduled
+loops without exposing an inbound home-network port.
+
 The laptop bridge is retained for development but is not required during normal
 hosted conversations. The dashboard is still served locally.
 
@@ -52,6 +58,11 @@ voice:    marin
 Supabase is the hosted backend for conversation sessions/turns, archives,
 agent settings, compact durable memory, richer memory schema, device actions,
 and transcript events.
+
+The hosted tool loop is bounded to eight rounds. Public conversation metadata
+contains concise tool activity only; bounded raw tool context is restored
+privately for later model turns. Completed user/assistant exchanges use one
+bulk insert so a partial write cannot leave a new orphan user turn.
 
 ## Firmware
 
@@ -137,9 +148,12 @@ cd ..
 Open `http://127.0.0.1:8787`. The local Python proxy adds device authentication
 upstream; browser JavaScript never receives the token.
 
-The dashboard includes body presence, normal chat ordering, optimistic sends,
-inline thinking, conversation history, new/rename/archive controls, live model
-and TTS settings, and optional Waveshare delivery.
+The dashboard includes body presence, normal chat ordering, safe lightweight
+Markdown, optimistic sends, inline thinking, conversation history,
+new/rename/archive controls, live model and TTS settings, optional Waveshare
+delivery, and a Sensor tab. Any current or archived conversation can be
+downloaded as standalone HTML, structured JSON, or plain text. At extreme
+zoom-out, messages remain inside a centered 1,180px reading lane.
 
 ## Android
 
@@ -156,15 +170,20 @@ JDK/SDK and release-build details.
 
 ## Verification
 
-As of 2026-08-11:
+Hardware last verified on 2026-08-09; software last verified on 2026-08-12:
 
 - the user confirmed a physical Waveshare voice interaction works
 - hosted query/TLS and Supabase queue polling are live
 - dashboard-to-Waveshare display/TTS delivery works
 - Android connects to hosted Sphere and shares conversation state
-- all 131 bridge tests pass on Python 3.12
-- Android typechecking and protocol tests pass
+- all 149 bridge tests pass on Python 3.12
+- six synthetic sensor protocol routes pass
+- Android typechecking and protocol tests pass (retained 2026-08-09 evidence)
 - firmware builds, passes the image gate, flashes, and boots on hardware
+  (retained 2026-08-09 evidence)
+- all 14 Supabase migrations through `20260812000000` match remote
+- live health reports Supabase conversation/memory/action backends, hybrid
+  memory, source tools, and an eight-round tool limit
 
 See `docs/STATUS.md` for the current verified/not-yet-verified boundary and
 `docs/PINMAP.md` for hardware wiring. See `docs/TOOLS.md` for every model tool,

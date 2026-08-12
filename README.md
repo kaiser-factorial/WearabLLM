@@ -29,7 +29,14 @@ colored glow/text and optional local speech.
 Device heartbeats distinguish bodies that are online from bodies that are
 unplugged or inactive.
 
-Verified on 2026-08-09:
+The current hosted agent also exposes bounded tools for body status, household
+memory, source inspection, cross-body expression, and capability-driven
+sensors. The initial external sensor body is the Ducati ESP32-S3 sensor hub;
+its firmware lives alongside the Ducati project and registers temperature as a
+structured capability rather than hard-coding a temperature-only Sphere tool.
+
+Hardware last verified on 2026-08-09; hosted software and dashboard last
+verified on 2026-08-12:
 
 - Waveshare voice request through the hosted agent and audible response
 - Android connection and shared chat through Wi-Fi or cellular-capable HTTPS
@@ -38,8 +45,19 @@ Verified on 2026-08-09:
 - live OpenAI model, TTS model, and voice selection from the dashboard
 - Supabase-backed conversations, agent settings, durable-memory substrate, and
   device-action queue
-- 79 Python bridge tests, Android typechecking/protocol tests, firmware build,
-  image-coherence gate, physical flash/boot, and hosted health checks
+- model-facing memory search/remember/confirm/correct/forget, read-only source
+  inspection, cross-body expression, sensor discovery/read/loop/cancel, and
+  built-in web search
+- bounded private tool context preserved across turns without exposing raw
+  results to dashboard clients
+- safe Markdown in the dashboard with plain-text projection for Waveshare/TTS
+- conversation export as standalone HTML, structured JSON, or plain text
+- atomic user/assistant persistence so partial writes cannot create new orphan
+  exchanges
+- 149 Python bridge tests, six synthetic sensor-route cases, hosted health,
+  migration sync, and wide/mobile dashboard QA rerun on 2026-08-12
+- Android typechecking/protocol tests, firmware build, image-coherence gate,
+  and physical flash/boot retained as verified 2026-08-09 evidence
 
 This remains a private prototype rather than a packaged consumer product. See
 [Project boundaries](#project-boundaries) for the important gaps.
@@ -58,6 +76,9 @@ This remains a private prototype rather than a packaged consumer product. See
 ┌─────────────────┐   audio/actions   │ Private HF Space    │
 │ Waveshare body  │<─────────────────>│ WearabLLM bridge    │
 └─────────────────┘                   └──────────┬──────────┘
+┌─────────────────┐   sensor actions            │
+│ Ducati sensor   │<─────────────────────────────┤
+└─────────────────┘                              │
                                                 │
                                       ┌─────────┴─────────┐
                                       v                   v
@@ -91,6 +112,7 @@ Stable body IDs keep transport infrastructure separate from assistant bodies:
 | Waveshare | `wearabllm-esp32` | Home audio/light/display body |
 | Android | `wearabllm-android` | Mobile chat body |
 | Web console | `web-console` | Browser chat body |
+| Ducati sensor | `ducati-temp-sensor` | Capability-driven physical sensor body |
 | Wearable | `wearabllm-wearable` | Reserved future portable body |
 
 All bodies use one principal conversation. Turns retain their originating
@@ -107,6 +129,9 @@ queued -> dispatched -> delivered -> rendered -> completed
 
 Each target has its own action row, expiry, idempotency key, and terminal
 status. The UI must not claim `played` until that target acknowledges playback.
+Sensor readings follow the same rule: Sphere reports a measurement only after
+the authenticated sensor body returns a terminal acknowledgement containing
+the requested capability IDs and real values.
 
 ## Physical Response Language
 
@@ -329,11 +354,14 @@ The current system is functional, but these items remain intentionally open:
 - archived conversations cannot yet be restored or deleted from the UI
 - long-response playback, retries, lease expiry, and power-loss behavior need
   a recorded regression matrix
+- the capability-driven Ducati sensor firmware is maintained in the separate
+  `ducati_relay` repository; humidity and light are planned capabilities, not
+  currently registered hardware
 
-The tool migrations and private hosted bridge were applied and live-smoked on
-2026-08-11. Near-term priorities are to preserve and publish the verified
-clean-switch state, add a memory review UI, host the dashboard securely, and
-add Android distribution and OTA.
+All 14 migrations through `20260812000000` and the private hosted bridge were
+live-checked on 2026-08-12. The current feature set is pushed on draft PR #6;
+near-term priorities are to merge the reviewed branch, add a memory review UI,
+host the dashboard securely, and add Android distribution and OTA.
 
 ## Development Guardrails
 
