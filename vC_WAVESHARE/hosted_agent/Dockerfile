@@ -14,10 +14,13 @@ COPY bridge/bridge_service.py ./bridge_service.py
 COPY bridge/device_config.py ./device_config.py
 COPY bridge/household_memory.py ./household_memory.py
 COPY bridge/http_transport.py ./http_transport.py
+COPY bridge/model_pipeline.py ./model_pipeline.py
+COPY bridge/model_protocol.py ./model_protocol.py
 COPY bridge/observability.py ./observability.py
 COPY bridge/privileged_service.py ./privileged_service.py
 COPY bridge/source_code.py ./source_code.py
 COPY bridge/sphere_tools.py ./sphere_tools.py
+COPY bridge/tool_activity.py ./tool_activity.py
 COPY bridge/wearabllm_bridge.py ./wearabllm_bridge.py
 COPY source_bundle.json ./source_bundle.json
 

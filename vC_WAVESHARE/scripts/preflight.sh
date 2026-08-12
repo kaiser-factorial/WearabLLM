@@ -121,7 +121,10 @@ step "Python compile checks"
     vC_WAVESHARE/bridge/bridge_service.py \
     vC_WAVESHARE/bridge/device_config.py \
     vC_WAVESHARE/bridge/http_transport.py \
+    vC_WAVESHARE/bridge/model_pipeline.py \
+    vC_WAVESHARE/bridge/model_protocol.py \
     vC_WAVESHARE/bridge/privileged_service.py \
+    vC_WAVESHARE/bridge/tool_activity.py \
     vC_WAVESHARE/bridge/wearabllm_bridge.py
 
 step "Protocol consistency"

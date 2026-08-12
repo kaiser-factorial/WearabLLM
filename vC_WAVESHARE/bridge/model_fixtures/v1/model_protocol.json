@@ -1,0 +1,66 @@
+[
+  {
+    "name": "leading command",
+    "raw": "GC\nYes, absolutely.",
+    "state": "parsed_reply",
+    "strategy": "leading_command",
+    "command": "GC",
+    "reply": "Yes, absolutely."
+  },
+  {
+    "name": "labeled response",
+    "raw": "LED: YP\nReply: Maybe, test it once more.",
+    "state": "parsed_reply",
+    "strategy": "leading_command",
+    "command": "YP",
+    "reply": "Maybe, test it once more."
+  },
+  {
+    "name": "fenced json",
+    "raw": "```json\n{\"code\":\"RF\",\"answer\":\"Stop and check power.\"}\n```",
+    "state": "parsed_reply",
+    "strategy": "json",
+    "command": "RF",
+    "reply": "Stop and check power."
+  },
+  {
+    "name": "embedded json",
+    "raw": "Here is the result:\n{\"command\":\"GP\",\"reply\":\"Yes, keep going gently.\"}\nDone.",
+    "state": "parsed_reply",
+    "strategy": "embedded_json",
+    "command": "GP",
+    "reply": "Yes, keep going gently."
+  },
+  {
+    "name": "embedded command label",
+    "raw": "I would be careful here. LED: RF",
+    "state": "parsed_reply",
+    "strategy": "embedded_command",
+    "command": "RF",
+    "reply": "I would be careful here."
+  },
+  {
+    "name": "malformed json",
+    "raw": "```json\n{\"command\":\"XX\",\"reply\":\"broken\"\n```",
+    "state": "fallback",
+    "reason": "unknown_command",
+    "command": "BS",
+    "reply": "{\"command\":\"XX\",\"reply\":\"broken\""
+  },
+  {
+    "name": "unknown command",
+    "raw": "XX\nNo known LED classification.",
+    "state": "fallback",
+    "reason": "unknown_command",
+    "command": "BS",
+    "reply": "XX\nNo known LED classification."
+  },
+  {
+    "name": "empty output",
+    "raw": "",
+    "state": "fallback",
+    "reason": "empty",
+    "command": "BS",
+    "reply": ""
+  }
+]
