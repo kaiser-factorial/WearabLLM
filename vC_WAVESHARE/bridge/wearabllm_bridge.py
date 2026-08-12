@@ -54,6 +54,7 @@ from bridge_contracts import (
     SourceReference,
     ToolActivity,
 )
+from bridge_service import BridgeService
 from durable_memory import (
     DEFAULT_CONVERSATION_FILE,
     DEFAULT_MEMORY_FILE,
@@ -399,6 +400,51 @@ class BridgeState:
                 self.source_store = SourceCodeStore(source_bundle)
             except ValueError as exc:
                 self._emit_exception("bridge.source_tools_unavailable", exc, level="warning")
+        self.bridge_service = self._build_bridge_service()
+
+    def _build_bridge_service(self) -> BridgeService:
+        if not hasattr(self, "history"):
+            self.history = []
+        if not hasattr(self, "history_lock"):
+            self.history_lock = threading.Lock()
+        if not hasattr(self, "device_presence"):
+            self.device_presence = {}
+        if not hasattr(self, "device_presence_lock"):
+            self.device_presence_lock = threading.Lock()
+        if not hasattr(self, "sensor_manifests"):
+            self.sensor_manifests = {}
+        if not hasattr(self, "sensor_manifests_lock"):
+            self.sensor_manifests_lock = threading.Lock()
+        return BridgeService(
+            assistant_gateway=self.generate_assistant_result,
+            action_queue=getattr(self, "action_queue", None),
+            conversation_store=getattr(self, "conversation_store", None),
+            conversation_backend=getattr(self, "conversation_backend", "local"),
+            history_provider=lambda: self.history,
+            history_clearer=lambda: self.history.clear(),
+            history_lock=self.history_lock,
+            plain_text=markdown_to_plain_text,
+            known_device_bodies=KNOWN_DEVICE_BODIES,
+            infrastructure_device_ids=INFRASTRUCTURE_DEVICE_IDS,
+            exception_sink=self._emit_exception,
+            monotonic_clock=time.monotonic,
+            presence_ttl_seconds=DEVICE_PRESENCE_TTL_SECONDS,
+            device_presence=self.device_presence,
+            device_presence_lock=self.device_presence_lock,
+            sensor_manifests=self.sensor_manifests,
+            sensor_manifests_lock=self.sensor_manifests_lock,
+            debug_wav_saver=self.save_debug_wav,
+            wav_inspector=inspect_wav,
+            transcriber=self.transcribe,
+            capture_recorder=self.record_capture,
+        )
+
+    def _service(self) -> BridgeService:
+        service = getattr(self, "bridge_service", None)
+        if service is None:
+            service = self._build_bridge_service()
+            self.bridge_service = service
+        return service
 
     def _emit_event(self, event: str, *, level: str = "info", **fields: Any) -> None:
         emit_event(event, level=level, sink=getattr(self, "event_sink", None), **fields)
@@ -433,6 +479,12 @@ class BridgeState:
             source="test-fallback",
         )
 
+    def public_agent_config(self) -> dict[str, Any]:
+        return self.agent_config.snapshot().public_dict()
+
+    def update_agent_config(self, patch: dict[str, Any]) -> AgentConfig:
+        return self.agent_config.update(patch)
+
     def _embed_household_text(self, text: str) -> list[float]:
         """Generate one normalized-size vector without exposing it outside the bridge."""
         if self.args.provider != "openai" or not self.openai_client:
@@ -452,36 +504,16 @@ class BridgeState:
         return embedding
 
     def touch_device(self, device_id: str) -> None:
-        if device_id in INFRASTRUCTURE_DEVICE_IDS:
-            return
-        validate_device_id(device_id)
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        with self.device_presence_lock:
-            self.device_presence[device_id] = {
-                "monotonic": time.monotonic(),
-                "last_seen_at": now,
-            }
+        self._service().touch_device(device_id)
 
     def register_sensor_manifest(self, device_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
-        normalized = normalize_sensor_manifest(device_id, manifest)
-        with self.sensor_manifests_lock:
-            self.sensor_manifests[device_id] = normalized
-        self.touch_device(device_id)
-        return normalized
+        return self._service().register_sensor_manifest(device_id, manifest)
 
     def sensor_catalog(self, device_id: str = "") -> list[dict[str, Any]]:
-        target = validate_device_id(device_id) if device_id else ""
-        with self.sensor_manifests_lock:
-            manifests = [dict(value) for key, value in self.sensor_manifests.items() if not target or key == target]
-        return sorted(manifests, key=lambda value: str(value.get("device_id", "")))
+        return self._service().sensor_catalog(device_id)
 
     def _presence_for(self, device_id: str) -> tuple[bool, str | None]:
-        with self.device_presence_lock:
-            presence = self.device_presence.get(device_id)
-            if not presence:
-                return False, None
-            online = time.monotonic() - float(presence["monotonic"]) <= DEVICE_PRESENCE_TTL_SECONDS
-            return online, str(presence.get("last_seen_at") or "") or None
+        return self._service().presence_for(device_id)
 
     @staticmethod
     def _model_ids(payload: Any) -> list[str]:
@@ -688,7 +720,7 @@ class BridgeState:
         recent_actions: list[dict[str, Any]] = []
         if include_recent_actions:
             for device_id in requested:
-                actions = self.action_queue.list(target_device_id=device_id, limit=1)
+                actions = self.list_actions(target_device_id=device_id, limit=1)
                 if not actions:
                     continue
                 action = actions[0]
@@ -1099,22 +1131,10 @@ class BridgeState:
         return self._make_persistence_result(status, session_id=session_id).to_legacy_dict()
 
     def _prepare_active_session(self) -> str:
-        if not self.conversation_store:
-            return ""
-        session = self.conversation_store.active_session()
-        if session and self.conversation_store.session_expired(session):
-            summary = ""
-            try:
-                turns = self.conversation_store.turns(str(session["id"]))
-                summary = self._summarize_session(turns)
-                self.extract_and_store_session_memories(summary)
-            except Exception as exc:
-                self._emit_exception("bridge.session_consolidation_failed", exc, level="warning")
-            self.conversation_store.archive(session, summary)
-            session = None
-        if not session:
-            session = self.conversation_store.create_session()
-        return str(session["id"])
+        return self._service().prepare_active_session(
+            summarize=self._summarize_session,
+            extract_memories=self.extract_and_store_session_memories,
+        )
 
     def _summarize_session(self, turns: list[dict[str, Any]]) -> str:
         messages = [
@@ -1587,122 +1607,60 @@ class BridgeState:
                         seen.add(url)
 
     def clear_history(self) -> None:
-        with self.history_lock:
-            if self.conversation_store:
-                self.conversation_store.clear()
-            self.history.clear()
+        self._service().clear_history()
 
     def record_sensor_action(self, action: dict[str, Any]) -> None:
-        """Publish confirmed loop readings without claiming unverified values."""
-        result = action.get("result") if isinstance(action.get("result"), dict) else None
-        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
-        if not result or int(payload.get("schedule_count", 1)) <= 1:
-            return
-        if not self.conversation_store:
-            return
-        try:
-            session = self.conversation_store.active_session() or self.conversation_store.create_session()
-            index = int(payload.get("schedule_index", 1))
-            count = int(payload.get("schedule_count", 1))
-            readings = result.get("readings") if isinstance(result.get("readings"), list) else []
-            summary = ", ".join(
-                f"{row.get('sensor_id')}: {float(row.get('value')):.2f} {row.get('unit')}"
-                for row in readings
-                if isinstance(row, dict)
-            )
-            if not summary:
-                return
-            self.conversation_store.append(
-                str(session["id"]),
-                "ducati-temp-sensor",
-                "assistant",
-                f"Sensor loop {index}/{count}: {summary}.",
-                metadata={
-                    "sensor_reading": result,
-                    "sensor_schedule_id": payload.get("schedule_id"),
-                    "sensor_action_id": action.get("id"),
-                },
-            )
-        except Exception as exc:
-            self._emit_exception("bridge.sensor_persistence_failed", exc, level="warning")
+        self._service().record_sensor_action(action)
+
+    def list_actions(
+        self,
+        *,
+        target_device_id: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self._service().list_actions(
+            target_device_id=target_device_id,
+            limit=limit,
+        )
+
+    def get_action(self, action_id: str) -> dict[str, Any]:
+        return self._service().get_action(action_id)
+
+    def claim_action(
+        self,
+        *,
+        requesting_device_id: str,
+        target_device_id: str,
+    ) -> dict[str, Any] | None:
+        return self._service().claim_action(
+            requesting_device_id=requesting_device_id,
+            target_device_id=target_device_id,
+        )
+
+    def acknowledge_action(self, **kwargs: Any) -> dict[str, Any]:
+        return self._service().acknowledge_action(**kwargs)
+
+    def assert_target_device(
+        self,
+        requesting_device_id: str,
+        target_device_id: str,
+    ) -> str:
+        return self._service().assert_target_device(
+            requesting_device_id,
+            target_device_id,
+        )
 
     def start_new_conversation(self) -> dict[str, Any]:
-        """End and preserve a nonempty active thread, then create its replacement."""
-        ended_session_id = None
-        saved_turns = 0
-        with self.history_lock:
-            if self.conversation_store:
-                active = self.conversation_store.active_session()
-                active_turns = (
-                    self.conversation_store.turns(str(active["id"])) if active else []
-                )
-                if active and active_turns:
-                    self.conversation_store.end_session(active)
-                    ended_session_id = str(active["id"])
-                    saved_turns = len(active_turns)
-                    session = self.conversation_store.create_session()
-                elif active:
-                    # Repeated + clicks on an empty thread should not create clutter.
-                    session = active
-                else:
-                    session = self.conversation_store.create_session()
-            else:  # Focused tests may construct BridgeState without the full store.
-                session = None
-            self.history.clear()
-        return {
-            "ok": True,
-            "history_messages": 0,
-            "ended_session_id": ended_session_id,
-            "saved_turns": saved_turns,
-            "active_session_id": str(session["id"]) if session else None,
-            "session": session,
-        }
+        """Compatibility facade for service-owned conversation rotation."""
+        return self._service().start_new_conversation()
 
     def archive_conversation(self, session_id: str) -> dict[str, Any]:
-        """Archive one persisted thread without deleting its transcript."""
-        clean_session_id = session_id.strip().lower()
-        if not re.fullmatch(r"[a-f0-9-]{36}", clean_session_id):
-            raise ValueError("Invalid conversation session ID")
-        if not self.conversation_store:
-            raise RuntimeError("Conversation persistence is not configured")
-        with self.history_lock:
-            sessions = self.conversation_store.list_sessions(limit=100)
-            session = next(
-                (item for item in sessions if str(item.get("id", "")).lower() == clean_session_id),
-                None,
-            )
-            if not session:
-                raise LookupError("Conversation session not found")
-            active = self.conversation_store.active_session()
-            was_active = bool(active and str(active.get("id", "")).lower() == clean_session_id)
-            already_archived = bool(session.get("archived_at"))
-            archived_turns = 0 if already_archived else self.conversation_store.archive(session)
-            replacement = None
-            if was_active:
-                replacement = self.conversation_store.create_session()
-                self.history.clear()
-        return {
-            "ok": True,
-            "archived_session_id": clean_session_id,
-            "archived_turns": archived_turns,
-            "already_archived": already_archived,
-            "active_session_id": str(replacement["id"])
-            if replacement
-            else str(active["id"])
-            if active and not was_active
-            else None,
-            "session": replacement,
-        }
+        """Compatibility facade for service-owned conversation archival."""
+        return self._service().archive_conversation(session_id)
 
     def rename_conversation(self, session_id: str, title: str) -> dict[str, Any]:
-        """Persist a user-authored title shared by every Sphere client."""
-        clean_session_id = session_id.strip().lower()
-        if not re.fullmatch(r"[a-f0-9-]{36}", clean_session_id):
-            raise ValueError("Invalid conversation session ID")
-        if not self.conversation_store:
-            raise RuntimeError("Conversation persistence is not configured")
-        session = self.conversation_store.rename(clean_session_id, title)
-        return {"ok": True, "session": session}
+        """Compatibility facade for service-owned conversation naming."""
+        return self._service().rename_conversation(session_id, title)
 
     def conversation_snapshot(
         self,
@@ -1711,130 +1669,15 @@ class BridgeState:
         session_id: str | None = None,
         limit: int = 200,
     ) -> dict[str, Any]:
-        """Return shared conversation turns for the console, multi-device ready."""
-        limit = max(1, min(int(limit), 500))
-        filter_device = (device_id or "").strip() or None
-        requested_session = (session_id or "").strip() or None
-
-        if self.conversation_store:
-            active = self.conversation_store.active_session()
-            sessions = self.conversation_store.list_sessions(limit=20)
-            target_session = None
-            if requested_session:
-                target_session = next(
-                    (item for item in sessions if str(item.get("id")) == requested_session),
-                    None,
-                )
-                if target_session is None and active and str(active.get("id")) == requested_session:
-                    target_session = active
-            else:
-                target_session = active
-
-            turns: list[dict[str, Any]] = []
-            if target_session:
-                turns = self.conversation_store.turns(str(target_session["id"]))
-            turns = [
-                {
-                    **turn,
-                    "metadata": {
-                        key: value
-                        for key, value in (
-                            turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
-                        ).items()
-                        if key != "model_tool_context"
-                    },
-                    "device_id": "web-console"
-                    if str(turn.get("device_id", "")).strip() in INFRASTRUCTURE_DEVICE_IDS
-                    else turn.get("device_id"),
-                }
-                for turn in turns
-            ]
-            if filter_device:
-                turns = [turn for turn in turns if str(turn.get("device_id", "")) == filter_device]
-            if len(turns) > limit:
-                turns = turns[-limit:]
-
-            seen_devices = {
-                str(turn.get("device_id", "")).strip()
-                for turn in turns
-                if str(turn.get("device_id", "")).strip()
-            }
-            if active and not filter_device:
-                seen_devices.update(self.conversation_store.list_device_ids(str(active["id"])))
-
-            return {
-                "ok": True,
-                "conversation_backend": self.conversation_backend,
-                "session": target_session,
-                "active_session_id": str(active["id"]) if active else None,
-                "sessions": sessions,
-                "turns": turns,
-                "devices": self._device_catalog(seen_devices),
-                "filter_device_id": filter_device,
-            }
-
-        with self.history_lock:
-            local_turns: list[dict[str, Any]] = []
-            for index, message in enumerate(self.history[-limit:]):
-                turn_device = str(message.get("device_id", "")).strip() or "wearabllm-unknown"
-                if turn_device in INFRASTRUCTURE_DEVICE_IDS:
-                    turn_device = "web-console"
-                local_turns.append(
-                    {
-                        "id": index + 1,
-                        "device_id": turn_device,
-                        "role": message.get("role", "user"),
-                        "content": message.get("content", ""),
-                        "created_at": None,
-                    }
-                )
-            if filter_device:
-                local_turns = [turn for turn in local_turns if turn["device_id"] == filter_device]
-            return {
-                "ok": True,
-                "conversation_backend": "local",
-                "session": None,
-                "active_session_id": None,
-                "sessions": [],
-                "turns": local_turns,
-                "devices": self._device_catalog(
-                    {
-                        str(turn.get("device_id", "")).strip()
-                        for turn in local_turns
-                        if str(turn.get("device_id", "")).strip()
-                    }
-                ),
-                "filter_device_id": filter_device,
-            }
+        """Compatibility facade for the normalized conversation view."""
+        return self._service().conversation_snapshot(
+            device_id=device_id,
+            session_id=session_id,
+            limit=limit,
+        )
 
     def _device_catalog(self, seen_device_ids: set[str]) -> list[dict[str, Any]]:
-        seen_device_ids = seen_device_ids - INFRASTRUCTURE_DEVICE_IDS
-        catalog: list[dict[str, Any]] = []
-        known_ids = {item["id"] for item in KNOWN_DEVICE_BODIES}
-        for body in KNOWN_DEVICE_BODIES:
-            entry = dict(body)
-            online, last_seen_at = self._presence_for(body["id"])
-            entry["seen"] = online
-            entry["online"] = online
-            entry["last_seen_at"] = last_seen_at
-            catalog.append(entry)
-        for device_id in sorted(seen_device_ids):
-            if device_id in known_ids:
-                continue
-            online, last_seen_at = self._presence_for(device_id)
-            catalog.append(
-                {
-                    "id": device_id,
-                    "label": device_id,
-                    "kind": "custom",
-                    "status": "active",
-                    "description": "Discovered device body",
-                    "seen": online,
-                    "online": online,
-                    "last_seen_at": last_seen_at,
-                }
-            )
-        return catalog
+        return self._service().device_catalog(seen_device_ids)
 
     def next_dry_run_command(self) -> str:
         if not self.dry_run_sequence:
@@ -1867,31 +1710,11 @@ class BridgeState:
         ).to_legacy_dict()
 
     def answer_query(self, query: QueryInput) -> QueryResult:
-        """Answer one validated query using typed model and persistence results."""
-        if not isinstance(query, QueryInput):
-            raise TypeError("query must be a QueryInput")
-        assistant = self.generate_assistant_result(
-            query.transcript,
-            device_id=query.device_id,
-            response_device_id=query.response_device_id,
-        )
-        response_device = query.response_device_id or query.device_id
-        transport_reply = (
-            markdown_to_plain_text(assistant.reply)
-            if response_device == "wearabllm-esp32"
-            else assistant.reply
-        )
-        return QueryResult(
-            command=assistant.command,
-            reply=transport_reply,
-            transcript=query.transcript,
-            audio_bytes=query.audio_bytes,
-            saved_wav=str(query.saved_wav) if query.saved_wav else None,
-            wav_info=query.wav_info,
-            sources=tuple(assistant.activity.sources),
-            tool_results=tuple(assistant.activity.tool_results),
-            persistence=assistant.persistence,
-        )
+        """Compatibility facade for service-owned query orchestration."""
+        return self._service().answer_query(query)
+
+    def answer_audio_query(self, wav_bytes: bytes, *, device_id: str) -> Any:
+        return self._service().answer_audio_query(wav_bytes, device_id=device_id)
 
     def create_interaction(
         self,
@@ -1914,36 +1737,8 @@ class BridgeState:
         ).to_legacy_dict()
 
     def create_interaction_result(self, request: InteractionInput) -> InteractionResult:
-        """Answer a prompt once, then queue the physical response for its target."""
-        if not isinstance(request, InteractionInput):
-            raise TypeError("request must be an InteractionInput")
-        origin = validate_device_id(request.origin_device_id)
-        target = validate_device_id(request.target_device_id)
-        response_device = (
-            validate_device_id(request.response_device_id)
-            if request.response_device_id
-            else origin
-        )
-        query = self.answer_query(
-            QueryInput(
-                transcript=request.transcript,
-                device_id=origin,
-                response_device_id=response_device,
-            )
-        )
-        action, created = self.action_queue.create(
-            origin_device_id=origin,
-            target_device_id=target,
-            transcript=query.transcript,
-            command=query.command,
-            reply=(
-                markdown_to_plain_text(query.reply)
-                if target == "wearabllm-esp32"
-                else query.reply
-            ),
-            idempotency_key=request.idempotency_key,
-        )
-        return InteractionResult(query=query, action=action, action_created=created)
+        """Compatibility facade for service-owned interaction orchestration."""
+        return self._service().create_interaction(request)
 
     def synthesize_tts_wav(self, text: str) -> bytes:
         text = markdown_to_plain_text(text)
@@ -2268,7 +2063,6 @@ def make_handler(
     return make_http_handler(
         state,
         event_sink=event_sink,
-        wav_inspector=inspect_wav,
     )
 
 
