@@ -10,6 +10,7 @@
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
+#include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -39,6 +40,16 @@ static const char *TAG = "wearabllm";
 #define TTS_CHUNK_TEXT_MAX 160
 #define ACTION_URL_MAX 384
 #define ACTION_ID_MAX 37
+
+static void set_bridge_identity_headers(esp_http_client_handle_t client)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    esp_http_client_set_header(client, "X-WearabLLM-Client", "waveshare");
+    esp_http_client_set_header(
+        client,
+        "X-WearabLLM-Client-Version",
+        (app && app->version[0] != '\0') ? app->version : "unknown");
+}
 
 #ifndef CONFIG_WEARABLLM_LED_SELF_TEST_ON_BOOT
 #define CONFIG_WEARABLLM_LED_SELF_TEST_ON_BOOT 0
@@ -721,6 +732,7 @@ static esp_err_t send_audio_to_bridge(
     }
 
     esp_http_client_set_header(client, "Content-Type", "audio/wav");
+    set_bridge_identity_headers(client);
     if (CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN[0] != '\0') {
         esp_http_client_set_header(client, "X-WearabLLM-Device-Token", CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN);
     }
@@ -808,6 +820,7 @@ static bool build_action_url(char *out, size_t capacity, const char *action_id)
 
 static void action_request_headers(esp_http_client_handle_t client)
 {
+    set_bridge_identity_headers(client);
     if (CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN[0] != '\0') {
         esp_http_client_set_header(client, "X-WearabLLM-Device-Token", CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN);
     }
@@ -1081,6 +1094,7 @@ static esp_err_t fetch_tts_wav(const char *reply, uint8_t **out_data, size_t *ou
     }
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
+    set_bridge_identity_headers(client);
     if (CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN[0] != '\0') {
         esp_http_client_set_header(client, "X-WearabLLM-Device-Token", CONFIG_WEARABLLM_BRIDGE_AUTH_TOKEN);
     }

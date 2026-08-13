@@ -4,6 +4,7 @@
     "GET /v2/health",
     "GET /v2/admin/config",
     "GET /v2/admin/catalog",
+    "GET /v2/admin/protocol-usage",
     "GET /v2/interactions",
     "GET /v2/interactions/{action_id}",
     "GET /v2/sensors",

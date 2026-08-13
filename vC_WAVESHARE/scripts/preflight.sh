@@ -94,7 +94,10 @@ step() {
 wait_for_bridge() {
     local url="http://127.0.0.1:${BRIDGE_PORT}/health"
     for _ in $(seq 1 60); do
-        if curl -fsS "${url}" >/dev/null 2>&1; then
+        if curl -fsS \
+            -H "X-WearabLLM-Client: preflight" \
+            -H "X-WearabLLM-Client-Version: 0.1.0" \
+            "${url}" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.25
@@ -127,6 +130,7 @@ step "Python compile checks"
     vC_WAVESHARE/bridge/model_protocol.py \
     vC_WAVESHARE/bridge/privileged_service.py \
     vC_WAVESHARE/bridge/provider_adapters.py \
+    vC_WAVESHARE/bridge/protocol_usage.py \
     vC_WAVESHARE/bridge/tool_activity.py \
     vC_WAVESHARE/bridge/v2_protocol.py \
     vC_WAVESHARE/bridge/wearabllm_bridge.py

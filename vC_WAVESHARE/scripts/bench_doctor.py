@@ -126,7 +126,14 @@ def bridge_health(base_url: str, timeout_seconds: float) -> dict[str, Any]:
         }
 
     try:
-        with urllib.request.urlopen(f"{base_url}/health", timeout=timeout_seconds) as response:
+        request = urllib.request.Request(
+            f"{base_url}/health",
+            headers={
+                "X-WearabLLM-Client": "bench-doctor",
+                "X-WearabLLM-Client-Version": "0.1.0",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             body = response.read().decode("utf-8", errors="replace")
             status = response.status
     except urllib.error.URLError as exc:

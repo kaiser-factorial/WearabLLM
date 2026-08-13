@@ -19,7 +19,9 @@ the completed bridge refactor.
 - The local Web dashboard and Waveshare firmware remain on v1.
 - The board's current firmware image passed a full physical regression on
   2026-08-12 and embeds `/v1/query` and `/v1/tts`.
-- There is no v1 removal date or production version-usage telemetry.
+- There is no v1 removal date. Privacy-safe production version-usage
+  instrumentation now exists, but its observation window has not been
+  collected.
 
 ## Workstream 1 — Migrate Web Deliberately
 
@@ -77,6 +79,10 @@ Exit gate:
   recorded together.
 
 ## Workstream 3 — Gather `/v1` Usage Evidence
+
+Implementation status: counters, client headers, durable aggregate migration,
+and the protected snapshot endpoint are complete. Applying the migration,
+deploying the tagged clients, and collecting the observation window remain.
 
 Add privacy-safe protocol-version observability before discussing removal.
 Route version is operational metadata; do not log tokens, transcripts, query

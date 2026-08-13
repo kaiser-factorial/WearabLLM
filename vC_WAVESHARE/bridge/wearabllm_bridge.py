@@ -113,6 +113,7 @@ from provider_adapters import (
     create_provider_client,
     validated_openai_client,
 )
+from protocol_usage import ProtocolUsageRecorder
 from source_code import DEFAULT_SOURCE_BUNDLE, SourceCodeStore
 from sphere_tools import (
     PendingMemoryConfirmationStore,
@@ -306,6 +307,27 @@ class BridgeState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.event_sink = getattr(args, "event_sink", None)
+        hosted = os.environ.get("WEARABLLM_HOSTED", "") == "1"
+        usage_backend = os.environ.get(
+            "WEARABLLM_PROTOCOL_USAGE_BACKEND",
+            "supabase" if hosted else "local",
+        ).strip().lower()
+        try:
+            usage_flush_seconds = float(
+                os.environ.get("WEARABLLM_PROTOCOL_USAGE_FLUSH_SECONDS", "60")
+            )
+        except ValueError:
+            usage_flush_seconds = 60.0
+        self.protocol_usage = ProtocolUsageRecorder(
+            principal_id=os.environ.get("WEARABLLM_PRINCIPAL_ID", "primary"),
+            supabase_url=(os.environ.get("SUPABASE_URL", "") if usage_backend == "supabase" else ""),
+            supabase_service_role_key=(
+                os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+                if usage_backend == "supabase"
+                else ""
+            ),
+            flush_interval_seconds=usage_flush_seconds,
+        )
         self.policy = BridgePolicy(shared_token_grants_admin=True)
         self.openai_client = create_provider_client(
             OpenAI,
@@ -773,6 +795,16 @@ class BridgeState:
         if bool(getattr(self.args, "allow_device_config", False)):
             config["firmware_config"] = self.firmware_config_status()
         return config
+
+    def record_protocol_usage(self, **values: Any) -> None:
+        """Record bounded metadata without blocking on durable persistence."""
+        self.protocol_usage.record(**values)
+
+    def protocol_usage_snapshot(self, *, days: int = 30) -> dict[str, Any]:
+        return self.protocol_usage.snapshot(days=days)
+
+    def close(self) -> None:
+        self.protocol_usage.close()
 
     def sphere_status_snapshot(
         self,
@@ -1807,6 +1839,7 @@ def main() -> None:
         emit_event("bridge.stopped")
     finally:
         server.server_close()
+        state.close()
 
 
 if __name__ == "__main__":

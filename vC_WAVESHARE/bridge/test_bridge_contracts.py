@@ -84,6 +84,7 @@ class BridgeContractTest(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        self.state.close()
         self.temp_dir.cleanup()
 
     def request(
@@ -657,6 +658,90 @@ class BridgeContractTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(claimed["action"]["id"], action_id)  # type: ignore[index]
+
+    def test_protocol_usage_is_protected_aggregate_only_and_client_identified(self) -> None:
+        client_headers = {
+            "Content-Type": "application/json",
+            "X-WearabLLM-Client": "android",
+            "X-WearabLLM-Client-Version": "0.1.0",
+        }
+        status, _, _ = self.request_json(
+            "POST",
+            "/v2/query_text",
+            body=b'{"transcript":"aggregate counter contract"}',
+            headers=client_headers,
+            device_id="wearabllm-android",
+        )
+        self.assertEqual(status, 200)
+
+        status, _, _ = self.request_json(
+            "GET",
+            "/health",
+            authorized=False,
+            headers={
+                "X-WearabLLM-Client": "bench-smoke",
+                "X-WearabLLM-Client-Version": "0.1.0",
+            },
+        )
+        self.assertEqual(status, 200)
+
+        status, _, denied = self.request_json(
+            "GET",
+            "/v1/admin/protocol-usage",
+            authorized=False,
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(denied, {"error": "Invalid or missing device token"})
+
+        status, _, invalid = self.request_json(
+            "GET",
+            "/v1/admin/protocol-usage?days=0",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(invalid, {"error": "days must be between 1 and 90"})
+
+        status, _, payload = self.request_json(
+            "GET",
+            "/v2/admin/protocol-usage?days=1",
+        )
+        self.assertEqual(status, 200)
+        usage = payload["data"]["usage"]  # type: ignore[index]
+        rows = usage["rows"]  # type: ignore[index]
+        self.assertTrue(
+            any(
+                row["protocol_version"] == "v2"
+                and row["route_family"] == "query_text"
+                and row["method"] == "POST"
+                and row["status_class"] == "2xx"
+                and row["client_name"] == "android"
+                and row["client_version"] == "0.1.0"
+                and row["request_count"] == 1
+                for row in rows
+            )
+        )
+        self.assertTrue(
+            any(
+                row["route_family"] == "health"
+                and row["client_name"] == "unknown"
+                and row["client_version"] == "unknown"
+                for row in rows
+            )
+        )
+        self.assertEqual(
+            usage["privacy"],  # type: ignore[index]
+            {
+                "aggregate_only": True,
+                "content_collected": False,
+                "device_ids_collected": False,
+                "query_parameters_collected": False,
+            },
+        )
+
+        status, headers, _ = self.request("OPTIONS", "/v2/query_text", authorized=False)
+        self.assertEqual(status, 204)
+        allowed = headers["Access-Control-Allow-Headers"]
+        self.assertIn("X-WearabLLM-Client", allowed)
+        self.assertIn("X-WearabLLM-Client-Version", allowed)
 
 
 if __name__ == "__main__":

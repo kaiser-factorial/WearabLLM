@@ -21,6 +21,7 @@ COPY bridge/model_protocol.py ./model_protocol.py
 COPY bridge/observability.py ./observability.py
 COPY bridge/privileged_service.py ./privileged_service.py
 COPY bridge/provider_adapters.py ./provider_adapters.py
+COPY bridge/protocol_usage.py ./protocol_usage.py
 COPY bridge/source_code.py ./source_code.py
 COPY bridge/sphere_tools.py ./sphere_tools.py
 COPY bridge/tool_activity.py ./tool_activity.py

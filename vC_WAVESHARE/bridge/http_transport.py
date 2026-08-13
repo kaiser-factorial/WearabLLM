@@ -29,6 +29,11 @@ from observability import (
 )
 from v2_protocol import error_envelope as v2_error_envelope
 from v2_protocol import success_envelope as v2_success_envelope
+from protocol_usage import (
+    CLIENT_NAME_HEADER,
+    CLIENT_VERSION_HEADER,
+    route_family as usage_route_family,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +68,10 @@ GET_ROUTES = {
     ),
     "/v1/admin/catalog": Route(
         "_handle_admin_catalog",
+        privileged_operation=PrivilegedOperation.ADMIN_READ,
+    ),
+    "/v1/admin/protocol-usage": Route(
+        "_handle_protocol_usage",
         privileged_operation=PrivilegedOperation.ADMIN_READ,
     ),
     "/v1/interactions": Route("_handle_list_interactions"),
@@ -210,6 +219,10 @@ def make_handler(
             self._request_started = time.monotonic()
             self._response_logged = False
             self._request_route = urllib.parse.urlsplit(self.path).path
+            self._protocol_version = 2 if self._request_route.startswith("/v2/") else 1
+            self._request_route_family = "preflight" if self.command == "OPTIONS" else "unknown"
+            self._request_client_name = self.headers.get(CLIENT_NAME_HEADER, "")
+            self._request_client_version = self.headers.get(CLIENT_VERSION_HEADER, "")
             length_raw = self.headers.get("Content-Length", "")
             self._request_bytes = int(length_raw) if length_raw.isdecimal() else None
             self._request_authenticated = False
@@ -246,6 +259,24 @@ def make_handler(
                 return
             self._response_logged = True
             started = getattr(self, "_request_started", time.monotonic())
+            try:
+                record_usage = getattr(state, "record_protocol_usage", None)
+                if callable(record_usage):
+                    identified = bool(getattr(self, "_request_authenticated", False))
+                    record_usage(
+                        protocol_version=getattr(self, "_protocol_version", 1),
+                        route_family_value=getattr(self, "_request_route_family", "unknown"),
+                        method=self.command,
+                        status=int(status),
+                        client_name=(
+                            getattr(self, "_request_client_name", "") if identified else ""
+                        ),
+                        client_version=(
+                            getattr(self, "_request_client_version", "") if identified else ""
+                        ),
+                    )
+            except Exception as exc:
+                self._emit_exception("http.protocol_usage_record_failed", exc, level="warning")
             self._emit_event(
                 "http.request_complete",
                 level="warning" if int(status) >= 400 else "info",
@@ -304,6 +335,9 @@ def make_handler(
                 matched.protocol_version
                 if matched is not None
                 else 2 if parsed.path == "/v2" or parsed.path.startswith("/v2/") else 1
+            )
+            self._request_route_family = usage_route_family(
+                matched.endpoint if matched is not None else None
             )
             authorized = self._is_authorized()
             self._request_authenticated = authorized
@@ -376,6 +410,23 @@ def make_handler(
                     HTTPStatus.BAD_GATEWAY,
                     "OpenAI catalog request failed",
                 )
+
+        def _handle_protocol_usage(self, parsed: urllib.parse.SplitResult) -> None:
+            params = urllib.parse.parse_qs(parsed.query)
+            raw_days = params.get("days", ["30"])[0]
+            if not raw_days.isdecimal() or not 1 <= int(raw_days) <= 90:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "days must be between 1 and 90")
+                return
+            try:
+                usage = state.protocol_usage_snapshot(days=int(raw_days))
+            except Exception as exc:
+                self._emit_exception("http.protocol_usage_snapshot_failed", exc)
+                self._send_error_json(
+                    HTTPStatus.BAD_GATEWAY,
+                    "Protocol usage snapshot unavailable",
+                )
+                return
+            self._send_json({"ok": True, "usage": usage})
 
         def _handle_list_interactions(self, parsed: urllib.parse.SplitResult) -> None:
             params = urllib.parse.parse_qs(parsed.query)
@@ -1012,7 +1063,11 @@ def make_handler(
         def _send_cors_headers(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-WearabLLM-Device-Token, X-WearabLLM-Device-Id")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, X-WearabLLM-Device-Token, X-WearabLLM-Device-Id, "
+                f"{CLIENT_NAME_HEADER}, {CLIENT_VERSION_HEADER}",
+            )
             self.send_header("Access-Control-Expose-Headers", REQUEST_ID_HEADER)
 
         def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:

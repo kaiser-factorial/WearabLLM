@@ -247,7 +247,10 @@ export interface BridgeBenchSummary {
 }
 
 function bridgeHeaders(deviceToken: string, contentType = false, deviceId = ''): Record<string, string> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    'X-WearabLLM-Client': 'android',
+    'X-WearabLLM-Client-Version': '0.1.0',
+  };
   if (contentType) {
     headers['Content-Type'] = 'application/json';
   }

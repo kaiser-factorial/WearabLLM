@@ -499,7 +499,11 @@ class ConsoleHandler(SimpleHTTPRequestHandler):
         self._forward(request)
 
     def _bridge_headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "X-WearabLLM-Client": "web-console",
+            "X-WearabLLM-Client-Version": "0.1.0",
+        }
         if self.bridge_token:
             headers["X-WearabLLM-Device-Token"] = self.bridge_token
         return headers

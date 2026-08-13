@@ -55,6 +55,7 @@ class SourceManifestTest(unittest.TestCase):
         self.assertIn("bridge/observability.py", relative)
         self.assertIn("bridge/privileged_service.py", relative)
         self.assertIn("bridge/provider_adapters.py", relative)
+        self.assertIn("bridge/protocol_usage.py", relative)
         self.assertIn("bridge/tool_activity.py", relative)
         self.assertIn("bridge/v2_protocol.py", relative)
         self.assertIn("COPY bridge/bridge_contracts.py ./bridge_contracts.py", dockerfile)
@@ -69,6 +70,7 @@ class SourceManifestTest(unittest.TestCase):
         self.assertIn("COPY bridge/observability.py ./observability.py", dockerfile)
         self.assertIn("COPY bridge/privileged_service.py ./privileged_service.py", dockerfile)
         self.assertIn("COPY bridge/provider_adapters.py ./provider_adapters.py", dockerfile)
+        self.assertIn("COPY bridge/protocol_usage.py ./protocol_usage.py", dockerfile)
         self.assertIn("COPY bridge/tool_activity.py ./tool_activity.py", dockerfile)
         self.assertIn("COPY bridge/v2_protocol.py ./v2_protocol.py", dockerfile)
 

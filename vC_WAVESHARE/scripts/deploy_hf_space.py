@@ -113,6 +113,7 @@ def staged_space(destination: Path) -> list[Path]:
         "observability.py",
         "privileged_service.py",
         "provider_adapters.py",
+        "protocol_usage.py",
         "source_code.py",
         "sphere_tools.py",
         "tool_activity.py",

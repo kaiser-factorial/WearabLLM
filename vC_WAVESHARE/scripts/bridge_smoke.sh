@@ -21,6 +21,10 @@ BASE_URL="${1:-${WEARABLLM_BRIDGE_BASE_URL:-${CONFIGURED_BASE_URL}}}"
 BASE_URL="${BASE_URL%/}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wearabllm-bridge-smoke.XXXXXX")"
 QUEUE_IDEMPOTENCY_KEY="bridge-smoke-queue-$(date +%s)-$$"
+CLIENT_HEADERS=(
+    -H "X-WearabLLM-Client: bench-smoke"
+    -H "X-WearabLLM-Client-Version: 0.1.0"
+)
 
 cleanup() {
     rm -rf "${TMP_DIR}"
@@ -29,7 +33,7 @@ trap cleanup EXIT
 
 echo "Bridge base URL: ${BASE_URL}"
 
-curl -fsS "${BASE_URL}/health" -o "${TMP_DIR}/health.json"
+curl -fsS "${CLIENT_HEADERS[@]}" "${BASE_URL}/health" -o "${TMP_DIR}/health.json"
 BRIDGE_DRY_RUN="$(python3 - "${TMP_DIR}/health.json" <<'PY'
 import json
 import sys
@@ -48,7 +52,7 @@ echo "${BRIDGE_DRY_RUN}" | sed -n '/^health ok:/p'
 DRY_RUN_FLAG="$(echo "${BRIDGE_DRY_RUN}" | sed -n 's/^dry_run=//p' | tail -n 1)"
 MAX_AUDIO_BYTES="$(echo "${BRIDGE_DRY_RUN}" | sed -n 's/^max_audio_bytes=//p' | tail -n 1)"
 
-curl -fsS "${BASE_URL}/v2/health" -o "${TMP_DIR}/health_v2.json"
+curl -fsS "${CLIENT_HEADERS[@]}" "${BASE_URL}/v2/health" -o "${TMP_DIR}/health_v2.json"
 python3 - "${TMP_DIR}/health_v2.json" <<'PY'
 import json
 import sys
@@ -81,6 +85,7 @@ PY
 
 if [ "${DRY_RUN_FLAG}" = "1" ] || [ "${WEARABLLM_SMOKE_AUDIO:-0}" = "1" ]; then
     curl -fsS \
+        "${CLIENT_HEADERS[@]}" \
         -H "Content-Type: audio/wav" \
         --data-binary @"${TMP_DIR}/query.wav" \
         "${BASE_URL}/v1/query" \
@@ -102,7 +107,7 @@ assert wav_info.get("channels") == 1, wav_info
 assert wav_info.get("appears_silent") is False, wav_info
 print("query audio ok:", payload["command"], json.dumps(wav_info, sort_keys=True))
 PY
-    curl -fsS "${BASE_URL}/health" -o "${TMP_DIR}/health_after_audio.json"
+    curl -fsS "${CLIENT_HEADERS[@]}" "${BASE_URL}/health" -o "${TMP_DIR}/health_after_audio.json"
     python3 - "${TMP_DIR}/health_after_audio.json" <<'PY'
 import json
 import sys
@@ -132,6 +137,7 @@ path.write_bytes(b"0" * (limit + 1))
 PY
         HTTP_STATUS="$(
             curl -sS \
+                "${CLIENT_HEADERS[@]}" \
                 -H "Content-Type: audio/wav" \
                 --data-binary @"${TMP_DIR}/oversized.bin" \
                 -o "${TMP_DIR}/oversized.json" \
@@ -157,6 +163,7 @@ else
 fi
 
 curl -fsS \
+    "${CLIENT_HEADERS[@]}" \
     -H "Content-Type: application/json" \
     -d '{"transcript":"bridge smoke test"}' \
     "${BASE_URL}/v2/query_text" \
@@ -179,6 +186,7 @@ print("query_text ok:", payload["command"], payload["reply"][:80])
 PY
 
 curl -fsS \
+    "${CLIENT_HEADERS[@]}" \
     -H "Content-Type: application/json" \
     -d "{\"transcript\":\"queue smoke test\",\"origin_device_id\":\"wearabllm-smoke\",\"target_device_id\":\"wearabllm-esp32\",\"idempotency_key\":\"${QUEUE_IDEMPOTENCY_KEY}\"}" \
     "${BASE_URL}/v2/interactions" \
@@ -202,6 +210,7 @@ PY
 )"
 
 curl -fsS \
+    "${CLIENT_HEADERS[@]}" \
     -H "X-WearabLLM-Device-Id: wearabllm-esp32" \
     "${BASE_URL}/v1/devices/wearabllm-esp32/actions" \
     -o "${TMP_DIR}/claimed_action.json"
@@ -220,6 +229,7 @@ print("queued interaction claimed:", action["id"])
 PY
 
 curl -fsS \
+    "${CLIENT_HEADERS[@]}" \
     -H "Content-Type: application/json" \
     -H "X-WearabLLM-Device-Id: wearabllm-esp32" \
     -d '{"status":"played"}' \
@@ -239,6 +249,7 @@ print("queued interaction acknowledged:", action["status"])
 PY
 
 curl -fsS \
+    "${CLIENT_HEADERS[@]}" \
     -H "Content-Type: application/json" \
     -d '{"text":"bridge smoke test tts"}' \
     "${BASE_URL}/v2/tts" \

@@ -16,6 +16,11 @@ It is descriptive, not a proposal. Exact representative shapes are frozen by
   `hmac.compare_digest`.
 - `X-WearabLLM-Device-Id` accepts only `[A-Za-z0-9._-]{1,80}`. If absent, the
   configured fallback device ID is used.
+- Clients may self-identify for aggregate migration evidence with
+  `X-WearabLLM-Client` and `X-WearabLLM-Client-Version`. These headers are not
+  authentication and are accepted only from a fixed client vocabulary with a
+  release-shaped version on an authenticated request; other or unauthenticated
+  values become `unknown`.
 - JSON is ASCII-encoded and returned as `application/json`. TTS returns
   `audio/wav`.
 - Every response now includes a server-generated `X-Request-Id`; response
@@ -36,6 +41,7 @@ It is descriptive, not a proposal. Exact representative shapes are frozen by
 | `GET /health` | Web, Android, scripts, operations | Public | None | `{ok, service, config}` | Runtime/server availability |
 | `GET /v1/admin/config` | Web dashboard | Token | None | `{ok, config}` | 401 |
 | `GET /v1/admin/catalog` | Web dashboard | Token | None | `{ok, catalog}` | 401, 502 bounded provider failure |
+| `GET /v1/admin/protocol-usage` | Operations | Token/admin policy | `days`, decimal 1..90 | `{ok, usage}` with aggregate-only rows | 400, 401, 502 bounded storage failure |
 | `GET /v1/interactions` | Web dashboard | Token | `target_device_id`; decimal `limit`, default 100 | `{ok, actions}` | 400 invalid limit/target, 401 |
 | `GET /v1/interactions/{action_uuid}` | Web and Android status views | Token | UUID path | `{ok, action}` | 400 invalid action ID, 401, 404 |
 | `GET /v1/sensors` | Web dashboard and model-support tooling | Token | optional `device_id` | `{ok, devices}` | 400 invalid device ID, 401 |
