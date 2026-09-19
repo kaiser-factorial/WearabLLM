@@ -1,0 +1,5 @@
+# Single-package Expo app. Not a monorepo. pnpm 11 stores allowBuilds here.
+allowBuilds:
+  esbuild: true
+  expo: true
+  expo-modules-core: true

@@ -2,13 +2,14 @@
   "name": "wearabllm-v3-app",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.7.0",
   "main": "index.js",
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
     "bundle:android": "expo export --platform android --output-dir dist/android",
     "typecheck": "tsc --noEmit",
-    "test:protocol": "npx tsx src/protocol/bridgeClient.test.ts",
+    "test:protocol": "tsx src/protocol/bridgeClient.test.ts",
     "ios": "expo run:ios"
   },
   "dependencies": {

@@ -122,8 +122,8 @@ OPENAI_API_KEY=test-key bridge/.venv/bin/python -m unittest discover \
 
 # Android
 cd app
-npm run typecheck
-npm run test:protocol
+pnpm typecheck
+pnpm test:protocol
 
 # Firmware
 cd ..

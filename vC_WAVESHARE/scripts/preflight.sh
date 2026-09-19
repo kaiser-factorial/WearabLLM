@@ -156,10 +156,10 @@ if [ "${RUN_APP}" = "1" ]; then
     step "App protocol and type checks"
     cd "${V3_DIR}/app"
     if [ ! -d "node_modules" ]; then
-        npm ci
+        pnpm install --frozen-lockfile
     fi
-    npm run test:protocol
-    npm run typecheck
+    pnpm test:protocol
+    pnpm typecheck
     cd "${REPO_ROOT}"
     node vC_WAVESHARE/transcript_viewer/tests/test_bridge_protocol.js
     node vC_WAVESHARE/transcript_viewer/tests/test_sensor_protocol.js

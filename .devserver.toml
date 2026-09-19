@@ -2,7 +2,8 @@ default = "app"
 
 [targets.app]
 dir = "vC_WAVESHARE/app"
-cmd = "npm run start"
+cmd = "pnpm start"
+port = 8081
 health_path = "/"
 
 [targets.bridge]

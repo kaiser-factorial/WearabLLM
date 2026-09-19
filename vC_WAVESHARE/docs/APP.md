@@ -43,25 +43,25 @@ limits, and speaker configuration remain in ignored firmware config.
 
 ```bash
 cd vC_WAVESHARE/app
-npm install
+pnpm install
 export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
-npm run android
+pnpm android
 ```
 
 The generated `android/` tree is ignored. Recreate it with:
 
 ```bash
-npx expo prebuild --platform android
+pnpm exec expo prebuild --platform android
 ```
 
 Validation:
 
 ```bash
-npm run typecheck
-npm run test:protocol
-npm run bundle:android
+pnpm typecheck
+pnpm test:protocol
+pnpm bundle:android
 ```
 
 See `../app/README.md` for current release-build and connection details.

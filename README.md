@@ -189,7 +189,7 @@ Repository generations use letters (`vA`, `vB`, `vC`). HTTP paths such as
 Choose the pieces relevant to the surface you are working on:
 
 - Python 3.12 for the hosted/local bridge
-- Node.js and npm for Android
+- Node.js and pnpm 11+ for Android (`vC_WAVESHARE/app`; `node-linker=hoisted`)
 - JDK 17 and Android SDK/NDK for native Android builds
 - ESP-IDF 5.5 for firmware
 - Supabase CLI for database migrations
@@ -212,9 +212,9 @@ Android:
 
 ```bash
 cd vC_WAVESHARE/app
-npm install
-npm run typecheck
-npm run test:protocol
+pnpm install
+pnpm typecheck
+pnpm test:protocol
 ```
 
 ### Run the local dashboard
@@ -247,7 +247,7 @@ cd vC_WAVESHARE/app
 export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
-npm run android
+pnpm android
 ```
 
 Fresh installs default to the hosted Sphere URL. The user still supplies the

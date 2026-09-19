@@ -47,10 +47,10 @@ the phone. `localhost` refers to the phone itself, not the development laptop.
 
 ```bash
 cd vC_WAVESHARE/app
-npm install
-npm run typecheck
-npm run test:protocol
-npm run android
+pnpm install
+pnpm typecheck
+pnpm test:protocol
+pnpm android
 ```
 
 Native Android requires JDK 17 and a complete Android SDK/NDK:
@@ -65,7 +65,7 @@ The native `android/` directory is generated and ignored. Recreate it when
 needed:
 
 ```bash
-npx expo prebuild --platform android
+pnpm exec expo prebuild --platform android
 ```
 
 Build a bundled release artifact from the generated project:
@@ -90,4 +90,7 @@ future work.
 | Future wearable | `wearabllm-wearable` |
 
 Protocol behavior lives in `src/protocol/bridgeClient.ts` and is covered by
-`npm run test:protocol`.
+`pnpm test:protocol`. This app uses **pnpm** with `node-linker=hoisted` (Expo/Metro
+needs a flat `node_modules`). A 1.7 GB `node_modules` is almost always Gradle
+intermediates left in `expo-modules-core/android/build` after `pnpm android` —
+delete `node_modules` and reinstall rather than treating it as JS bloat.

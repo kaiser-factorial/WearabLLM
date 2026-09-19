@@ -159,10 +159,10 @@ zoom-out, messages remain inside a centered 1,180px reading lane.
 
 ```bash
 cd app
-npm install
-npm run typecheck
-npm run test:protocol
-npm run android
+pnpm install
+pnpm typecheck
+pnpm test:protocol
+pnpm android
 ```
 
 The Android native directory is generated and ignored. See `app/README.md` for
